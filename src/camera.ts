@@ -357,7 +357,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
         // Migrate older boolean value to the new multi-select format.
         this.migrateDispatchEventsSetting();
-        this.migrateDebugEventLogsSetting();
 
         // Initialize Baichuan API
         await this.ensureClient();
@@ -1150,21 +1149,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         if (typeof cur === 'boolean') {
             (this.storageSettings.values as any).dispatchEvents = cur ? ['motion', 'objects'] : [];
         }
-    }
-
-    private migrateDebugEventLogsSetting(): void {
-        // Back-compat: old boolean debugEventLogs -> new debugLogs choice "eventLogs".
-        const legacy = (this.storageSettings.values as any).debugEventLogs;
-        if (typeof legacy !== 'boolean') return;
-
-        const sel = new Set(this.normalizeDebugLogs((this.storageSettings.values as any).debugLogs));
-        if (legacy) {
-            sel.add('eventLogs');
-            (this.storageSettings.values as any).debugLogs = Array.from(sel);
-        }
-
-        // Keep storage clean-ish (even if key may remain persisted).
-        (this.storageSettings.values as any).debugEventLogs = undefined;
     }
 
     private scheduleApplyEventDispatchSettings(): void {
