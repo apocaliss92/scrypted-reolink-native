@@ -14,7 +14,11 @@ import {
 } from './rfc4571-native';
 
 export interface StreamManagerOptions {
-    ensureClient: () => Promise<ReolinkBaichuanApi>;
+    /**
+     * Creates a dedicated Baichuan session for streaming.
+     * Required to support concurrent main+ext streams on firmwares where streamType overlaps.
+     */
+    createStreamClient: () => Promise<ReolinkBaichuanApi>;
     getLogger: () => Console;
 }
 
@@ -111,7 +115,7 @@ export class StreamManager {
         }
 
         const createPromise = (async () => {
-            const client = await this.opts.ensureClient();
+            const client = await this.opts.createStreamClient();
             const cached = this.rtspServers.get(streamKey);
 
             if (cached) {
@@ -640,6 +644,12 @@ export class StreamManager {
                     // ignore
                 }
                 try {
+                    await (cached as any).api?.close?.();
+                }
+                catch {
+                    // ignore
+                }
+                try {
                     cached.server.close();
                 }
                 catch {
@@ -648,7 +658,7 @@ export class StreamManager {
                 this.nativeRfcServers.delete(streamKey);
             }
 
-            const api = await this.opts.ensureClient();
+            const api = await this.opts.createStreamClient();
             const { BaichuanVideoStream } = await import('@apocaliss92/reolink-baichuan-js');
             if (!this.loggedBaichuanLibInfo) {
                 this.loggedBaichuanLibInfo = true;
@@ -882,6 +892,13 @@ export class StreamManager {
                 catch {
                     // ignore
                 }
+
+                try {
+                    await api.close();
+                }
+                catch {
+                    // ignore
+                }
                 try {
                     server.close();
                 }
@@ -985,7 +1002,8 @@ export class StreamManager {
                 throw new Error('Failed to bind native RFC TCP server');
 
             const audioInfo = opusAudio ? { codec: 'opus', sampleRate: opusAudio.sampleRate, channels: opusAudio.channels } : undefined;
-            this.nativeRfcServers.set(streamKey, { server, host, port, sdp, videoType: keyframe.videoType, audio: audioInfo, videoStream, muxer, audioFfmpeg, audioUdp });
+            // Store the Baichuan API instance to close it on teardown/recreate.
+            this.nativeRfcServers.set(streamKey, { server, host, port, sdp, videoType: keyframe.videoType, audio: audioInfo, videoStream, muxer, audioFfmpeg, audioUdp, api } as any);
             server.once('close', () => {
                 const current = this.nativeRfcServers.get(streamKey);
                 if (current?.server === server) this.nativeRfcServers.delete(streamKey);

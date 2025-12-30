@@ -261,7 +261,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         super(nativeId);
 
         this.streamManager = new StreamManager({
-            ensureClient: () => this.ensureClient(),
+            createStreamClient: () => this.createStreamClient(),
             getLogger: () => this.getLogger(),
         });
 
@@ -448,6 +448,25 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 this.baichuanInitPromise = undefined;
             }
         }
+    }
+
+    private async createStreamClient(): Promise<ReolinkBaichuanApi> {
+        const { ipAddress, username, password } = this.storageSettings.values;
+        if (!ipAddress || !username || !password) {
+            throw new Error('Missing camera credentials');
+        }
+
+        const { ReolinkBaichuanApi } = await import('@apocaliss92/reolink-baichuan-js');
+        const debugOptions = this.getBaichuanDebugOptions();
+        const api = new ReolinkBaichuanApi({
+            host: ipAddress,
+            username,
+            password,
+            logger: this.console,
+            ...(debugOptions ? { debugOptions } : {}),
+        });
+        await api.login();
+        return api;
     }
 
     getClient(): ReolinkBaichuanApi | undefined {
@@ -1305,7 +1324,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 const name = profile === 'main'
                     ? 'Main Stream'
                     : profile === 'sub'
-                        ? 'Substream'
+                        ? 'Sub Stream'
                         : 'Ext Stream';
 
                 streams.push({
