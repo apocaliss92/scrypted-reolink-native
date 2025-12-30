@@ -1,12 +1,6 @@
-import type { PtzPreset, ReolinkBaichuanApi } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { PtzPreset } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 
 import type { ReolinkNativeCamera } from "./camera";
-
-export type PresetsStorage = {
-    values: {
-        cachedPresets: unknown;
-    };
-};
 
 export type PtzCapabilitiesShape = {
     presets?: Record<string, string>;
@@ -14,23 +8,62 @@ export type PtzCapabilitiesShape = {
 };
 
 export class ReolinkPtzPresets {
-    constructor(private camera: ReolinkNativeCamera) {}
+    constructor(private camera: ReolinkNativeCamera) { }
 
-    private get storageSettings(): PresetsStorage {
-        return this.camera.storageSettings as any;
+    private get storageSettings() {
+        return this.camera.storageSettings;
     }
 
     private getPtzCapabilitiesStore(): PtzCapabilitiesShape | undefined {
-        return (this.camera as any).ptzCapabilities as PtzCapabilitiesShape | undefined;
+        return this.camera.ptzCapabilities as PtzCapabilitiesShape | undefined;
     }
 
     private setPtzCapabilitiesStore(next: PtzCapabilitiesShape): void {
-        (this.camera as any).ptzCapabilities = next as any;
+        this.camera.ptzCapabilities = next;
+    }
+
+    private parsePresetIdFromSettingValue(value: string): number | undefined {
+        const s = String(value ?? '').trim();
+        if (!s) return undefined;
+        const idPart = s.includes('=') ? s.split('=')[0] : s;
+        const id = Number(idPart);
+        return Number.isFinite(id) ? id : undefined;
+    }
+
+    private syncEnabledPresetsSettingAndCaps(available: PtzPreset[]): void {
+        const enabled = (this.storageSettings.values.presets ?? []) as string[];
+
+        // If the user hasn't configured the "presets" setting, keep the auto-discovered preset list
+        // (setCachedPtzPresets already applied it).
+        if (!enabled.length) return;
+
+        const nameById = new Map<number, string>(available.map((p) => [p.id, p.name]));
+
+        // Apply only enabled presets mapping, but do NOT prune or rewrite the setting.
+        // Prefer user-provided names ("id=name"), fallback to camera-provided name.
+        const mapped: Record<string, string> = {};
+        for (const entry of enabled) {
+            const id = this.parsePresetIdFromSettingValue(entry);
+            if (id === undefined) continue;
+
+            const providedName = entry.includes('=')
+                ? entry.substring(entry.indexOf('=') + 1).trim()
+                : '';
+            const name = providedName || nameById.get(id);
+            if (!name) continue;
+
+            mapped[String(id)] = name;
+        }
+
+        this.setPtzCapabilitiesStore({
+            ...(this.getPtzCapabilitiesStore() ?? {}),
+            presets: mapped,
+        });
     }
 
     setCachedPtzPresets(presets: PtzPreset[] | undefined): void {
         const list = Array.isArray(presets) ? presets : [];
-        this.storageSettings.values.cachedPresets = list as any;
+        this.storageSettings.values.cachedPresets = list;
 
         const mapped: Record<string, string> = {};
         for (const p of list) {
@@ -44,7 +77,7 @@ export class ReolinkPtzPresets {
     }
 
     getCachedPtzPresets(): PtzPreset[] {
-        const v = this.storageSettings.values.cachedPresets as any;
+        const v = this.storageSettings.values.cachedPresets;
         return Array.isArray(v) ? (v as PtzPreset[]) : [];
     }
 
@@ -61,6 +94,7 @@ export class ReolinkPtzPresets {
         const channel = this.camera.getRtspChannel();
         const presets = await client.getPtzPresets(channel);
         this.setCachedPtzPresets(presets);
+        this.syncEnabledPresetsSettingAndCaps(presets);
         return presets;
     }
 
@@ -76,14 +110,57 @@ export class ReolinkPtzPresets {
         const channel = this.camera.getRtspChannel();
         const trimmed = String(name ?? '').trim();
         if (!trimmed) throw new Error('Preset name is required');
-
         const existing = await client.getPtzPresets(channel);
-        const id = presetId ?? this.nextFreePresetId(existing);
+        const existingIds = new Set(existing.map((p) => p.id));
 
-        await client.setPtzPreset(channel, id, trimmed);
-        const updated = await client.getPtzPresets(channel);
-        this.setCachedPtzPresets(updated);
-        return { id, name: trimmed };
+        const maxAttempts = 5;
+        let lastUpdated: PtzPreset[] = [];
+        let chosenId: number | undefined;
+
+        const initialId = presetId ?? this.nextFreePresetId(existing);
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            const id = presetId ?? (initialId + attempt);
+            if (!presetId && existingIds.has(id)) continue;
+
+            await client.setPtzPreset(channel, id, trimmed);
+
+            const updated = await client.getPtzPresets(channel);
+            lastUpdated = updated;
+
+            const persisted = updated.some((p) => p.id === id);
+            if (persisted) {
+                chosenId = id;
+                break;
+            }
+
+            // If the camera isn't exposing any presets at all, it may be keeping low IDs reserved/disabled.
+            // Try the next ID.
+        }
+
+        if (chosenId === undefined) {
+            this.setCachedPtzPresets(lastUpdated);
+            this.syncEnabledPresetsSettingAndCaps(lastUpdated);
+            throw new Error(
+                `PTZ preset save did not persist (camera returned an empty/unchanged preset list). Try a different preset id.`
+            );
+        }
+
+        this.setCachedPtzPresets(lastUpdated);
+
+        // If the "presets" setting is in use, auto-add the newly created preset so it becomes
+        // immediately selectable/visible in the UI. If it's empty/unconfigured, don't start using it.
+        const enabled = (this.storageSettings.values.presets ?? []) as string[];
+        if (enabled.length) {
+            const already = enabled.some((e) => this.parsePresetIdFromSettingValue(e) === chosenId);
+            if (!already) {
+                enabled.push(`${chosenId}=${trimmed}`);
+                this.storageSettings.values.presets = enabled;
+            }
+        }
+
+        // Re-apply enabled mapping (so custom names/filters remain effective after setCachedPtzPresets).
+        this.syncEnabledPresetsSettingAndCaps(lastUpdated);
+        return { id: chosenId, name: trimmed };
     }
 
     /** Overwrite an existing preset with the current PTZ position (and keep its current name). */
@@ -104,6 +181,16 @@ export class ReolinkPtzPresets {
         const client = await this.camera.ensureClient();
         const channel = this.camera.getRtspChannel();
         await client.deletePtzPreset(channel, presetId);
+
+        // Keep enabled preset list clean (remove deleted id), but do not rewrite names for others.
+        const enabledRaw = this.storageSettings.values.presets as unknown;
+        if (Array.isArray(enabledRaw) && enabledRaw.length) {
+            const filtered = (enabledRaw as unknown[])
+                .filter((v) => typeof v === 'string')
+                .filter((e) => this.parsePresetIdFromSettingValue(e as string) !== presetId) as string[];
+            this.storageSettings.values.presets = filtered;
+        }
+
         await this.refreshPtzPresets();
     }
 

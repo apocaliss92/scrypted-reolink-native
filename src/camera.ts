@@ -255,7 +255,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         },
         presets: {
             group: 'PTZ',
-            title: 'Presets',
+            title: 'Presets to enable',
             description: 'PTZ Presets in the format "id=name". Where id is the PTZ Preset identifier and name is a friendly name.',
             multiple: true,
             defaultValue: [],
@@ -276,6 +276,103 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 return Object.entries(presets).map(([key, name]) => key + '=' + name);
             },
         },
+        ptzMoveDurationMs: {
+            title: 'PTZ Move Duration (ms)',
+            description: 'How long a PTZ command moves before sending stop. Higher = more movement per click.',
+            type: 'number',
+            defaultValue: 300,
+            group: 'PTZ',
+        },
+        ptzZoomStep: {
+            group: 'PTZ',
+            title: 'PTZ Zoom Step',
+            description: 'How much to change zoom per zoom command (in zoom factor units, where 1.0 is normal).',
+            type: 'number',
+            defaultValue: 0.1,
+        },
+        ptzCreatePreset: {
+            group: 'PTZ',
+            title: 'Create Preset',
+            description: 'Enter a name and press Save to create a new PTZ preset at the current position.',
+            type: 'string',
+            placeholder: 'e.g. Door',
+            defaultValue: '',
+            onPut: async (_ov, value) => {
+                const name = String(value ?? '').trim();
+                if (!name) {
+                    // Cleanup if user saved whitespace.
+                    if (String(value ?? '') !== '') {
+                        await this.storageSettings.putSetting('ptzCreatePreset', '');
+                    }
+                    return;
+                }
+
+                this.markActivity();
+                const logger = this.getLogger();
+                logger.log(`PTZ presets: create preset requested (name=${name})`);
+
+                const preset = await this.withBaichuanRetry(async () => await this.ptzPresets.createPtzPreset(name));
+                const selection = `${preset.id}=${preset.name}`;
+
+                // Auto-select created preset.
+                await this.storageSettings.putSetting('ptzSelectedPreset', selection);
+                // Cleanup input field.
+                await this.storageSettings.putSetting('ptzCreatePreset', '');
+
+                logger.log(`PTZ presets: created preset id=${preset.id} name=${preset.name}`);
+            },
+        },
+        ptzSelectedPreset: {
+            group: 'PTZ',
+            title: 'Selected Preset',
+            description: 'Select the preset to update or delete. Format: "id=name".',
+            type: 'string',
+            combobox: false,
+            immediate: true,
+        },
+        ptzUpdateSelectedPreset: {
+            group: 'PTZ',
+            title: 'Update Selected Preset Position',
+            description: 'Overwrite the selected preset with the current PTZ position.',
+            type: 'button',
+            immediate: true,
+            onPut: async () => {
+                const presetId = this.getSelectedPresetId();
+                if (presetId === undefined) {
+                    throw new Error('No preset selected');
+                }
+
+                this.markActivity();
+                const logger = this.getLogger();
+                logger.log(`PTZ presets: update position requested (presetId=${presetId})`);
+
+                await this.withBaichuanRetry(async () => await this.ptzPresets.updatePtzPresetToCurrentPosition(presetId));
+                logger.log(`PTZ presets: update position ok (presetId=${presetId})`);
+            },
+        },
+        ptzDeleteSelectedPreset: {
+            group: 'PTZ',
+            title: 'Delete Selected Preset',
+            description: 'Delete the selected preset (firmware dependent).',
+            type: 'button',
+            immediate: true,
+            onPut: async () => {
+                const presetId = this.getSelectedPresetId();
+                if (presetId === undefined) {
+                    throw new Error('No preset selected');
+                }
+
+                this.markActivity();
+                const logger = this.getLogger();
+                logger.log(`PTZ presets: delete requested (presetId=${presetId})`);
+
+                await this.withBaichuanRetry(async () => await this.ptzPresets.deletePtzPreset(presetId));
+
+                // If we deleted the selected preset, clear selection.
+                await this.storageSettings.putSetting('ptzSelectedPreset', '');
+                logger.log(`PTZ presets: delete ok (presetId=${presetId})`);
+            },
+        },
         cachedPresets: {
             multiple: true,
             hide: true,
@@ -291,19 +388,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         prebufferSet: {
             type: 'boolean',
             hide: true
-        },
-        ptzMoveDurationMs: {
-            title: 'PTZ Move Duration (ms)',
-            description: 'How long a PTZ command moves before sending stop. Higher = more movement per click.',
-            type: 'number',
-            defaultValue: 500,
-        },
-        ptzZoomStep: {
-            group: 'PTZ',
-            title: 'PTZ Zoom Step',
-            description: 'How much to change zoom per zoom command (in zoom factor units, where 1.0 is normal).',
-            type: 'number',
-            defaultValue: 0.2,
         },
         intercomBlocksPerPayload: {
             subgroup: 'Advanced',
@@ -332,9 +416,23 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             };
         };
 
+        this.storageSettings.settings.ptzSelectedPreset.onGet = async () => {
+            const choices = (this.storageSettings.values.cachedPresets || []).map((preset) => preset.id + '=' + preset.name);
+            return { choices };
+        };
+
         setTimeout(async () => {
             await this.init();
         }, 2000);
+    }
+
+    private getSelectedPresetId(): number | undefined {
+        const s = this.storageSettings.values.ptzSelectedPreset;
+        if (!s) return undefined;
+
+        const idPart = s.includes('=') ? s.split('=')[0] : s;
+        const id = Number(idPart);
+        return Number.isFinite(id) ? id : undefined;
     }
 
     private isRecoverableBaichuanError(e: any): boolean {
