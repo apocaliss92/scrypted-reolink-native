@@ -1,9 +1,68 @@
 import type { BatteryInfo, PtzCommand, ReolinkBaichuanApi, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, Sleep, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
+import sdk, { Brightness, Camera, Device, DeviceProvider, FFmpegInput, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, Sleep, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
-import { createRtspMediaStreamOptions, RtspCamera, RtspSmartCamera, UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
+import { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import ReolinkNativePlugin from "./main";
 import { parseStreamProfileFromId, StreamManager } from './stream-utils';
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+
+class WavDataExtractor {
+    private buffer: Buffer = Buffer.alloc(0);
+    private inData = false;
+    private bytesRemaining: number | undefined;
+
+    push(chunk: Buffer): Buffer[] {
+        if (chunk.length === 0) return [];
+        if (this.inData) {
+            if (this.bytesRemaining === undefined) return [chunk];
+            if (this.bytesRemaining <= 0) return [];
+            const take = Math.min(this.bytesRemaining, chunk.length);
+            this.bytesRemaining -= take;
+            return take > 0 ? [chunk.subarray(0, take)] : [];
+        }
+
+        this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
+        const out: Buffer[] = [];
+
+        // Need RIFF header
+        if (this.buffer.length < 12) return out;
+        if (this.buffer.toString('ascii', 0, 4) !== 'RIFF' || this.buffer.toString('ascii', 8, 12) !== 'WAVE') {
+            // If ffmpeg ever emits garbage, try to resync by finding RIFF.
+            const idx = this.buffer.indexOf(Buffer.from('RIFF'));
+            if (idx === -1) {
+                this.buffer = this.buffer.subarray(Math.max(0, this.buffer.length - 3));
+                return out;
+            }
+            this.buffer = this.buffer.subarray(idx);
+            if (this.buffer.length < 12) return out;
+            if (this.buffer.toString('ascii', 0, 4) !== 'RIFF' || this.buffer.toString('ascii', 8, 12) !== 'WAVE') return out;
+        }
+
+        let offset = 12;
+        while (true) {
+            if (this.buffer.length < offset + 8) return out;
+            const id = this.buffer.toString('ascii', offset, offset + 4);
+            const size = this.buffer.readUInt32LE(offset + 4);
+            const chunkDataStart = offset + 8;
+            const paddedSize = size + (size % 2);
+
+            if (id === 'data') {
+                if (this.buffer.length < chunkDataStart) return out;
+                this.inData = true;
+                // Some streaming WAV writers may use 0xffffffff/0 for unknown size; treat as unbounded.
+                this.bytesRemaining = (size === 0 || size === 0xffffffff) ? undefined : size;
+                const data = this.buffer.subarray(chunkDataStart);
+                this.buffer = Buffer.alloc(0);
+                if (data.length) out.push(data);
+                return out;
+            }
+
+            // Need the full chunk to skip it.
+            if (this.buffer.length < chunkDataStart + paddedSize) return out;
+            offset = chunkDataStart + paddedSize;
+        }
+    }
+}
 
 export const moToB64 = async (mo: MediaObject) => {
     const bufferImage = await sdk.mediaManager.convertMediaObjectToBuffer(mo, 'image/jpeg');
@@ -104,11 +163,15 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     private baichuanApi: ReolinkBaichuanApi | undefined;
     private baichuanInitPromise: Promise<ReolinkBaichuanApi> | undefined;
     private abilities: any;
-    private onvifClient: any;
-    private onvifIntercom: any;
     private lastB64Snapshot: string | undefined;
     private lastSnapshotTaken: number | undefined;
     private streamManager: StreamManager;
+
+    private intercomSession: Awaited<ReturnType<ReolinkBaichuanApi['createTalkSession']>> | undefined;
+    private intercomFfmpeg: ChildProcessWithoutNullStreams | undefined;
+    private intercomWav: WavDataExtractor | undefined;
+    private intercomSendChain: Promise<void> = Promise.resolve();
+    private intercomStopping: Promise<void> | undefined;
 
     storageSettings = new StorageSettings(this, {
         motionTimeout: {
@@ -391,7 +454,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
     getAbilities() {
         if (!this.abilities) {
-            const storedAbilities = this.storageSettings.values.abilities;
+            // this.abilities = 
         }
 
         return this.abilities;
@@ -482,16 +545,150 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     async startIntercom(media: MediaObject): Promise<void> {
-        if (!this.onvifIntercom.url) {
-            const client = await this.getOnvifClient();
-            const streamUrl = await client.getStreamUrl();
-            this.onvifIntercom.url = streamUrl;
+        const logger = this.getLogger();
+        const channel = this.getRtspChannel();
+
+        // Ensure only one intercom session at a time.
+        await this.stopIntercom();
+
+        const api = await this.ensureClient();
+
+        const session = await this.withBaichuanRetry(async () => {
+            return await api.createTalkSession(channel);
+        });
+        this.intercomSession = session;
+
+        const { sampleRate, soundTrack } = session.info.audioConfig;
+        const fullBlockSize = session.info.fullBlockSize;
+        if (!Number.isFinite(fullBlockSize) || fullBlockSize <= 0) {
+            await this.stopIntercom();
+            throw new Error(`Invalid talk block size: ${fullBlockSize}`);
         }
-        return this.onvifIntercom.startIntercom(media);
+
+        const ffmpegInput = await sdk.mediaManager.convertMediaObjectToJSON<FFmpegInput>(media, ScryptedMimeTypes.FFmpegInput);
+        const inputArgs = (ffmpegInput as any)?.inputArguments as string[] | undefined;
+        const inputUrl = (ffmpegInput as any)?.url as string | undefined;
+        if (!inputUrl) {
+            await this.stopIntercom();
+            throw new Error('Intercom media did not provide a valid FFmpeg input url');
+        }
+
+        // Pipe: input media -> ffmpeg -> WAV(ADPCM IMA) -> strip WAV -> talkSession.sendAudio()
+        const ffmpegArgs: string[] = [
+            '-hide_banner',
+            '-loglevel', 'error',
+            ...(Array.isArray(inputArgs) ? inputArgs : []),
+            '-i', inputUrl,
+            '-vn',
+            '-ac', soundTrack?.toLowerCase() === 'stereo' ? '2' : '1',
+            '-ar', String(sampleRate),
+            '-c:a', 'adpcm_ima_wav',
+            // Critical: match the camera's expected ADPCM block size (includes the 4-byte predictor header).
+            '-block_size', String(fullBlockSize),
+            '-f', 'wav',
+            'pipe:1',
+        ];
+
+        logger.log(`Starting intercom for channel ${channel}: adpcm_ima_wav ${sampleRate}Hz block=${fullBlockSize}`);
+
+        this.intercomWav = new WavDataExtractor();
+        this.intercomSendChain = Promise.resolve();
+
+        const ff = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+        this.intercomFfmpeg = ff;
+
+        let loggedFirst = false;
+
+        ff.stderr.on('data', (d) => {
+            const msg = d.toString().trim();
+            if (msg) logger.warn(`intercom ffmpeg: ${msg}`);
+        });
+
+        ff.stdout.on('data', (chunk: Buffer) => {
+            try {
+                if (!this.intercomSession) return;
+                const parts = this.intercomWav?.push(chunk) ?? [];
+                for (const p of parts) {
+                    if (!p.length) continue;
+                    if (!loggedFirst) {
+                        loggedFirst = true;
+                        const head = p.subarray(0, Math.min(16, p.length)).toString('hex');
+                        logger.log(`Intercom first ADPCM bytes: len=${p.length} head=${head}`);
+                    }
+
+                    // Serialize sendAudio calls to avoid races with the session's internal pump.
+                    const sendChunk = Buffer.from(p);
+                    this.intercomSendChain = this.intercomSendChain
+                        .then(async () => {
+                            if (!this.intercomSession) return;
+                            await this.intercomSession.sendAudio(sendChunk);
+                        })
+                        .catch((e) => {
+                            logger.warn('Intercom sendAudio error', e);
+                        });
+                }
+            }
+            catch (e) {
+                logger.warn('Intercom pipeline error', e);
+            }
+        });
+
+        ff.once('exit', (code, signal) => {
+            if (code === 0) return;
+            logger.warn(`intercom ffmpeg exited: code=${code} signal=${signal}`);
+            // Ensure we teardown the intercom session if ffmpeg dies.
+            this.stopIntercom().catch(() => { });
+        });
     }
 
     stopIntercom(): Promise<void> {
-        return this.onvifIntercom.stopIntercom();
+        if (this.intercomStopping) return this.intercomStopping;
+
+        this.intercomStopping = (async () => {
+            const logger = this.getLogger();
+
+            const ff = this.intercomFfmpeg;
+            this.intercomFfmpeg = undefined;
+            this.intercomWav = undefined;
+
+            if (ff) {
+                try {
+                    ff.stdout?.removeAllListeners();
+                    ff.stderr?.removeAllListeners();
+                } catch {
+                    // ignore
+                }
+                try {
+                    ff.kill('SIGKILL');
+                } catch {
+                    // ignore
+                }
+            }
+
+            const session = this.intercomSession;
+            this.intercomSession = undefined;
+
+            // Flush any pending sendAudio and then stop the talk session.
+            try {
+                await this.intercomSendChain;
+            } catch {
+                // ignore
+            }
+            this.intercomSendChain = Promise.resolve();
+
+            if (session) {
+                try {
+                    await session.stop();
+                }
+                catch (e) {
+                    logger.warn('Intercom session stop error', e);
+                }
+            }
+        })().finally(() => {
+            this.intercomStopping = undefined;
+        });
+
+        return this.intercomStopping;
     }
 
     hasSiren() {
@@ -551,11 +748,19 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         ];
 
         try {
-            // if (this.storageSettings.values.useOnvifTwoWayAudio) {
-            //     interfaces.push(
-            //         ScryptedInterface.Intercom
-            //     );
-            // }
+            // Expose Intercom if the camera supports Baichuan talkback.
+            try {
+                const api = this.getClient();
+                if (api) {
+                    const ability = await api.getTalkAbility(this.getRtspChannel());
+                    if (Array.isArray((ability as any)?.audioConfigList) && (ability as any).audioConfigList.length > 0) {
+                        interfaces.push(ScryptedInterface.Intercom);
+                    }
+                }
+            }
+            catch {
+                // ignore: camera likely doesn't support talkback
+            }
 
             const { hasPtz } = this.getPtzCapabilities();
 
@@ -638,18 +843,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         info.manufacturer = 'Reolink';
         info.managementUrl = `http://${ip}`;
         this.info = info;
-    }
-
-    async getOnvifClient() {
-        if (!this.onvifClient)
-            this.onvifClient = await this.createOnvifClient();
-        return this.onvifClient;
-    }
-
-    createOnvifClient() {
-        // ONVIF client creation - may need to be implemented separately if needed
-        // For now, return null as Baichuan API handles most functionality
-        return null;
     }
 
     async processEvents(events: { motion?: boolean; objects?: string[] }) {
