@@ -1,9 +1,10 @@
-import type { BatteryInfo, DeviceCapabilities, PtzCommand, ReolinkBaichuanApi, ReolinkSimpleEvent, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { BatteryInfo, DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, Sleep, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
 import { RtspClient } from "../../scrypted/common/src/rtsp-server";
 import { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { ReolinkBaichuanIntercom } from "./intercom";
+import { ReolinkPtzPresets } from "./presets";
 import ReolinkNativePlugin from "./main";
 import { parseStreamProfileFromId, StreamManager } from './stream-utils';
 
@@ -124,6 +125,8 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     intercomClient: RtspClient;
 
     private intercom: ReolinkBaichuanIntercom;
+
+    private ptzPresets: ReolinkPtzPresets;
 
     storageSettings = new StorageSettings(this, {
         ipAddress: {
@@ -268,6 +271,15 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             getRtspChannel: () => this.getRtspChannel(),
             ensureClient: () => this.ensureClient(),
             withBaichuanRetry: (fn) => this.withBaichuanRetry(fn),
+        });
+
+        this.ptzPresets = new ReolinkPtzPresets({
+            ensureClient: () => this.ensureClient(),
+            getRtspChannel: () => this.getRtspChannel(),
+            getLogger: () => this.getLogger(),
+            storageSettings: this.storageSettings as any,
+            getPtzCapabilities: () => this.ptzCapabilities as any,
+            setPtzCapabilities: (next) => (this.ptzCapabilities = next as any),
         });
 
         this.intercom.setBlocksPerPayload((this.storageSettings.values as any).intercomBlocksPerPayload);
@@ -453,7 +465,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             try {
                 const { capabilities, abilities, support, presets } = await api.getDeviceCapabilities(channel);
                 this.storageSettings.values.capabilities = capabilities;
-                this.storageSettings.values.cachedPresets = presets ?? [];
+                this.ptzPresets.setCachedPtzPresets(presets);
                 this.console.log(`Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets })}`);
             }
             catch (e) {
@@ -809,6 +821,18 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
         const channel = this.getRtspChannel();
 
+        // Preset navigation.
+        const preset = (command as any).preset;
+        if (preset !== undefined && preset !== null) {
+            const presetId = Number(preset);
+            if (!Number.isFinite(presetId)) {
+                this.getLogger().warn(`Invalid PTZ preset id: ${preset}`);
+                return;
+            }
+            await this.ptzPresets.moveToPreset(presetId);
+            return;
+        }
+
         // Map PanTiltZoomCommand to PtzCommand
         let ptzAction: 'start' | 'stop' = 'start';
         let ptzCommand: 'Left' | 'Right' | 'Up' | 'Down' | 'ZoomIn' | 'ZoomOut' | 'FocusNear' | 'FocusFar' = 'Left';
@@ -990,32 +1014,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         if (batteryLevel !== this.batteryLevel) {
             this.batteryLevel = batteryLevel ?? this.batteryLevel;
         }
-    }
-
-    async processDeviceStatusData(data: { floodlightEnabled?: boolean; pirEnabled?: boolean; ptzPresets?: any[]; osd?: any }) {
-        const { floodlightEnabled, pirEnabled, ptzPresets, osd } = data;
-        const logger = this.getLogger();
-
-        // const debugEvents = this.storageSettings.values.debugEvents;
-        // if (debugEvents) {
-        //     logger.info(`Device status received: ${JSON.stringify(data)}`);
-        // }
-
-        if (this.floodlight && floodlightEnabled !== this.floodlight.on) {
-            this.floodlight.on = floodlightEnabled;
-        }
-
-        if (this.pirSensor && pirEnabled !== this.pirSensor.on) {
-            this.pirSensor.on = pirEnabled;
-        }
-
-        if (ptzPresets) {
-            this.storageSettings.values.cachedPresets = ptzPresets
-        }
-
-        // if (osd) {
-        //     this.storageSettings.values.cachedOsd = osd
-        // }
     }
 
     async updateDeviceInfo() {
