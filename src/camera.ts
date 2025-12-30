@@ -26,20 +26,38 @@ class ReolinkCameraSiren extends ScryptedDeviceBase implements OnOff {
     }
 
     async turnOff() {
+        this.camera.getLogger().log(`Siren toggle: turnOff (device=${this.nativeId})`);
         this.on = false;
-        await this.setSiren(false);
+        try {
+            await this.setSiren(false);
+            this.camera.getLogger().log(`Siren toggle: turnOff ok (device=${this.nativeId})`);
+        }
+        catch (e) {
+            this.camera.getLogger().warn(`Siren toggle: turnOff failed (device=${this.nativeId})`, e);
+            throw e;
+        }
     }
 
     async turnOn() {
+        this.camera.getLogger().log(`Siren toggle: turnOn (device=${this.nativeId})`);
         this.on = true;
-        await this.setSiren(true);
+        try {
+            await this.setSiren(true);
+            this.camera.getLogger().log(`Siren toggle: turnOn ok (device=${this.nativeId})`);
+        }
+        catch (e) {
+            this.camera.getLogger().warn(`Siren toggle: turnOn failed (device=${this.nativeId})`, e);
+            throw e;
+        }
     }
 
     private async setSiren(on: boolean) {
-        const api = this.camera.getClient();
-        if (!api) return;
+        this.camera.markActivity();
 
-        await api.setSiren(this.camera.getRtspChannel(), on);
+        const api = await this.camera.ensureClient();
+        const channel = this.camera.getRtspChannel();
+
+        await this.camera.withBaichuanRetry(async () => await api.setSiren(channel, on));
     }
 }
 
@@ -49,25 +67,51 @@ class ReolinkCameraFloodlight extends ScryptedDeviceBase implements OnOff, Brigh
     }
 
     async setBrightness(brightness: number): Promise<void> {
+        this.camera.getLogger().log(`Floodlight toggle: setBrightness (device=${this.nativeId} brightness=${brightness})`);
         this.brightness = brightness;
-        await this.setFloodlight(undefined, brightness);
+        try {
+            await this.setFloodlight(undefined, brightness);
+            this.camera.getLogger().log(`Floodlight toggle: setBrightness ok (device=${this.nativeId} brightness=${brightness})`);
+        }
+        catch (e) {
+            this.camera.getLogger().warn(`Floodlight toggle: setBrightness failed (device=${this.nativeId} brightness=${brightness})`, e);
+            throw e;
+        }
     }
 
     async turnOff() {
+        this.camera.getLogger().log(`Floodlight toggle: turnOff (device=${this.nativeId})`);
         this.on = false;
-        await this.setFloodlight(false);
+        try {
+            await this.setFloodlight(false);
+            this.camera.getLogger().log(`Floodlight toggle: turnOff ok (device=${this.nativeId})`);
+        }
+        catch (e) {
+            this.camera.getLogger().warn(`Floodlight toggle: turnOff failed (device=${this.nativeId})`, e);
+            throw e;
+        }
     }
 
     async turnOn() {
+        this.camera.getLogger().log(`Floodlight toggle: turnOn (device=${this.nativeId})`);
         this.on = true;
-        await this.setFloodlight(true);
+        try {
+            await this.setFloodlight(true);
+            this.camera.getLogger().log(`Floodlight toggle: turnOn ok (device=${this.nativeId})`);
+        }
+        catch (e) {
+            this.camera.getLogger().warn(`Floodlight toggle: turnOn failed (device=${this.nativeId})`, e);
+            throw e;
+        }
     }
 
     private async setFloodlight(on?: boolean, brightness?: number) {
-        const api = this.camera.getClient();
-        if (!api) return;
+        this.camera.markActivity();
 
-        await api.setWhiteLedState(this.camera.getRtspChannel(), on, brightness);
+        const api = await this.camera.ensureClient();
+        const channel = this.camera.getRtspChannel();
+
+        await this.camera.withBaichuanRetry(async () => await api.setWhiteLedState(channel, on, brightness));
     }
 }
 
@@ -77,20 +121,38 @@ class ReolinkCameraPirSensor extends ScryptedDeviceBase implements OnOff {
     }
 
     async turnOff() {
+        this.camera.getLogger().log(`PIR toggle: turnOff (device=${this.nativeId})`);
         this.on = false;
-        await this.setPir(false);
+        try {
+            await this.setPir(false);
+            this.camera.getLogger().log(`PIR toggle: turnOff ok (device=${this.nativeId})`);
+        }
+        catch (e) {
+            this.camera.getLogger().warn(`PIR toggle: turnOff failed (device=${this.nativeId})`, e);
+            throw e;
+        }
     }
 
     async turnOn() {
+        this.camera.getLogger().log(`PIR toggle: turnOn (device=${this.nativeId})`);
         this.on = true;
-        await this.setPir(true);
+        try {
+            await this.setPir(true);
+            this.camera.getLogger().log(`PIR toggle: turnOn ok (device=${this.nativeId})`);
+        }
+        catch (e) {
+            this.camera.getLogger().warn(`PIR toggle: turnOn failed (device=${this.nativeId})`, e);
+            throw e;
+        }
     }
 
     private async setPir(on: boolean) {
-        const api = this.camera.getClient();
-        if (!api) return;
+        this.camera.markActivity();
 
-        await api.setPirInfo(this.camera.getRtspChannel(), { enable: on ? 1 : 0 });
+        const api = await this.camera.ensureClient();
+        const channel = this.camera.getRtspChannel();
+
+        await this.camera.withBaichuanRetry(async () => await api.setPirInfo(channel, { enable: on ? 1 : 0 }));
     }
 }
 
