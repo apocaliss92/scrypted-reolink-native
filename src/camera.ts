@@ -1,71 +1,11 @@
-import type { BatteryInfo, DeviceCapabilities, PtzCommand, ReolinkBaichuanApi, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { Brightness, Camera, Device, DeviceProvider, FFmpegInput, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, Sleep, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
+import type { BatteryInfo, DeviceCapabilities, PtzCommand, ReolinkBaichuanApi, ReolinkSimpleEvent, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import sdk, { Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, Sleep, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
+import { RtspClient } from "../../scrypted/common/src/rtsp-server";
 import { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
+import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
 import { parseStreamProfileFromId, StreamManager } from './stream-utils';
-import child_process, { type ChildProcessWithoutNullStreams } from 'child_process';
-import * as net from 'node:net';
-import os from 'node:os';
-import { startRtpForwarderProcess } from '../../scrypted/plugins/webrtc/src/rtp-forwarders';
-
-class WavDataExtractor {
-    private buffer: Buffer = Buffer.alloc(0);
-    private inData = false;
-    private bytesRemaining: number | undefined;
-
-    push(chunk: Buffer): Buffer[] {
-        if (chunk.length === 0) return [];
-        if (this.inData) {
-            if (this.bytesRemaining === undefined) return [chunk];
-            if (this.bytesRemaining <= 0) return [];
-            const take = Math.min(this.bytesRemaining, chunk.length);
-            this.bytesRemaining -= take;
-            return take > 0 ? [chunk.subarray(0, take)] : [];
-        }
-
-        this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
-        const out: Buffer[] = [];
-
-        // Need RIFF header
-        if (this.buffer.length < 12) return out;
-        if (this.buffer.toString('ascii', 0, 4) !== 'RIFF' || this.buffer.toString('ascii', 8, 12) !== 'WAVE') {
-            // If ffmpeg ever emits garbage, try to resync by finding RIFF.
-            const idx = this.buffer.indexOf(Buffer.from('RIFF'));
-            if (idx === -1) {
-                this.buffer = this.buffer.subarray(Math.max(0, this.buffer.length - 3));
-                return out;
-            }
-            this.buffer = this.buffer.subarray(idx);
-            if (this.buffer.length < 12) return out;
-            if (this.buffer.toString('ascii', 0, 4) !== 'RIFF' || this.buffer.toString('ascii', 8, 12) !== 'WAVE') return out;
-        }
-
-        let offset = 12;
-        while (true) {
-            if (this.buffer.length < offset + 8) return out;
-            const id = this.buffer.toString('ascii', offset, offset + 4);
-            const size = this.buffer.readUInt32LE(offset + 4);
-            const chunkDataStart = offset + 8;
-            const paddedSize = size + (size % 2);
-
-            if (id === 'data') {
-                if (this.buffer.length < chunkDataStart) return out;
-                this.inData = true;
-                // Some streaming WAV writers may use 0xffffffff/0 for unknown size; treat as unbounded.
-                this.bytesRemaining = (size === 0 || size === 0xffffffff) ? undefined : size;
-                const data = this.buffer.subarray(chunkDataStart);
-                this.buffer = Buffer.alloc(0);
-                if (data.length) out.push(data);
-                return out;
-            }
-
-            // Need the full chunk to skip it.
-            if (this.buffer.length < chunkDataStart + paddedSize) return out;
-            offset = chunkDataStart + paddedSize;
-        }
-    }
-}
 
 export const moToB64 = async (mo: MediaObject) => {
     const bufferImage = await sdk.mediaManager.convertMediaObjectToBuffer(mo, 'image/jpeg');
@@ -165,7 +105,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     private refreshDeviceStatePromise: Promise<void> | undefined;
 
     private subscribedToEvents = false;
-    private onSimpleEvent: ((ev: any) => void) | undefined;
+    private onSimpleEvent: ((ev: ReolinkSimpleEvent) => void) | undefined;
     private eventsApi: ReolinkBaichuanApi | undefined;
 
     private periodicStarted = false;
@@ -176,12 +116,9 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     private lastSnapshotTaken: number | undefined;
     private streamManager: StreamManager;
 
-    private intercomSession: Awaited<ReturnType<ReolinkBaichuanApi['createTalkSession']>> | undefined;
-    private intercomFfmpeg: ChildProcessWithoutNullStreams | undefined;
-    private intercomWav: WavDataExtractor | undefined;
-    private intercomSendChain: Promise<void> = Promise.resolve();
-    private intercomStopping: Promise<void> | undefined;
-    private intercomGeneration = 0;
+    intercomClient: RtspClient;
+
+    private intercom: ReolinkBaichuanIntercom;
 
     storageSettings = new StorageSettings(this, {
         ipAddress: {
@@ -308,6 +245,14 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         this.streamManager = new StreamManager({
             ensureClient: () => this.ensureClient(),
             getLogger: () => this.getLogger(),
+        });
+
+        this.intercom = new ReolinkBaichuanIntercom({
+            markActivity: () => this.markActivity(),
+            getLogger: () => this.getLogger(),
+            getRtspChannel: () => this.getRtspChannel(),
+            ensureClient: () => this.ensureClient(),
+            withBaichuanRetry: (fn) => this.withBaichuanRetry(fn),
         });
 
         this.storageSettings.settings.presets.onGet = async () => {
@@ -901,12 +846,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         }
     }
 
-    async startIntercom(media: MediaObject): Promise<void> {
-    }
-
-    stopIntercom(): Promise<void> {
-    }
-
     hasSiren() {
         const capabilities = this.getAbilities();
         return Boolean(capabilities?.hasSiren);
@@ -1414,5 +1353,13 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         } else if (nativeId.endsWith('-pir')) {
             delete this.pirSensor;
         }
+    }
+
+    async startIntercom(media: MediaObject): Promise<void> {
+        await this.intercom.start(media);
+    }
+
+    stopIntercom(): Promise<void> {
+        return this.intercom.stop();
     }
 }
