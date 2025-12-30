@@ -2,13 +2,7 @@ import type { ReolinkBaichuanApi } from "@apocaliss92/reolink-baichuan-js" with 
 import sdk, { FFmpegInput, MediaObject, ScryptedMimeTypes } from "@scrypted/sdk";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
-export type IntercomDeps = {
-    markActivity(): void;
-    getLogger(): Console;
-    getRtspChannel(): number;
-    ensureClient(): Promise<ReolinkBaichuanApi>;
-    withBaichuanRetry<T>(fn: () => Promise<T>): Promise<T>;
-};
+import type { ReolinkNativeCamera } from "./camera";
 
 // Keep this low: Reolink blocks are ~64ms at 16kHz (1025 samples).
 // A small backlog avoids multi-second latency when the pipeline stalls.
@@ -24,23 +18,20 @@ export class ReolinkBaichuanIntercom {
 
     private readonly maxBacklogMs = DEFAULT_MAX_BACKLOG_MS;
     private maxBacklogBytes: number | undefined;
-    private blocksPerPayload = 1;
 
     private sendChain: Promise<void> = Promise.resolve();
     private pcmBuffer: Buffer = Buffer.alloc(0);
 
-    constructor(private deps: IntercomDeps) {
+    constructor(private camera: ReolinkNativeCamera) {
     }
 
-    setBlocksPerPayload(value: number | undefined): void {
-        const v = Math.floor(Number(value));
-        if (!Number.isFinite(v)) return;
-        this.blocksPerPayload = Math.max(1, Math.min(8, v));
+    get blocksPerPayload(): number {
+        return Math.max(1, Math.min(8, this.camera.storageSettings.values.intercomBlocksPerPayload ?? 1));
     }
 
     async start(media: MediaObject): Promise<void> {
-        this.deps.markActivity();
-        const logger = this.deps.getLogger();
+        this.camera.markActivity();
+        const logger = this.camera.getLogger();
 
         const ffmpegInput = await sdk.mediaManager.convertMediaObjectToJSON<FFmpegInput>(
             media,
@@ -49,8 +40,8 @@ export class ReolinkBaichuanIntercom {
 
         await this.stop();
 
-        const api = await this.deps.ensureClient();
-        const channel = this.deps.getRtspChannel();
+        const api = await this.camera.ensureClient();
+        const channel = this.camera.getRtspChannel();
 
         // Best-effort: log codec requirements exposed by the camera.
         // This mirrors neolink's source of truth: TalkAbility (cmd_id=10).
@@ -77,7 +68,7 @@ export class ReolinkBaichuanIntercom {
             }
         }
 
-        const session = await this.deps.withBaichuanRetry(async () => api.createTalkSession(channel, {
+        const session = await this.camera.withBaichuanRetry(async () => api.createTalkSession(channel, {
             blocksPerPayload: this.blocksPerPayload,
         }));
 
@@ -168,7 +159,7 @@ export class ReolinkBaichuanIntercom {
         if (this.stopping) return this.stopping;
 
         this.stopping = (async () => {
-            const logger = this.deps.getLogger();
+            const logger = this.camera.getLogger();
 
             const ffmpeg = this.ffmpeg;
             this.ffmpeg = undefined;
@@ -234,7 +225,7 @@ export class ReolinkBaichuanIntercom {
         bytesNeeded: number,
         blockSize: number,
     ): void {
-        const logger = this.deps.getLogger();
+        const logger = this.camera.getLogger();
 
         this.sendChain = this.sendChain
             .then(async () => {

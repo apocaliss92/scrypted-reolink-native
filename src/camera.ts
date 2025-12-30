@@ -1,11 +1,11 @@
-import type { BatteryInfo, DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { BatteryInfo, DeviceCapabilities, PtzCommand, ReolinkBaichuanApi, ReolinkSimpleEvent, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, Sleep, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
 import { RtspClient } from "../../scrypted/common/src/rtsp-server";
 import { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { ReolinkBaichuanIntercom } from "./intercom";
-import { ReolinkPtzPresets } from "./presets";
 import ReolinkNativePlugin from "./main";
+import { ReolinkPtzPresets } from "./presets";
 import { parseStreamProfileFromId, StreamManager } from './stream-utils';
 
 export const moToB64 = async (mo: MediaObject) => {
@@ -192,7 +192,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             type: 'number',
         },
         presets: {
-            subgroup: 'Advanced',
+            group: 'PTZ',
             title: 'Presets',
             description: 'PTZ Presets in the format "id=name". Where id is the PTZ Preset identifier and name is a friendly name.',
             multiple: true,
@@ -231,14 +231,13 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             hide: true
         },
         ptzMoveDurationMs: {
-            subgroup: 'Advanced',
             title: 'PTZ Move Duration (ms)',
             description: 'How long a PTZ command moves before sending stop. Higher = more movement per click.',
             type: 'number',
             defaultValue: 500,
         },
         ptzZoomStep: {
-            subgroup: 'Advanced',
+            group: 'PTZ',
             title: 'PTZ Zoom Step',
             description: 'How much to change zoom per zoom command (in zoom factor units, where 1.0 is normal).',
             type: 'number',
@@ -250,10 +249,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             description: 'Lower reduces latency (more packets). Typical: 1-4. Requires restarting talk session to take effect.',
             type: 'number',
             defaultValue: 1,
-            onPut: async (ov, value: number) => {
-                (this.storageSettings.values as any).intercomBlocksPerPayload = value;
-                this.intercom.setBlocksPerPayload(value);
-            },
         },
     });
 
@@ -265,24 +260,8 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             getLogger: () => this.getLogger(),
         });
 
-        this.intercom = new ReolinkBaichuanIntercom({
-            markActivity: () => this.markActivity(),
-            getLogger: () => this.getLogger(),
-            getRtspChannel: () => this.getRtspChannel(),
-            ensureClient: () => this.ensureClient(),
-            withBaichuanRetry: (fn) => this.withBaichuanRetry(fn),
-        });
-
-        this.ptzPresets = new ReolinkPtzPresets({
-            ensureClient: () => this.ensureClient(),
-            getRtspChannel: () => this.getRtspChannel(),
-            getLogger: () => this.getLogger(),
-            storageSettings: this.storageSettings as any,
-            getPtzCapabilities: () => this.ptzCapabilities as any,
-            setPtzCapabilities: (next) => (this.ptzCapabilities = next as any),
-        });
-
-        this.intercom.setBlocksPerPayload((this.storageSettings.values as any).intercomBlocksPerPayload);
+        this.intercom = new ReolinkBaichuanIntercom(this);
+        this.ptzPresets = new ReolinkPtzPresets(this);
 
         this.storageSettings.settings.presets.onGet = async () => {
             const choices = this.storageSettings.values.cachedPresets.map((preset) => preset.id + '=' + preset.name);
@@ -334,7 +313,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         }
     }
 
-    private async withBaichuanRetry<T>(fn: () => Promise<T>): Promise<T> {
+    async withBaichuanRetry<T>(fn: () => Promise<T>): Promise<T> {
         try {
             return await fn();
         }
@@ -404,7 +383,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         }
     }
 
-    private async ensureClient(): Promise<ReolinkBaichuanApi> {
+    async ensureClient(): Promise<ReolinkBaichuanApi> {
         if (this.baichuanInitPromise) {
             return this.baichuanInitPromise;
         }
@@ -650,7 +629,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         this.lastAppliedDispatchEventsKey = key;
     }
 
-    private markActivity(): void {
+    markActivity(): void {
         this.lastActivityMs = Date.now();
     }
 
