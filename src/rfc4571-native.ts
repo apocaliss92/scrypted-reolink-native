@@ -3,12 +3,20 @@ import crypto from 'node:crypto';
 
 export type VideoType = 'H264' | 'H265';
 
-export interface AacAudioConfig {
-    payloadType: number;
-    sampleRate: number;
-    channels: number;
-    configHex: string;
-}
+export type AudioConfig =
+    | {
+        codec: 'aac';
+        payloadType: number;
+        sampleRate: number;
+        channels: number;
+        configHex: string;
+    }
+    | {
+        codec: 'opus';
+        payloadType: number;
+        sampleRate: number;
+        channels: number;
+    };
 
 export interface VideoParamSets {
     videoType: VideoType;
@@ -25,7 +33,7 @@ export interface VideoParamSets {
     };
 }
 
-export function buildRfc4571Sdp(video: VideoParamSets, audio?: AacAudioConfig): string {
+export function buildRfc4571Sdp(video: VideoParamSets, audio?: AudioConfig): string {
     let out = 'v=0\r\n';
     out += 'o=- 0 0 IN IP4 0.0.0.0\r\n';
     out += 's=No Name\r\n';
@@ -49,12 +57,19 @@ export function buildRfc4571Sdp(video: VideoParamSets, audio?: AacAudioConfig): 
         out += `a=fmtp:${video.payloadType} sprop-vps=${vpsB64};sprop-sps=${spsB64};sprop-pps=${ppsB64}\r\n`;
     }
 
-    if (audio) {
+    if (audio?.codec === 'aac') {
         out += `m=audio 0 RTP/AVP ${audio.payloadType}\r\n`;
         out += 'c=IN IP4 0.0.0.0\r\n';
         out += 'b=AS:128\r\n';
         out += `a=rtpmap:${audio.payloadType} MPEG4-GENERIC/${audio.sampleRate}/${audio.channels}\r\n`;
         out += `a=fmtp:${audio.payloadType} profile-level-id=1; mode=AAC-hbr; sizelength=13; indexlength=3; indexdeltalength=3; config=${audio.configHex}\r\n`;
+    }
+
+    if (audio?.codec === 'opus') {
+        out += `m=audio 0 RTP/AVP ${audio.payloadType}\r\n`;
+        out += 'c=IN IP4 0.0.0.0\r\n';
+        out += 'b=AS:128\r\n';
+        out += `a=rtpmap:${audio.payloadType} opus/${audio.sampleRate}/${audio.channels}\r\n`;
     }
 
     return out;
@@ -106,15 +121,15 @@ export function splitAnnexBToNals(annexB: Buffer): Buffer[] {
     return nals;
 }
 
-function hasAnnexBStartCode(data: Buffer): boolean {
-    if (!data?.length) return false;
-    // Fast scan; access units are typically small.
-    for (let i = 0; i + 3 < data.length; i++) {
+function findAnnexBStartCodeOffset(data: Buffer, maxScan = 64): number {
+    if (!data?.length) return -1;
+    const len = Math.min(data.length, Math.max(0, maxScan));
+    for (let i = 0; i + 3 < len; i++) {
         if (data[i] !== 0x00 || data[i + 1] !== 0x00) continue;
-        if (data[i + 2] === 0x01) return true;
-        if (data[i + 2] === 0x00 && data[i + 3] === 0x01) return true;
+        if (data[i + 2] === 0x01) return i;
+        if (data[i + 2] === 0x00 && data[i + 3] === 0x01) return i;
     }
-    return false;
+    return -1;
 }
 
 function stripLeadingAnnexBStartCode(data: Buffer): Buffer {
@@ -125,17 +140,34 @@ function stripLeadingAnnexBStartCode(data: Buffer): Buffer {
     return data;
 }
 
-function splitLengthPrefixedToNalsAvcc(data: Buffer): Buffer[] {
-    // AVCC/HVCC style: [u32be length][NAL bytes]...
+function splitLengthPrefixedToNals(data: Buffer, lengthSize: 1 | 2 | 3 | 4, endian: 'be' | 'le'): Buffer[] {
+    // AVCC/HVCC style: [length][NAL bytes]...
+    // lengthSize is typically 4, but some devices/streams use 2.
     const nals: Buffer[] = [];
     let offset = 0;
 
-    // Need at least one length + 1 byte payload.
-    while (offset + 4 <= data.length) {
-        const nalLen = data.readUInt32BE(offset);
-        offset += 4;
+    const readLen = (buf: Buffer, at: number): number => {
+        if (lengthSize === 4) return endian === 'be' ? buf.readUInt32BE(at) : buf.readUInt32LE(at);
+        if (lengthSize === 2) return endian === 'be' ? buf.readUInt16BE(at) : buf.readUInt16LE(at);
+        if (lengthSize === 3) {
+            const b0 = buf[at]!;
+            const b1 = buf[at + 1]!;
+            const b2 = buf[at + 2]!;
+            return endian === 'be'
+                ? ((b0 << 16) | (b1 << 8) | b2) >>> 0
+                : ((b2 << 16) | (b1 << 8) | b0) >>> 0;
+        }
+        return buf.readUInt8(at);
+    };
+
+    while (offset + lengthSize <= data.length) {
+        const nalLen = readLen(data, offset);
+        offset += lengthSize;
+
+        // 0-length doesn't make sense for an access unit; treat as parse failure.
         if (!nalLen) return [];
         if (offset + nalLen > data.length) return [];
+
         const nal = data.subarray(offset, offset + nalLen);
         offset += nalLen;
         if (nal.length) nals.push(nal);
@@ -146,25 +178,91 @@ function splitLengthPrefixedToNalsAvcc(data: Buffer): Buffer[] {
     return nals;
 }
 
-function splitAccessUnitToNalsBestEffort(accessUnit: Buffer): Buffer[] {
-    if (!accessUnit?.length) return [];
+function scoreNals(videoType: VideoType | undefined, nals: Buffer[]): number {
+    if (!nals.length) return Number.POSITIVE_INFINITY;
 
-    if (hasAnnexBStartCode(accessUnit)) {
-        const nals = splitAnnexBToNals(accessUnit);
-        if (nals.length) return nals;
+    let invalid = 0;
+    for (const nal of nals) {
+        if (!nal.length) {
+            invalid++;
+            continue;
+        }
+
+        // forbidden_zero_bit must be 0 for both H264 and H265
+        if ((nal[0]! & 0x80) !== 0) {
+            invalid += 10;
+            continue;
+        }
+
+        if (videoType === 'H264') {
+            const t = nal[0]! & 0x1f;
+            // 1..23 are defined; 24..31 are aggreg/fragmentation/reserved and should not appear in raw AUs.
+            if (t < 1 || t > 23) invalid++;
+        }
+        else if (videoType === 'H265') {
+            if (nal.length < 2) {
+                invalid++;
+                continue;
+            }
+            const t = (nal[0]! >> 1) & 0x3f;
+            // Reject reserved/forbidden types that strongly suggest mis-parsing.
+            // Keep common types: 0-29 (VCL), 32-40 (VPS/SPS/PPS/AUD/SEI/etc), 48-50 (AP/FU/PACI)
+            const isValid =
+                (t >= 0 && t <= 29) ||
+                (t >= 32 && t <= 40) ||
+                (t >= 48 && t <= 50);
+            if (!isValid) invalid++;
+        }
     }
 
-    // If it looks like AVCC (often starts with 0x00 0x00 ..), try length-prefixed parsing.
-    const avcc = splitLengthPrefixedToNalsAvcc(accessUnit);
-    if (avcc.length) return avcc;
+    return invalid;
+}
+
+function splitAccessUnitToNalsBestEffort(accessUnit: Buffer, videoType?: VideoType): Buffer[] {
+    if (!accessUnit?.length) return [];
+
+    const candidates: Buffer[][] = [];
+
+    // Annex-B is only considered if a start code appears at the start (or shortly after);
+    // scanning the entire buffer can false-positive on random 0x000001 sequences.
+    const scOffset = findAnnexBStartCodeOffset(accessUnit, 64);
+    if (scOffset >= 0) {
+        const annex = scOffset === 0 ? accessUnit : accessUnit.subarray(scOffset);
+        const nals = splitAnnexBToNals(annex);
+        if (nals.length) candidates.push(nals);
+    }
+
+    // If it looks like AVCC/HVCC (often starts with 0x00 0x00 ..), try length-prefixed parsing.
+    // Some Reolink streams appear to use 2-byte NAL lengths.
+    candidates.push(splitLengthPrefixedToNals(accessUnit, 4, 'be'));
+    candidates.push(splitLengthPrefixedToNals(accessUnit, 4, 'le'));
+    candidates.push(splitLengthPrefixedToNals(accessUnit, 3, 'be'));
+    candidates.push(splitLengthPrefixedToNals(accessUnit, 3, 'le'));
+    candidates.push(splitLengthPrefixedToNals(accessUnit, 2, 'be'));
+    candidates.push(splitLengthPrefixedToNals(accessUnit, 2, 'le'));
+    candidates.push(splitLengthPrefixedToNals(accessUnit, 1, 'be'));
 
     // Single NAL without start code (or unknown packaging). Strip a leading start code if present.
     const stripped = stripLeadingAnnexBStartCode(accessUnit);
-    return stripped.length ? [stripped] : [];
+    if (stripped.length) candidates.push([stripped]);
+
+    let best: Buffer[] = [];
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (const cand of candidates) {
+        if (!cand.length) continue;
+        const s = scoreNals(videoType, cand);
+        if (s < bestScore) {
+            bestScore = s;
+            best = cand;
+            if (bestScore === 0) break;
+        }
+    }
+
+    return best;
 }
 
 export function extractH264ParamSetsFromAccessUnit(annexB: Buffer): { sps?: Buffer; pps?: Buffer; profileLevelId?: string } {
-    const nals = splitAccessUnitToNalsBestEffort(annexB);
+    const nals = splitAccessUnitToNalsBestEffort(annexB, 'H264');
     let sps: Buffer | undefined;
     let pps: Buffer | undefined;
     let profileLevelId: string | undefined;
@@ -187,7 +285,7 @@ export function extractH264ParamSetsFromAccessUnit(annexB: Buffer): { sps?: Buff
 }
 
 export function extractH265ParamSetsFromAccessUnit(annexB: Buffer): { vps?: Buffer; sps?: Buffer; pps?: Buffer } {
-    const nals = splitAccessUnitToNalsBestEffort(annexB);
+    const nals = splitAccessUnitToNalsBestEffort(annexB, 'H265');
     let vps: Buffer | undefined;
     let sps: Buffer | undefined;
     let pps: Buffer | undefined;
@@ -478,9 +576,38 @@ export class Rfc4571Muxer {
     sendVideoAccessUnit(videoType: VideoType, accessUnitAnnexB: Buffer, isKeyframe: boolean, microseconds: number | null | undefined) {
         if (this.closed) return;
 
+        const nals = splitAccessUnitToNalsBestEffort(accessUnitAnnexB, videoType);
+        if (!nals.length) return;
+
+        // Some sources mislabel keyframes. Derive a best-effort keyframe flag from NAL types
+        // to avoid per-client gating getting stuck (symptom: 1 frame per GOP).
+        let derivedKeyframe = false;
+        if (videoType === 'H264') {
+            for (const nal of nals) {
+                const t = nal[0]! & 0x1f;
+                if (t === 5) { // IDR
+                    derivedKeyframe = true;
+                    break;
+                }
+            }
+        }
+        else {
+            for (const nal of nals) {
+                if (nal.length < 2) continue;
+                const t = (nal[0]! >> 1) & 0x3f;
+                // IRAP pictures: 16..23 (BLA/IDR/CRA)
+                if (t >= 16 && t <= 23) {
+                    derivedKeyframe = true;
+                    break;
+                }
+            }
+        }
+
+        const effectiveKeyframe = isKeyframe || derivedKeyframe;
+
         // gate per-client until keyframe: do NOT stall existing synced clients.
         // If a new client connects (needsKeyframe=true), only that client will wait.
-        const shouldSendTo = (c: Rfc4571Client) => isKeyframe ? true : !c.needsKeyframe;
+        const shouldSendTo = (c: Rfc4571Client) => effectiveKeyframe ? true : !c.needsKeyframe;
         let hasAnyTarget = false;
         for (const c of this.clients) {
             if (shouldSendTo(c)) {
@@ -491,9 +618,6 @@ export class Rfc4571Muxer {
         if (!hasAnyTarget) return;
 
         this.setVideoTimestampFromMicroseconds(microseconds);
-
-        const nals = splitAccessUnitToNalsBestEffort(accessUnitAnnexB);
-        if (!nals.length) return;
 
         const opts: RtpPacketizationOptions = { maxRtpPayload: this.maxRtpPayload };
         for (let i = 0; i < nals.length; i++) {
@@ -512,7 +636,7 @@ export class Rfc4571Muxer {
         }
 
         // mark clients as started when the keyframe passes through
-        if (isKeyframe) {
+        if (effectiveKeyframe) {
             for (const c of this.clients) c.needsKeyframe = false;
         }
     }
@@ -529,5 +653,125 @@ export class Rfc4571Muxer {
         if (packets.length) this.audioRtp.advanceTimestamp(1024);
 
         return { parsed: config };
+    }
+
+    sendAudioRtpPacket(rtpPacket: Buffer): void {
+        if (this.closed) return;
+        if (!rtpPacket || rtpPacket.length < 12) return;
+        const version = (rtpPacket[0]! >> 6) & 0x03;
+        if (version !== 2) return;
+
+        // keep audio aligned with video gating: only send once video has started.
+        this.writeRtpPacketToClients(rtpPacket, (c) => !c.needsKeyframe);
+    }
+
+    private static parseRtpPayload(packet: Buffer): Buffer | undefined {
+        if (!packet || packet.length < 12) return;
+        const version = (packet[0]! >> 6) & 0x03;
+        if (version !== 2) return;
+
+        const padding = (packet[0]! & 0x20) !== 0;
+        const extension = (packet[0]! & 0x10) !== 0;
+        const csrcCount = packet[0]! & 0x0f;
+        let offset = 12 + csrcCount * 4;
+        if (offset > packet.length) return;
+
+        if (extension) {
+            if (offset + 4 > packet.length) return;
+            const extLenWords = packet.readUInt16BE(offset + 2);
+            offset += 4 + extLenWords * 4;
+            if (offset > packet.length) return;
+        }
+
+        let end = packet.length;
+        if (padding) {
+            const padLen = packet[packet.length - 1]!;
+            if (padLen <= 0 || padLen > packet.length) return;
+            end = packet.length - padLen;
+            if (end < offset) return;
+        }
+
+        if (end <= offset) return;
+        return packet.subarray(offset, end);
+    }
+
+    private static isH264KeyframeLikeRtpPacket(packet: Buffer): boolean {
+        const payload = Rfc4571Muxer.parseRtpPayload(packet);
+        if (!payload || payload.length < 1) return false;
+
+        const nalType = payload[0]! & 0x1f;
+
+        // Single NAL
+        if (nalType >= 1 && nalType <= 23) {
+            return nalType === 5 || nalType === 7 || nalType === 8;
+        }
+
+        // STAP-A
+        if (nalType === 24) {
+            let offset = 1;
+            while (offset + 2 <= payload.length) {
+                const size = payload.readUInt16BE(offset);
+                offset += 2;
+                if (!size || offset + size > payload.length) break;
+                const t = payload[offset]! & 0x1f;
+                if (t === 5 || t === 7 || t === 8) return true;
+                offset += size;
+            }
+            return false;
+        }
+
+        // FU-A
+        if (nalType === 28 && payload.length >= 2) {
+            const fuHeader = payload[1]!;
+            const start = (fuHeader & 0x80) !== 0;
+            const origType = fuHeader & 0x1f;
+            if (!start) return false;
+            return origType === 5 || origType === 7 || origType === 8;
+        }
+
+        return false;
+    }
+
+    private static isH265KeyframeLikeRtpPacket(packet: Buffer): boolean {
+        const payload = Rfc4571Muxer.parseRtpPayload(packet);
+        if (!payload || payload.length < 2) return false;
+
+        const nalType = (payload[0]! >> 1) & 0x3f;
+
+        const isKeyNalType = (t: number) => {
+            // IRAP: 16..21, VPS/SPS/PPS: 32/33/34
+            if (t >= 16 && t <= 21) return true;
+            if (t === 32 || t === 33 || t === 34) return true;
+            return false;
+        };
+
+        // Fragmentation Unit (FU): nalType==49, original nal type in payload[2]
+        if (nalType === 49 && payload.length >= 3) {
+            const fuHeader = payload[2]!;
+            const start = (fuHeader & 0x80) !== 0;
+            const origType = fuHeader & 0x3f;
+            if (!start) return false;
+            return isKeyNalType(origType);
+        }
+
+        return isKeyNalType(nalType);
+    }
+
+    sendVideoRtpPacket(videoType: VideoType, rtpPacket: Buffer): void {
+        if (this.closed) return;
+        if (!rtpPacket || rtpPacket.length < 12) return;
+        const version = (rtpPacket[0]! >> 6) & 0x03;
+        if (version !== 2) return;
+
+        const isKeyframeLike = videoType === 'H265'
+            ? Rfc4571Muxer.isH265KeyframeLikeRtpPacket(rtpPacket)
+            : Rfc4571Muxer.isH264KeyframeLikeRtpPacket(rtpPacket);
+
+        const shouldSendTo = (c: Rfc4571Client) => isKeyframeLike ? true : !c.needsKeyframe;
+        this.writeRtpPacketToClients(rtpPacket, shouldSendTo);
+
+        if (isKeyframeLike) {
+            for (const c of this.clients) c.needsKeyframe = false;
+        }
     }
 }

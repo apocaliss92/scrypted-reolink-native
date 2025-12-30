@@ -39,7 +39,7 @@
       "@scrypted/common": "file:../../scrypted/common",
       "@scrypted/rtsp": "file:../../scrypted/plugins/rtsp",
       "@scrypted/sdk": "^0.3.118",
-      "@apocaliss92/reolink-baichuan-js": "file:../reolink-baichuan-js"
+      "@apocaliss92/reolink-baichuan-js": "file:./reolink-baichuan-js"
    },
    "devDependencies": {
       "@types/node": "^22.0.2"

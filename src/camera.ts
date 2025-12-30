@@ -775,15 +775,21 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             const channel = this.getRtspChannel();
             const streamKey = `${channel}_${profile}`;
 
-            const { host, port, sdp, audioSampleRate } = await this.streamManager.getRfcStream(channel, profile, streamKey);
+            const expectedVideoType = selected?.video?.codec?.includes('265') ? 'H265'
+                : selected?.video?.codec?.includes('264') ? 'H264'
+                    : undefined;
+
+            const { host, port, sdp, audio } = await this.streamManager.getRfcStream(channel, profile, streamKey, expectedVideoType as any);
 
             const { url: _ignoredUrl, ...mso }: any = selected;
             // This stream is delivered as RFC4571 (RTP over raw TCP), not RTSP.
             // Mark it accordingly to avoid RTSP-specific handling in downstream plugins.
             mso.container = 'rtp';
-            if (audioSampleRate) {
+            if (audio) {
                 mso.audio ||= {};
-                mso.audio.sampleRate = audioSampleRate;
+                mso.audio.codec = audio.codec;
+                mso.audio.sampleRate = audio.sampleRate;
+                (mso.audio as any).channels = audio.channels;
             }
 
             const rfc = {
@@ -829,7 +835,8 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 streams.push({
                     name,
                     id,
-                    container: 'rtsp',
+                    // We return RFC4571 (RTP over TCP). Mark as RTP so other plugins do not attempt RTSP prebuffering.
+                    container: 'rtp',
                     video: { codec, width: stream.width, height: stream.height },
                     url: ``,
                 });

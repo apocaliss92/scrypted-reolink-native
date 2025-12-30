@@ -9,7 +9,7 @@ import {
     extractH265ParamSetsFromAccessUnit,
     parseAdtsHeader,
     Rfc4571Muxer,
-    type AacAudioConfig,
+    type AudioConfig,
     type VideoParamSets,
 } from './rfc4571-native';
 
@@ -42,8 +42,20 @@ export class StreamManager {
     private rtspServerCreatePromises = new Map<string, Promise<{ rtspServer: any; rtspUrl: string }>>();
     private rfcServers = new Map<string, { server: net.Server; host: string; port: number; sdp: string; videoPayloadType: number; audioPayloadType?: number; rtspUrl: string }>();
     private rfcServerCreatePromises = new Map<string, Promise<{ host: string; port: number; sdp: string; videoPayloadType: number; audioPayloadType?: number }>>();
-    private nativeRfcServers = new Map<string, { server: net.Server; host: string; port: number; sdp: string; videoStream: any; muxer: Rfc4571Muxer }>();
-    private nativeRfcServerCreatePromises = new Map<string, Promise<{ host: string; port: number; sdp: string; audioSampleRate?: number }>>();
+    private nativeRfcServers = new Map<string, {
+        server: net.Server;
+        host: string;
+        port: number;
+        sdp: string;
+        videoType: 'H264' | 'H265';
+        audio?: { codec: string; sampleRate: number; channels: number };
+        videoStream: any;
+        muxer: Rfc4571Muxer;
+        audioFfmpeg?: ReturnType<typeof spawn>;
+        audioUdp?: dgram.Socket;
+    }>();
+    private nativeRfcServerCreatePromises = new Map<string, Promise<{ host: string; port: number; sdp: string; audio?: { codec: string; sampleRate: number; channels: number } }>>();
+    private loggedBaichuanLibInfo = false;
 
     constructor(private opts: StreamManagerOptions) {
     }
@@ -124,11 +136,21 @@ export class StreamManager {
             }
 
             // (Re)create RTSP server.
-            const rtspServer = await client.createRtspStream(channel, profile, {
+            // We intentionally create the RTSP server here (instead of api.createRtspStream)
+            // so we can control TCP framing for broad client compatibility (e.g. ffmpeg expects
+            // standard RTSP interleaved framing when using RTSP/TCP).
+            const { BaichuanRtspServer } = await import('@apocaliss92/reolink-baichuan-js');
+            const rtspServer = new BaichuanRtspServer({
+                api: client,
+                channel,
+                profile,
                 listenHost: '127.0.0.1',
                 listenPort: 0,
                 path: `/${streamKey}`,
+                logger: this.getLogger(),
+                tcpRtpFraming: 'rtsp-interleaved',
             });
+            await rtspServer.start();
 
             const rtspUrl = rtspServer.getRtspUrl();
             const entry = { rtspServer, rtspUrl };
@@ -585,7 +607,12 @@ export class StreamManager {
         }
     }
 
-    private async ensureNativeRfcServer(streamKey: string, channel: number, profile: StreamProfile): Promise<{ host: string; port: number; sdp: string; audioSampleRate?: number }> {
+    private async ensureNativeRfcServer(
+        streamKey: string,
+        channel: number,
+        profile: StreamProfile,
+        expectedVideoType?: 'H264' | 'H265',
+    ): Promise<{ host: string; port: number; sdp: string; audio?: { codec: string; sampleRate: number; channels: number } }> {
         const existingCreate = this.nativeRfcServerCreatePromises.get(streamKey);
         if (existingCreate) {
             return await existingCreate;
@@ -594,7 +621,14 @@ export class StreamManager {
         const createPromise = (async () => {
             const cached = this.nativeRfcServers.get(streamKey);
             if (cached?.server?.listening) {
-                return { host: cached.host, port: cached.port, sdp: cached.sdp };
+                if (expectedVideoType && cached.videoType !== expectedVideoType) {
+                    this.getLogger().warn(
+                        `Native RFC cache codec mismatch for ${streamKey}: cached=${cached.videoType} expected=${expectedVideoType}; recreating server.`,
+                    );
+                }
+                else {
+                    return { host: cached.host, port: cached.port, sdp: cached.sdp, audio: cached.audio };
+                }
             }
 
             if (cached) {
@@ -616,6 +650,18 @@ export class StreamManager {
 
             const api = await this.opts.ensureClient();
             const { BaichuanVideoStream } = await import('@apocaliss92/reolink-baichuan-js');
+            if (!this.loggedBaichuanLibInfo) {
+                this.loggedBaichuanLibInfo = true;
+                try {
+                    const lib: any = await import('@apocaliss92/reolink-baichuan-js');
+                    const buildId = lib?.BAICHUAN_JS_BUILD_ID ?? 'MISSING_BUILD_ID_EXPORT';
+                    const hasH265Depacketizer = typeof lib?.H265RtpDepacketizer === 'function';
+                    this.getLogger().warn(`[reolink-baichuan-js] loaded buildId=${buildId} hasH265RtpDepacketizer=${hasH265Depacketizer}`);
+                }
+                catch (e) {
+                    this.getLogger().warn(`[reolink-baichuan-js] failed to log buildId: ${e}`);
+                }
+            }
             const videoStream = new BaichuanVideoStream({
                 client: api.client,
                 api,
@@ -673,8 +719,23 @@ export class StreamManager {
 
             const keyframe = await waitForKeyframe();
 
-            let audio: AacAudioConfig | undefined;
-            const tryPrimeAudio = async (): Promise<AacAudioConfig | undefined> => {
+            // Best-effort framerate for raw elementary-stream input.
+            let fps = 25;
+            try {
+                const metadata: any = await api.getStreamMetadata(channel);
+                const streams: any[] = Array.isArray(metadata)
+                    ? metadata
+                    : Array.isArray(metadata?.streams) ? metadata.streams : [];
+                const stream = streams.find((s: any) => s?.profile === profile);
+                const fr = Number(stream?.frameRate);
+                if (Number.isFinite(fr) && fr > 0) fps = fr;
+            }
+            catch {
+                // ignore
+            }
+
+            let audio: { sampleRate: number; channels: number; configHex: string } | undefined;
+            const tryPrimeAudio = async (): Promise<typeof audio> => {
                 return await new Promise((resolve) => {
                     let sawAnyAudio = false;
                     let debugLogsLeft = 3;
@@ -697,12 +758,7 @@ export class StreamManager {
                             return;
                         }
                         cleanup();
-                        resolve({
-                            payloadType: audioPayloadType,
-                            sampleRate: parsed.sampleRate,
-                            channels: parsed.channels,
-                            configHex: parsed.configHex,
-                        });
+                        resolve({ sampleRate: parsed.sampleRate, channels: parsed.channels, configHex: parsed.configHex });
                     };
 
                     const cleanup = () => {
@@ -734,19 +790,92 @@ export class StreamManager {
                 } : undefined,
             };
 
-            const sdp = buildRfc4571Sdp(video, audio);
+            // WebRTC expects Opus. AAC-in-RTP is not widely accepted by browsers.
+            // Use ffmpeg to transcode ADTS AAC -> Opus RTP, then forward RTP packets via RFC4571.
+            const opusAudio: AudioConfig | undefined = audio
+                ? { codec: 'opus', payloadType: audioPayloadType, sampleRate: 48000, channels: 1 }
+                : undefined;
 
-            const muxer = new Rfc4571Muxer(this.getLogger(), videoPayloadType, audio ? audioPayloadType : undefined);
+            const sdp = buildRfc4571Sdp(video, opusAudio);
+
+            const muxer = new Rfc4571Muxer(this.getLogger(), videoPayloadType, opusAudio ? audioPayloadType : undefined);
+
+            let audioUdp: dgram.Socket | undefined;
+            let audioFfmpeg: ReturnType<typeof spawn> | undefined;
+            let loggedFirstOpus = false;
 
             const host = '127.0.0.1';
-            const server = net.createServer((socket) => muxer.addClient(socket));
+            let rfcClients = 0;
+            let idleTeardownTimer: NodeJS.Timeout | undefined;
+            let tearingDown = false;
+
+            const scheduleIdleTeardown = () => {
+                if (idleTeardownTimer) return;
+                // Small delay to allow quick stream switches without churn.
+                idleTeardownTimer = setTimeout(() => {
+                    idleTeardownTimer = undefined;
+                    if (rfcClients === 0) teardown(new Error('No RFC4571 clients (idle)')).catch(() => { });
+                }, 2500);
+            };
+
+            const cancelIdleTeardown = () => {
+                if (!idleTeardownTimer) return;
+                clearTimeout(idleTeardownTimer);
+                idleTeardownTimer = undefined;
+            };
+            const server = net.createServer((socket) => {
+                rfcClients++;
+                cancelIdleTeardown();
+                if (rfcClients <= 3) {
+                    this.getLogger().log(`Native RFC4571 client connected for ${streamKey}: ${socket.remoteAddress}:${socket.remotePort}`);
+                }
+                muxer.addClient(socket);
+
+                let counted = true;
+                const dec = () => {
+                    if (!counted) return;
+                    counted = false;
+                    rfcClients = Math.max(0, rfcClients - 1);
+                    if (rfcClients === 0) scheduleIdleTeardown();
+                };
+                socket.once('close', dec);
+                socket.once('error', dec);
+            });
 
             const teardown = async (reason?: any) => {
+                if (tearingDown) return;
+                tearingDown = true;
+
+                cancelIdleTeardown();
                 const message = reason?.message || reason?.toString?.() || reason;
                 if (message)
                     this.getLogger().warn(`Native RFC server teardown for ${streamKey}: ${message}`);
 
                 muxer.close();
+
+                try {
+                    audioUdp?.removeAllListeners();
+                    audioUdp?.close();
+                }
+                catch {
+                    // ignore
+                }
+                audioUdp = undefined;
+
+                try {
+                    audioFfmpeg?.stdin?.end();
+                }
+                catch {
+                    // ignore
+                }
+                try {
+                    audioFfmpeg?.kill('SIGKILL');
+                }
+                catch {
+                    // ignore
+                }
+                audioFfmpeg = undefined;
+
                 try {
                     await videoStream.stop();
                 }
@@ -763,6 +892,7 @@ export class StreamManager {
                 if (current?.server === server) this.nativeRfcServers.delete(streamKey);
             };
 
+            // Video: use native access units -> our known-good RTP packetizer.
             videoStream.on('videoAccessUnit' as any, (au: any) => {
                 try {
                     muxer.sendVideoAccessUnit(au.videoType, au.data, au.isKeyframe, au.microseconds);
@@ -771,14 +901,76 @@ export class StreamManager {
                     teardown(e);
                 }
             });
-            videoStream.on('audioFrame' as any, (frame: Buffer) => {
-                try {
-                    muxer.sendAudioAdtsFrame(frame);
-                }
-                catch (e) {
-                    teardown(e);
-                }
-            });
+
+            // Audio: if present, transcode AAC/ADTS -> Opus RTP with ffmpeg.
+            if (opusAudio) {
+                audioUdp = dgram.createSocket('udp4');
+                await new Promise<void>((resolve, reject) => {
+                    audioUdp!.once('error', reject);
+                    audioUdp!.bind(0, '127.0.0.1', () => resolve());
+                });
+
+                const audioPort = (audioUdp.address() as any).port as number;
+                audioUdp.on('message', (msg) => {
+                    try {
+                        if (!loggedFirstOpus && msg.length >= 12) {
+                            loggedFirstOpus = true;
+                            const pt = msg[1]! & 0x7f;
+                            const seq = msg.readUInt16BE(2);
+                            const ts = msg.readUInt32BE(4);
+                            this.getLogger().log(`First Opus RTP for ${streamKey}: pt=${pt} seq=${seq} ts=${ts} bytes=${msg.length}`);
+                        }
+                        muxer.sendAudioRtpPacket(msg);
+                    }
+                    catch (e) {
+                        teardown(e);
+                    }
+                });
+
+                const ffmpegArgs = [
+                    '-hide_banner',
+                    '-loglevel', 'error',
+                    '-analyzeduration', '0',
+                    '-probesize', '512',
+                    '-f', 'aac',
+                    '-i', 'pipe:0',
+                    '-acodec', 'libopus',
+                    '-application', 'lowdelay',
+                    '-ar', '48000',
+                    '-ac', '1',
+                    '-b:a', '32k',
+                    '-payload_type', String(audioPayloadType),
+                    '-f', 'rtp',
+                    `rtp://127.0.0.1:${audioPort}?pkt_size=1200`,
+                ];
+
+                audioFfmpeg = spawn('ffmpeg', ffmpegArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
+                audioFfmpeg.stderr?.on('data', (d) => {
+                    const msg = d.toString().trim();
+                    if (msg) this.getLogger().warn(`ffmpeg opus audio ${streamKey}: ${msg}`);
+                });
+                audioFfmpeg.once('exit', () => {
+                    teardown(new Error(`ffmpeg opus audio exited for ${streamKey}`));
+                });
+
+                let audioBackpressure = false;
+                audioFfmpeg.stdin?.on('drain', () => {
+                    audioBackpressure = false;
+                });
+
+                videoStream.on('audioFrame' as any, (frame: Buffer) => {
+                    try {
+                        if (!audioFfmpeg?.stdin?.writable) return;
+                        if (audioBackpressure) return;
+                        const ok = audioFfmpeg.stdin.write(frame);
+                        if (!ok) audioBackpressure = true;
+                    }
+                    catch (e) {
+                        teardown(e);
+                    }
+                });
+            }
+
             videoStream.on('error' as any, teardown as any);
             videoStream.on('close' as any, teardown as any);
 
@@ -792,13 +984,14 @@ export class StreamManager {
             if (!port)
                 throw new Error('Failed to bind native RFC TCP server');
 
-            this.nativeRfcServers.set(streamKey, { server, host, port, sdp, videoStream, muxer });
+            const audioInfo = opusAudio ? { codec: 'opus', sampleRate: opusAudio.sampleRate, channels: opusAudio.channels } : undefined;
+            this.nativeRfcServers.set(streamKey, { server, host, port, sdp, videoType: keyframe.videoType, audio: audioInfo, videoStream, muxer, audioFfmpeg, audioUdp });
             server.once('close', () => {
                 const current = this.nativeRfcServers.get(streamKey);
                 if (current?.server === server) this.nativeRfcServers.delete(streamKey);
             });
 
-            return { host, port, sdp, audioSampleRate: audio?.sampleRate };
+            return { host, port, sdp, audio: audioInfo };
         })();
 
         this.nativeRfcServerCreatePromises.set(streamKey, createPromise);
@@ -810,21 +1003,12 @@ export class StreamManager {
         }
     }
 
-    async getRfcStream(channel: number, profile: StreamProfile, streamKey: string): Promise<{ host: string; port: number; sdp: string; audioSampleRate?: number }> {
-        try {
-            return await this.ensureNativeRfcServer(streamKey, channel, profile);
-        }
-        catch (e) {
-            this.getLogger().warn(`Native stream failed for ${streamKey}, falling back to RTSP+ffmpeg`, e);
-
-            const { rtspUrl } = await this.ensureRtspServer(channel, profile, streamKey);
-            const describedSdp = await this.rtspDescribe(rtspUrl);
-            const videoInfo = this.extractVideoSdpInfo(describedSdp);
-            const audioInfo = this.extractAudioSdpInfo(describedSdp);
-            const sdp = this.buildWyzeStyleSdp(videoInfo, audioInfo);
-
-            const { host, port } = await this.ensureRfcServer(streamKey, rtspUrl, videoInfo.payloadType, audioInfo?.payloadType, sdp);
-            return { host, port, sdp, audioSampleRate: audioInfo?.sampleRate };
-        }
+    async getRfcStream(
+        channel: number,
+        profile: StreamProfile,
+        streamKey: string,
+        expectedVideoType?: 'H264' | 'H265',
+    ): Promise<{ host: string; port: number; sdp: string; audio?: { codec: string; sampleRate: number; channels: number } }> {
+        return await this.ensureNativeRfcServer(streamKey, channel, profile, expectedVideoType);
     }
 }
