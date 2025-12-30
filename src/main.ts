@@ -47,9 +47,10 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             try {
                 const deviceInfo = await api.getInfo();
                 const name = deviceInfo?.name;
-                const abilities = await api.getAbilityInfo(username);
+                const rtspChannel = 0;
+                const { abilities, capabilities } = await api.getDeviceCapabilities(rtspChannel);
 
-                this.console.log(JSON.stringify({ abilities, deviceInfo }));
+                this.console.log(JSON.stringify({ abilities, capabilities, deviceInfo }));
 
                 nativeId = deviceInfo.serialNumber;
 
@@ -67,10 +68,9 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 device.info = info;
                 device.storageSettings.values.username = username;
                 device.storageSettings.values.password = password;
-                device.storageSettings.values.rtspChannel = 0;
+                device.storageSettings.values.rtspChannel = rtspChannel;
                 device.storageSettings.values.ipAddress = ipAddress;
-                device.storageSettings.values.abilities = abilities;
-                device.storageSettings.values.deviceInfo = deviceInfo;
+                device.storageSettings.values.capabilities = capabilities;
                 device.updateDeviceInfo();
 
                 return nativeId;
@@ -88,6 +88,8 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
     async releaseDevice(id: string, nativeId: ScryptedNativeId): Promise<void> {
         if (this.devices.has(nativeId)) {
+            const device = this.devices.get(nativeId);
+            await device.release();
             this.devices.delete(nativeId);
         }
     }

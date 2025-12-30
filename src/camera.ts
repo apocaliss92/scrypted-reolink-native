@@ -1,10 +1,11 @@
-import type { BatteryInfo, PtzCommand, ReolinkBaichuanApi, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { BatteryInfo, DeviceCapabilities, PtzCommand, ReolinkBaichuanApi, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { Brightness, Camera, Device, DeviceProvider, FFmpegInput, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, Sleep, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
 import { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import ReolinkNativePlugin from "./main";
 import { parseStreamProfileFromId, StreamManager } from './stream-utils';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import * as net from 'node:net';
 
 class WavDataExtractor {
     private buffer: Buffer = Buffer.alloc(0);
@@ -95,8 +96,7 @@ class ReolinkCameraSiren extends ScryptedDeviceBase implements OnOff {
         const api = this.camera.getClient();
         if (!api) return;
 
-        // TODO: restore
-        // await api.setSiren(this.camera.getRtspChannel(), on);
+        await api.setSiren(this.camera.getRtspChannel(), on);
     }
 }
 
@@ -124,8 +124,7 @@ class ReolinkCameraFloodlight extends ScryptedDeviceBase implements OnOff, Brigh
         const api = this.camera.getClient();
         if (!api) return;
 
-        // TODO: restore
-        // await api.setWhiteLedState(this.camera.getRtspChannel(), on, brightness);
+        await api.setWhiteLedState(this.camera.getRtspChannel(), on, brightness);
     }
 }
 
@@ -148,8 +147,7 @@ class ReolinkCameraPirSensor extends ScryptedDeviceBase implements OnOff {
         const api = this.camera.getClient();
         if (!api) return;
 
-        // TODO: restore
-        // await api.setPirInfo(this.camera.getRtspChannel(), { enable: on ? 1 : 0 });
+        await api.setPirInfo(this.camera.getRtspChannel(), { enable: on ? 1 : 0 });
     }
 }
 
@@ -162,7 +160,16 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     pirSensor: ReolinkCameraPirSensor;
     private baichuanApi: ReolinkBaichuanApi | undefined;
     private baichuanInitPromise: Promise<ReolinkBaichuanApi> | undefined;
-    private abilities: any;
+    private refreshDeviceStatePromise: Promise<void> | undefined;
+
+    private subscribedToEvents = false;
+    private onSimpleEvent: ((ev: any) => void) | undefined;
+    private eventsApi: ReolinkBaichuanApi | undefined;
+
+    private periodicStarted = false;
+    private statusPollTimer: NodeJS.Timeout | undefined;
+    private eventsRestartTimer: NodeJS.Timeout | undefined;
+    private lastActivityMs = Date.now();
     private lastB64Snapshot: string | undefined;
     private lastSnapshotTaken: number | undefined;
     private streamManager: StreamManager;
@@ -174,6 +181,63 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     private intercomStopping: Promise<void> | undefined;
 
     storageSettings = new StorageSettings(this, {
+        ipAddress: {
+            title: 'IP Address',
+            type: 'string',
+        },
+        username: {
+            type: 'string',
+            title: 'Username',
+        },
+        password: {
+            type: 'password',
+            title: 'Password',
+        },
+        rtspChannel: {
+            type: 'number',
+            hide: true,
+            defaultValue: 0
+        },
+        capabilities: {
+            json: true,
+            hide: true
+        },
+        dispatchEvents: {
+            subgroup: 'Advanced',
+            title: 'Dispatch Events',
+            description: 'Select which events to emit. Empty disables event subscription entirely.',
+            multiple: true,
+            combobox: true,
+            defaultValue: ['motion', 'objects'],
+            choices: ['motion', 'objects'],
+            onPut: async (ov, value: string[] | string | undefined) => {
+                const next = this.normalizeDispatchEvents(value);
+                (this.storageSettings.values as any).dispatchEvents = next;
+
+                await this.applyEventDispatchSettings();
+            },
+        },
+        debugEventLogs: {
+            subgroup: 'Advanced',
+            title: 'Debug Event Logs',
+            description: 'Log received/processed motion/object events.',
+            type: 'boolean',
+            defaultValue: false,
+        },
+        debugLogs: {
+            subgroup: 'Advanced',
+            title: 'Debug Logs',
+            description: 'Enable specific Baichuan client debug/trace logs. Requires reconnect.',
+            multiple: true,
+            combobox: true,
+            defaultValue: [],
+            choices: ['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'debugH264', 'debugParamSets'],
+            onPut: async (ov, value: string[] | string | undefined) => {
+                const next = this.normalizeDebugLogs(value);
+                (this.storageSettings.values as any).debugLogs = next;
+                await this.resetBaichuanClient('debugLogs changed');
+            },
+        },
         motionTimeout: {
             subgroup: 'Advanced',
             title: 'Motion Timeout',
@@ -219,30 +283,19 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             type: 'boolean',
             hide: true
         },
-        deviceInfo: {
-            json: true,
-            hide: true
-        },
-        abilities: {
-            json: true,
-            hide: true
-        },
-        ipAddress: {
-            title: 'IP Address',
-            type: 'string',
-        },
-        username: {
-            type: 'string',
-            title: 'Username',
-        },
-        password: {
-            type: 'password',
-            title: 'Password',
-        },
-        rtspChannel: {
+        ptzMoveDurationMs: {
+            subgroup: 'Advanced',
+            title: 'PTZ Move Duration (ms)',
+            description: 'How long a PTZ command moves before sending stop. Higher = more movement per click.',
             type: 'number',
-            hide: true,
-            defaultValue: 0
+            defaultValue: 500,
+        },
+        ptzZoomStep: {
+            subgroup: 'Advanced',
+            title: 'PTZ Zoom Step',
+            description: 'How much to change zoom per zoom command (in zoom factor units, where 1.0 is normal).',
+            type: 'number',
+            defaultValue: 0.2,
         },
     });
 
@@ -284,8 +337,18 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             this.getLogger().warn('Error closing Baichuan client during reset', e);
         }
         finally {
+            if (this.eventsApi && this.onSimpleEvent) {
+                try {
+                    this.eventsApi.simpleEvents.off('event', this.onSimpleEvent);
+                }
+                catch {
+                    // ignore
+                }
+            }
             this.baichuanApi = undefined;
             this.baichuanInitPromise = undefined;
+            this.subscribedToEvents = false;
+            this.eventsApi = undefined;
         }
 
         if (reason) {
@@ -315,8 +378,14 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     async init() {
         const logger = this.getLogger();
 
+        // Migrate older boolean value to the new multi-select format.
+        this.migrateDispatchEventsSetting();
+
         // Initialize Baichuan API
         await this.ensureClient();
+
+        // Refresh cached device metadata/abilities as early as possible, since we use them for interface gating.
+        await this.refreshDeviceState();
 
         await this.reportDevices();
         this.updateDeviceInfo();
@@ -336,6 +405,19 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         logger.log(`Updating device interfaces: ${JSON.stringify(interfaces)}`);
 
         await sdk.deviceManager.onDeviceDiscovered(device);
+
+        // Start event subscription after discovery.
+        try {
+            if (this.isEventDispatchEnabled()) {
+                await this.ensureBaichuanEventSubscription();
+            }
+        }
+        catch (e) {
+            logger.warn('Failed to subscribe to Baichuan events', e);
+        }
+
+        // Periodic status refresh + event resubscribe.
+        this.startPeriodicTasks();
 
         if (this.hasBattery() && !this.storageSettings.getItem('prebufferSet')) {
             const device = sdk.systemManager.getDeviceById<Settings>(this.id);
@@ -366,16 +448,13 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             }
 
             const { ReolinkBaichuanApi } = await import("@apocaliss92/reolink-baichuan-js");
+            const debugOptions = this.getBaichuanDebugOptions();
             this.baichuanApi = new ReolinkBaichuanApi({
                 host: ipAddress,
                 username,
                 password,
                 logger: this.console,
-                // debug: true,
-                debugOptions: {
-                    // debugRtsp: true,
-                    // traceStream: true,
-                },
+                ...(debugOptions ? { debugOptions } : {}),
             });
 
             await this.baichuanApi.login();
@@ -395,6 +474,273 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
     getClient(): ReolinkBaichuanApi | undefined {
         return this.baichuanApi;
+    }
+
+    private async refreshDeviceState(): Promise<void> {
+        if (this.refreshDeviceStatePromise) return this.refreshDeviceStatePromise;
+
+        this.refreshDeviceStatePromise = (async () => {
+            const logger = this.getLogger();
+            const api = await this.ensureClient();
+            const channel = this.getRtspChannel();
+
+            try {
+                const { capabilities, abilities, support, presets } = await api.getDeviceCapabilities(channel);
+                this.storageSettings.values.capabilities = capabilities;
+                this.storageSettings.values.cachedPresets = presets ?? [];
+                this.console.log(`Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets })}`);
+            }
+            catch (e) {
+                logger.warn('Failed to refresh abilities', e);
+            }
+
+            // Best-effort status refreshes.
+            await this.refreshAuxDevicesStatus().catch(() => { });
+        })().finally(() => {
+            this.refreshDeviceStatePromise = undefined;
+        });
+
+        return this.refreshDeviceStatePromise;
+    }
+
+    private async ensureBaichuanEventSubscription(): Promise<void> {
+        if (!this.isEventDispatchEnabled()) {
+            await this.disableBaichuanEventSubscription();
+            return;
+        }
+        if (this.subscribedToEvents) return;
+        const api = await this.ensureClient();
+
+        try {
+            await api.subscribeEvents();
+        }
+        catch {
+            // Some firmwares don't require explicit subscribe or may reject it.
+        }
+
+        this.onSimpleEvent ||= (ev: any) => {
+            try {
+                if (!this.isEventDispatchEnabled()) return;
+                if (Boolean((this.storageSettings.values as any).debugEventLogs)) {
+                    this.getLogger().debug(`Baichuan event: ${JSON.stringify(ev)}`);
+                }
+                const channel = this.getRtspChannel();
+                if (ev?.channel !== undefined && ev.channel !== channel) return;
+
+                const objects: string[] = [];
+                let motion = false;
+
+                switch (ev?.type) {
+                    case 'motion':
+                        motion = this.shouldDispatchMotion();
+                        break;
+                    case 'doorbell':
+                        // Placeholder: treat doorbell as motion.
+                        motion = this.shouldDispatchMotion();
+                        break;
+                    case 'people':
+                    case 'vehicle':
+                    case 'animal':
+                    case 'face':
+                    case 'package':
+                    case 'other':
+                        if (this.shouldDispatchObjects()) objects.push(ev.type);
+                        break;
+                    default:
+                        return;
+                }
+
+                this.processEvents({ motion, objects }).catch(() => { });
+            }
+            catch {
+                // ignore
+            }
+        };
+
+        // Attach the handler to the current API instance, and detach from any previous instance.
+        if (this.eventsApi && this.eventsApi !== api && this.onSimpleEvent) {
+            try {
+                this.eventsApi.simpleEvents.off('event', this.onSimpleEvent);
+            }
+            catch {
+                // ignore
+            }
+        }
+        if (this.eventsApi !== api && this.onSimpleEvent) {
+            api.simpleEvents.on('event', this.onSimpleEvent);
+            this.eventsApi = api;
+        }
+
+        this.subscribedToEvents = true;
+    }
+
+    private async disableBaichuanEventSubscription(): Promise<void> {
+        // Do not wake up battery cameras / do not force login: best-effort cleanup only.
+        const api = this.getClient();
+        if (api?.client?.loggedIn) {
+            try {
+                await api.unsubscribeEvents();
+            }
+            catch {
+                // ignore
+            }
+        }
+
+        if (this.eventsApi && this.onSimpleEvent) {
+            try {
+                this.eventsApi.simpleEvents.off('event', this.onSimpleEvent);
+            }
+            catch {
+                // ignore
+            }
+        }
+
+        this.subscribedToEvents = false;
+        this.eventsApi = undefined;
+
+        if (this.motionTimeout) {
+            clearTimeout(this.motionTimeout);
+        }
+        this.motionDetected = false;
+    }
+
+    private async applyEventDispatchSettings(): Promise<void> {
+        // User-initiated settings change counts as activity.
+        this.markActivity();
+
+        // Empty selection disables everything.
+        if (!this.isEventDispatchEnabled()) {
+            await this.disableBaichuanEventSubscription();
+            return;
+        }
+
+        // If motion is not selected, ensure state is cleared.
+        if (!this.shouldDispatchMotion()) {
+            if (this.motionTimeout) clearTimeout(this.motionTimeout);
+            this.motionDetected = false;
+        }
+
+        // Apply immediately even if we were already subscribed.
+        // This avoids edge cases where the camera/server needs a fresh subscription.
+        await this.disableBaichuanEventSubscription();
+        await this.ensureBaichuanEventSubscription();
+    }
+
+    private markActivity(): void {
+        this.lastActivityMs = Date.now();
+    }
+
+    private shouldAvoidWakingBatteryCamera(): boolean {
+        if (!this.hasBattery()) return false;
+        if (this.sleeping) return true;
+
+        // If we don't already have an active logged-in client, don't try to connect/login.
+        const api = this.getClient();
+        if (!api?.client?.loggedIn) return true;
+
+        // If there's no recent activity, avoid periodic polling/resubscribe.
+        const ageMs = Date.now() - this.lastActivityMs;
+        return ageMs > 30_000;
+    }
+
+    async release() {
+        this.statusPollTimer && clearInterval(this.statusPollTimer);
+        this.eventsRestartTimer && clearInterval(this.eventsRestartTimer);
+        return this.resetBaichuanClient();
+    }
+
+    private startPeriodicTasks(): void {
+        if (this.periodicStarted) return;
+        this.periodicStarted = true;
+
+        this.statusPollTimer = setInterval(() => {
+            this.periodic10sTick().catch(() => { });
+        }, 10_000);
+
+        this.eventsRestartTimer = setInterval(() => {
+            this.periodic60sRestartEvents().catch(() => { });
+        }, 60_000);
+    }
+
+    private async periodic10sTick(): Promise<void> {
+        if (this.shouldAvoidWakingBatteryCamera()) return;
+
+        // For wired cameras, reconnecting is fine.
+        if (!this.hasBattery()) {
+            await this.ensureClient();
+        }
+
+        await this.refreshAuxDevicesStatus();
+
+        // Best-effort: ensure we're subscribed.
+        if (this.isEventDispatchEnabled() && !this.subscribedToEvents) {
+            if (this.hasBattery()) {
+                const api = this.getClient();
+                if (!api?.client?.loggedIn) return;
+            }
+            await this.ensureBaichuanEventSubscription();
+        }
+    }
+
+    private async periodic60sRestartEvents(): Promise<void> {
+        if (this.shouldAvoidWakingBatteryCamera()) return;
+
+        if (!this.isEventDispatchEnabled()) {
+            await this.disableBaichuanEventSubscription();
+            return;
+        }
+
+        // Wired cameras can reconnect; battery cameras only operate on an existing active client.
+        if (!this.hasBattery()) {
+            await this.ensureClient();
+        }
+        else {
+            const api = this.getClient();
+            if (!api?.client?.loggedIn) return;
+        }
+
+        const api = this.getClient();
+        if (!api) return;
+
+        try {
+            await api.unsubscribeEvents();
+        }
+        catch {
+            // ignore
+        }
+
+        this.subscribedToEvents = false;
+        await this.ensureBaichuanEventSubscription();
+    }
+
+    private async refreshAuxDevicesStatus(): Promise<void> {
+        const api = this.getClient();
+        if (!api) return;
+
+        const channel = this.getRtspChannel();
+
+        try {
+            if (this.hasFloodlight()) {
+                const wl = await api.getWhiteLedState(channel);
+                if (this.floodlight) {
+                    this.floodlight.on = !!wl.enabled;
+                    if (wl.brightness !== undefined) this.floodlight.brightness = wl.brightness;
+                }
+            }
+        }
+        catch {
+            // ignore
+        }
+
+        try {
+            if (this.hasPirEvents()) {
+                const pir = await api.getPirInfo(channel);
+                if (this.pirSensor) this.pirSensor.on = !!pir.enabled;
+            }
+        }
+        catch {
+            // ignore
+        }
     }
 
     async getVideoTextOverlays(): Promise<Record<string, VideoTextOverlay>> {
@@ -452,27 +798,22 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         }
     }
 
-    getAbilities() {
-        if (!this.abilities) {
-            // this.abilities = 
-        }
-
-        return this.abilities;
-    }
-
-    getEncoderSettings() {
-        return this.getDeviceData()?.enc?.Enc;
+    getAbilities(): DeviceCapabilities {
+        return this.storageSettings.values.capabilities;
     }
 
     async getDetectionInput(detectionId: string, eventId?: any): Promise<MediaObject> {
-        return;
+        return null;
     }
 
     async ptzCommand(command: PanTiltZoomCommand): Promise<void> {
+        this.markActivity();
         const client = await this.ensureClient();
         if (!client) {
             return;
         }
+
+        const channel = this.getRtspChannel();
 
         // Map PanTiltZoomCommand to PtzCommand
         let ptzAction: 'start' | 'stop' = 'start';
@@ -497,11 +838,28 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 ptzAction = 'start';
             }
         } else if (command.zoom !== undefined) {
-            // Zoom is handled separately
-            if (command.zoom !== 0) {
-                // TODO: restore
-                // await client.zoomToFactor(channel, command.zoom);
+            // Zoom is handled separately.
+            // Scrypted typically provides a normalized zoom value; treat it as direction and apply a step.
+            const z = Number(command.zoom);
+            if (!Number.isFinite(z) || z === 0) return;
+
+            const step = Number(this.storageSettings.values.ptzZoomStep);
+            const stepFactor = Number.isFinite(step) && step > 0 ? step : 0.2;
+
+            const info = await client.getZoomFocus(channel);
+            if (!info?.zoom) {
+                this.getLogger().warn('Zoom command requested but camera did not report zoom support.');
+                return;
             }
+
+            // In Baichuan API, 1000 == 1.0x.
+            const curFactor = (info.zoom.curPos ?? 1000) / 1000;
+            const minFactor = (info.zoom.minPos ?? 1000) / 1000;
+            const maxFactor = (info.zoom.maxPos ?? 1000) / 1000;
+
+            const direction = z > 0 ? 1 : -1;
+            const next = Math.min(maxFactor, Math.max(minFactor, curFactor + direction * stepFactor));
+            await client.zoomToFactor(channel, next);
             return;
         }
 
@@ -509,14 +867,10 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             action: ptzAction,
             command: ptzCommand,
             speed: typeof command.speed === 'number' ? command.speed : 32,
+            autoStopMs: Number(this.storageSettings.values.ptzMoveDurationMs) || 500,
         };
 
-        // TODO: restore
-        // await client.ptz(channel, ptzCmd);
-    }
-
-    getDeviceData() {
-        return this.storageSettings.values.deviceInfo;
+        await client.ptz(channel, ptzCmd);
     }
 
     async getObjectTypes(): Promise<ObjectDetectionTypes> {
@@ -545,6 +899,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     async startIntercom(media: MediaObject): Promise<void> {
+        this.markActivity();
         const logger = this.getLogger();
         const channel = this.getRtspChannel();
 
@@ -565,12 +920,37 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             throw new Error(`Invalid talk block size: ${fullBlockSize}`);
         }
 
-        const ffmpegInput = await sdk.mediaManager.convertMediaObjectToJSON<FFmpegInput>(media, ScryptedMimeTypes.FFmpegInput);
-        const inputArgs = (ffmpegInput as any)?.inputArguments as string[] | undefined;
-        const inputUrl = (ffmpegInput as any)?.url as string | undefined;
-        if (!inputUrl) {
+        let inputArgs: string[] = [];
+        let inputUrl: string | undefined;
+        let resolvedInputUrl: string | undefined;
+
+        // FFmpegInput RTSP URLs are frequently backed by a local ephemeral RTSP server.
+        // In practice, the port may not be listening immediately; retry a few times before spawning ffmpeg.
+        const maxInputAttempts = 3;
+        for (let attempt = 1; attempt <= maxInputAttempts; attempt++) {
+            const ffmpegInput = await sdk.mediaManager.convertMediaObjectToJSON<FFmpegInput>(media, ScryptedMimeTypes.FFmpegInput);
+            inputArgs = ((ffmpegInput as any)?.inputArguments as string[] | undefined) ?? [];
+            inputUrl = (ffmpegInput as any)?.url as string | undefined;
+            if (!inputUrl) {
+                await this.stopIntercom();
+                throw new Error('Intercom media did not provide a valid FFmpeg input url');
+            }
+
+            resolvedInputUrl = await this.rewriteLocalhostFfmpegInputUrl(inputUrl);
+            if (resolvedInputUrl !== inputUrl) {
+                logger.warn(`Intercom FFmpeg input URL rewritten: ${inputUrl} -> ${resolvedInputUrl}`);
+            }
+
+            const reachable = await this.waitForRtspInputListening(resolvedInputUrl, 1500);
+            if (reachable) break;
+
+            logger.warn(`Intercom FFmpeg input not reachable yet (attempt ${attempt}/${maxInputAttempts}): ${resolvedInputUrl}`);
+            await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+
+        if (!resolvedInputUrl) {
             await this.stopIntercom();
-            throw new Error('Intercom media did not provide a valid FFmpeg input url');
+            throw new Error('Intercom could not resolve FFmpeg input URL');
         }
 
         // Pipe: input media -> ffmpeg -> WAV(ADPCM IMA) -> strip WAV -> talkSession.sendAudio()
@@ -578,7 +958,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             '-hide_banner',
             '-loglevel', 'error',
             ...(Array.isArray(inputArgs) ? inputArgs : []),
-            '-i', inputUrl,
+            '-i', resolvedInputUrl,
             '-vn',
             '-ac', soundTrack?.toLowerCase() === 'stereo' ? '2' : '1',
             '-ar', String(sampleRate),
@@ -641,6 +1021,133 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         });
     }
 
+    private async rewriteLocalhostFfmpegInputUrl(inputUrl: string): Promise<string> {
+        // FFmpegInput URLs often point to 127.0.0.1 of the *Scrypted server* (and are frequently bound only to localhost).
+        // If we're running on the server, localhost is correct.
+        // If we're running remotely (dev/debug), localhost is wrong, so we need a fallback.
+        try {
+            const url = new URL(inputUrl);
+            if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost') {
+                return inputUrl;
+            }
+
+            const port = url.port ? Number(url.port) : NaN;
+            const serverHost = await this.getScryptedServerHostForRewrite();
+
+            // If we have a port, try localhost first (loopback is common), then fallback to server host (remote dev).
+            if (Number.isFinite(port) && port > 0) {
+                if (await this.waitForTcpListening('127.0.0.1', port, 750)) {
+                    return inputUrl;
+                }
+
+                if (serverHost && serverHost !== '127.0.0.1' && serverHost !== 'localhost') {
+                    url.hostname = serverHost;
+                    const rewritten = url.toString();
+                    if (await this.waitForTcpListening(serverHost, port, 750)) {
+                        return rewritten;
+                    }
+                }
+
+                // Neither candidate seems reachable; return original to preserve debuggability.
+                return inputUrl;
+            }
+
+            // No port: best-effort rewrite for remote dev, otherwise keep original.
+            if (!serverHost || serverHost === '127.0.0.1' || serverHost === 'localhost') {
+                return inputUrl;
+            }
+
+            url.hostname = serverHost;
+            return url.toString();
+        }
+        catch {
+            return inputUrl;
+        }
+    }
+
+    private async waitForRtspInputListening(inputUrl: string, totalTimeoutMs: number): Promise<boolean> {
+        try {
+            const url = new URL(inputUrl);
+            if (url.protocol !== 'rtsp:') return true;
+
+            const port = url.port ? Number(url.port) : NaN;
+            if (!Number.isFinite(port) || port <= 0) return true;
+
+            const host = (url.hostname === 'localhost' || url.hostname === '127.0.0.1') ? '127.0.0.1' : url.hostname;
+            return await this.waitForTcpListening(host, port, totalTimeoutMs);
+        }
+        catch {
+            return true;
+        }
+    }
+
+    private async waitForTcpListening(host: string, port: number, totalTimeoutMs: number): Promise<boolean> {
+        const deadline = Date.now() + totalTimeoutMs;
+        while (Date.now() < deadline) {
+            const remaining = deadline - Date.now();
+            const ok = await this.canConnectTcp(host, port, Math.min(250, Math.max(50, remaining)));
+            if (ok) return true;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        return false;
+    }
+
+    private async canConnectTcp(host: string, port: number, timeoutMs: number): Promise<boolean> {
+        return await new Promise<boolean>((resolve) => {
+            const socket = new net.Socket();
+            let done = false;
+
+            const finish = (ok: boolean) => {
+                if (done) return;
+                done = true;
+                try {
+                    socket.destroy();
+                }
+                catch {
+                    // ignore
+                }
+                resolve(ok);
+            };
+
+            socket.setTimeout(timeoutMs);
+            socket.once('connect', () => finish(true));
+            socket.once('timeout', () => finish(false));
+            socket.once('error', () => finish(false));
+
+            try {
+                socket.connect(port, host);
+            }
+            catch {
+                finish(false);
+            }
+        });
+    }
+
+    private async getScryptedServerHostForRewrite(): Promise<string | undefined> {
+        const em = (sdk as any).endpointManager;
+        const fns = [
+            em?.getInsecurePublicLocalEndpoint?.bind(em),
+            em?.getPublicLocalEndpoint?.bind(em),
+            em?.getInsecureLocalEndpoint?.bind(em),
+            em?.getLocalEndpoint?.bind(em),
+        ].filter(Boolean) as Array<() => any>;
+
+        for (const fn of fns) {
+            try {
+                const v = await fn();
+                if (typeof v !== 'string') continue;
+                if (!v.startsWith('http://') && !v.startsWith('https://')) continue;
+                const host = new URL(v).hostname;
+                if (host) return host;
+            }
+            catch {
+                // ignore
+            }
+        }
+
+        return undefined;
+    }
+
     stopIntercom(): Promise<void> {
         if (this.intercomStopping) return this.intercomStopping;
 
@@ -692,52 +1199,42 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     hasSiren() {
-        const abilities = this.getAbilities();
-        // Check for audio alarm support in abilities
-        const hasAbility = abilities?.supportAudioAlarm || abilities?.audioAlarm;
-        return hasAbility && (typeof hasAbility === 'number' ? hasAbility > 0 : hasAbility === 1);
+        const capabilities = this.getAbilities();
+        return Boolean(capabilities?.hasSiren);
     }
 
     hasFloodlight() {
-        const channelData = this.getAbilities();
-        // Check for floodlight/white LED support
-        const floodLight = channelData?.floodLight || channelData?.whiteLed || channelData?.supportFLswitch || channelData?.supportFLBrightness;
-        return floodLight && (typeof floodLight === 'number' ? floodLight > 0 : floodLight === 1);
+        const capabilities = this.getAbilities();
+        return Boolean(capabilities?.hasFloodlight);
     }
 
     hasBattery() {
-        const abilities = this.getAbilities();
-        const battery = abilities?.battery;
-        return battery && (typeof battery === 'number' ? battery > 0 : battery === 1);
+        const capabilities = this.getAbilities();
+        return Boolean(capabilities?.hasBattery);
     }
 
     getPtzCapabilities() {
-        const abilities = this.getAbilities();
-        const hasZoom = abilities?.supportDigitalZoom || abilities?.zoom;
-        const hasPanTilt = abilities?.ptzCtrl || abilities?.ptz;
-        const hasPresets = abilities?.ptzPreset || abilities?.preset;
+        const capabilities = this.getAbilities();
+        const hasZoom = Boolean(capabilities?.hasZoom);
+        const hasPanTilt = Boolean(capabilities?.hasPan && capabilities?.hasTilt);
+        const hasPresets = Boolean(capabilities?.hasPresets);
 
         return {
-            hasZoom: hasZoom && (typeof hasZoom === 'number' ? hasZoom > 0 : hasZoom === 1),
-            hasPanTilt: hasPanTilt && (typeof hasPanTilt === 'number' ? hasPanTilt > 0 : hasPanTilt === 1),
-            hasPresets: hasPresets && (typeof hasPresets === 'number' ? hasPresets > 0 : hasPresets === 1),
-            hasPtz: (hasZoom || hasPanTilt || hasPresets) &&
-                ((typeof hasZoom === 'number' ? hasZoom > 0 : hasZoom === 1) ||
-                    (typeof hasPanTilt === 'number' ? hasPanTilt > 0 : hasPanTilt === 1) ||
-                    (typeof hasPresets === 'number' ? hasPresets > 0 : hasPresets === 1))
+            hasZoom,
+            hasPanTilt,
+            hasPresets,
+            hasPtz: hasZoom || hasPanTilt || hasPresets,
         };
     }
 
     hasPtzCtrl() {
-        const abilities = this.getAbilities();
-        const zoom = abilities?.supportDigitalZoom || abilities?.zoom;
-        return zoom && (typeof zoom === 'number' ? zoom > 0 : zoom === 1);
+        const capabilities = this.getAbilities();
+        return Boolean(capabilities?.hasPtz);
     }
 
     hasPirEvents() {
-        const abilities = this.getAbilities();
-        const pir = abilities?.mdWithPir || abilities?.pir;
-        return pir && (typeof pir === 'number' ? pir > 0 : pir === 1);
+        const capabilities = this.getAbilities();
+        return Boolean(capabilities?.hasPir);
     }
 
     async getDeviceInterfaces() {
@@ -827,20 +1324,21 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         // }
     }
 
-    updateDeviceInfo() {
+    async updateDeviceInfo() {
         const ip = this.storageSettings.values.ipAddress;
         if (!ip)
             return;
+
+        const api = await this.ensureClient();
+        const deviceData = await api.getInfo();
         const info = this.info || {};
         info.ip = ip;
-
-        const deviceData = this.getDeviceData();
 
         info.serialNumber = deviceData?.serialNumber || deviceData?.itemNo;
         info.firmware = deviceData?.firmwareVersion || deviceData?.firmVer;
         info.version = deviceData?.hardwareVersion || deviceData?.boardInfo;
         info.model = deviceData?.type || deviceData?.typeInfo;
-        info.manufacturer = 'Reolink';
+        info.manufacturer = 'Reolink native';
         info.managementUrl = `http://${ip}`;
         this.info = info;
     }
@@ -848,24 +1346,31 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     async processEvents(events: { motion?: boolean; objects?: string[] }) {
         const logger = this.getLogger();
 
+        if (!this.isEventDispatchEnabled()) return;
+
+        const debugEvents = Boolean((this.storageSettings.values as any).debugEventLogs);
+        if (debugEvents) {
+            logger.debug(`Events received: ${JSON.stringify(events)}`);
+        }
+
         // const debugEvents = this.storageSettings.values.debugEvents;
         // if (debugEvents) {
         //     logger.debug(`Events received: ${JSON.stringify(events)}`);
         // }
 
-        if (events.motion !== this.motionDetected) {
+        if (this.shouldDispatchMotion() && events.motion !== this.motionDetected) {
             if (events.motion) {
-
                 this.motionDetected = true;
                 this.motionTimeout && clearTimeout(this.motionTimeout);
                 this.motionTimeout = setTimeout(() => this.motionDetected = false, this.storageSettings.values.motionTimeout * 1000);
-            } else {
+            }
+            else {
                 this.motionDetected = false;
                 this.motionTimeout && clearTimeout(this.motionTimeout);
             }
         }
 
-        if (events.objects.length) {
+        if (this.shouldDispatchObjects() && events.objects?.length) {
             const od: ObjectsDetected = {
                 timestamp: Date.now(),
                 detections: [],
@@ -880,15 +1385,74 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         }
     }
 
-    async listenLoop() {
-        return null;
+    private normalizeDebugLogs(value: unknown): string[] {
+        const allowed = new Set(['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'debugH264', 'debugParamSets']);
+
+        const items = Array.isArray(value) ? value : (typeof value === 'string' ? [value] : []);
+        const out: string[] = [];
+        for (const v of items) {
+            if (typeof v !== 'string') continue;
+            const s = v.trim();
+            if (!allowed.has(s)) continue;
+            out.push(s);
+        }
+        return Array.from(new Set(out));
     }
 
-    async listenEvents() {
-        return null;
+    private getBaichuanDebugOptions(): any | undefined {
+        const sel = new Set(this.normalizeDebugLogs((this.storageSettings.values as any).debugLogs));
+        if (!sel.size) return undefined;
+
+        // Keep this as `any` so we don't need to import DebugOptions types here.
+        const debugOptions: any = {};
+        for (const k of sel) {
+            debugOptions[k] = true;
+        }
+        return debugOptions;
+    }
+
+    private normalizeDispatchEvents(value: unknown): Array<'motion' | 'objects'> {
+        const allowed = new Set(['motion', 'objects']);
+
+        // Back-compat: old boolean setting.
+        if (typeof value === 'boolean') return value ? ['motion', 'objects'] : [];
+
+        const items = Array.isArray(value) ? value : (typeof value === 'string' ? [value] : []);
+        const out: Array<'motion' | 'objects'> = [];
+        for (const v of items) {
+            if (typeof v !== 'string') continue;
+            const s = v.trim();
+            if (!allowed.has(s)) continue;
+            out.push(s as 'motion' | 'objects');
+        }
+        return Array.from(new Set(out));
+    }
+
+    private getDispatchEventsSelection(): Set<'motion' | 'objects'> {
+        return new Set(this.normalizeDispatchEvents((this.storageSettings.values as any).dispatchEvents));
+    }
+
+    private isEventDispatchEnabled(): boolean {
+        return this.getDispatchEventsSelection().size > 0;
+    }
+
+    private shouldDispatchMotion(): boolean {
+        return this.getDispatchEventsSelection().has('motion');
+    }
+
+    private shouldDispatchObjects(): boolean {
+        return this.getDispatchEventsSelection().has('objects');
+    }
+
+    private migrateDispatchEventsSetting(): void {
+        const cur = (this.storageSettings.values as any).dispatchEvents;
+        if (typeof cur === 'boolean') {
+            (this.storageSettings.values as any).dispatchEvents = cur ? ['motion', 'objects'] : [];
+        }
     }
 
     async takeSnapshotInternal(timeout?: number) {
+        this.markActivity();
         return this.withBaichuanRetry(async () => {
             try {
                 const now = Date.now();
@@ -954,6 +1518,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
 
     async getVideoStream(vso: RequestMediaStreamOptions): Promise<MediaObject> {
+        this.markActivity();
         if (!vso)
             throw new Error('video streams not set up or no longer exists.');
 
@@ -1003,6 +1568,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     async getVideoStreamOptions(): Promise<UrlMediaStreamOptions[]> {
+        this.markActivity();
         return this.withBaichuanRetry(async () => {
             const client = await this.ensureClient();
             const channel = this.storageSettings.values.rtspChannel;
