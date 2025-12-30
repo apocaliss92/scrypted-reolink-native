@@ -116,6 +116,11 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     private lastSnapshotTaken: number | undefined;
     private streamManager: StreamManager;
 
+    private dispatchEventsApplyTimer: NodeJS.Timeout | undefined;
+    private dispatchEventsApplySeq = 0;
+
+    private lastAppliedDispatchEventsKey: string | undefined;
+
     intercomClient: RtspClient;
 
     private intercom: ReolinkBaichuanIntercom;
@@ -148,34 +153,33 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             description: 'Select which events to emit. Empty disables event subscription entirely.',
             multiple: true,
             combobox: true,
+            immediate: true,
             defaultValue: ['motion', 'objects'],
             choices: ['motion', 'objects'],
-            onPut: async (ov, value: string[] | string | undefined) => {
-                const next = this.normalizeDispatchEvents(value);
-                (this.storageSettings.values as any).dispatchEvents = next;
-
-                await this.applyEventDispatchSettings();
+            onPut: async () => {
+                this.scheduleApplyEventDispatchSettings();
             },
-        },
-        debugEventLogs: {
-            subgroup: 'Advanced',
-            title: 'Debug Event Logs',
-            description: 'Log received/processed motion/object events.',
-            type: 'boolean',
-            defaultValue: false,
         },
         debugLogs: {
             subgroup: 'Advanced',
             title: 'Debug Logs',
-            description: 'Enable specific Baichuan client debug/trace logs. Requires reconnect.',
+            description: 'Enable specific debug logs. Baichuan client logs require reconnect; event logs are immediate.',
             multiple: true,
             combobox: true,
+            immediate: true,
             defaultValue: [],
-            choices: ['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'debugH264', 'debugParamSets'],
-            onPut: async (ov, value: string[] | string | undefined) => {
-                const next = this.normalizeDebugLogs(value);
-                (this.storageSettings.values as any).debugLogs = next;
-                await this.resetBaichuanClient('debugLogs changed');
+            choices: ['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'debugH264', 'debugParamSets', 'eventLogs'],
+            onPut: async (ov, value) => {
+                // Only reconnect if Baichuan-client flags changed; toggling event logs should be immediate.
+                const oldSel = new Set(ov);
+                const newSel = new Set(value);
+                oldSel.delete('eventLogs');
+                newSel.delete('eventLogs');
+
+                const changed = oldSel.size !== newSel.size || Array.from(oldSel).some((k) => !newSel.has(k));
+                if (changed) {
+                    await this.resetBaichuanClient('debugLogs changed');
+                }
             },
         },
         motionTimeout: {
@@ -237,6 +241,17 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             type: 'number',
             defaultValue: 0.2,
         },
+        intercomBlocksPerPayload: {
+            subgroup: 'Advanced',
+            title: 'Intercom Blocks Per Payload',
+            description: 'Lower reduces latency (more packets). Typical: 1-4. Requires restarting talk session to take effect.',
+            type: 'number',
+            defaultValue: 1,
+            onPut: async (ov, value: number) => {
+                (this.storageSettings.values as any).intercomBlocksPerPayload = value;
+                this.intercom.setBlocksPerPayload(value);
+            },
+        },
     });
 
     constructor(nativeId: string, public plugin: ReolinkNativePlugin) {
@@ -254,6 +269,8 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             ensureClient: () => this.ensureClient(),
             withBaichuanRetry: (fn) => this.withBaichuanRetry(fn),
         });
+
+        this.intercom.setBlocksPerPayload((this.storageSettings.values as any).intercomBlocksPerPayload);
 
         this.storageSettings.settings.presets.onGet = async () => {
             const choices = this.storageSettings.values.cachedPresets.map((preset) => preset.id + '=' + preset.name);
@@ -328,6 +345,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
         // Migrate older boolean value to the new multi-select format.
         this.migrateDispatchEventsSetting();
+        this.migrateDebugEventLogsSetting();
 
         // Initialize Baichuan API
         await this.ensureClient();
@@ -469,7 +487,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         this.onSimpleEvent ||= (ev: any) => {
             try {
                 if (!this.isEventDispatchEnabled()) return;
-                if (Boolean((this.storageSettings.values as any).debugEventLogs)) {
+                if (this.isEventLogsEnabled()) {
                     this.getLogger().debug(`Baichuan event: ${JSON.stringify(ev)}`);
                 }
                 const channel = this.getRtspChannel();
@@ -553,12 +571,25 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     private async applyEventDispatchSettings(): Promise<void> {
+        const logger = this.getLogger();
+        const selection = Array.from(this.getDispatchEventsSelection()).sort();
+        const key = selection.join(',');
+        const prevKey = this.lastAppliedDispatchEventsKey;
+
+        if (prevKey !== undefined && prevKey !== key) {
+            logger.log(`Dispatch Events changed: ${selection.length ? selection.join(', ') : '(disabled)'}`);
+        }
+
         // User-initiated settings change counts as activity.
         this.markActivity();
 
         // Empty selection disables everything.
         if (!this.isEventDispatchEnabled()) {
+            if (this.subscribedToEvents) {
+                logger.log('Event listener stopped (Dispatch Events disabled)');
+            }
             await this.disableBaichuanEventSubscription();
+            this.lastAppliedDispatchEventsKey = key;
             return;
         }
 
@@ -569,9 +600,24 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         }
 
         // Apply immediately even if we were already subscribed.
-        // This avoids edge cases where the camera/server needs a fresh subscription.
+        // If nothing actually changed and we're already subscribed, avoid a noisy resubscribe.
+        if (prevKey === key && this.subscribedToEvents) {
+            // Track baseline so later changes are logged.
+            this.lastAppliedDispatchEventsKey = key;
+            return;
+        }
+
+        if (!this.subscribedToEvents) {
+            logger.log(`Event listener started (${selection.join(', ')})`);
+            await this.ensureBaichuanEventSubscription();
+            this.lastAppliedDispatchEventsKey = key;
+            return;
+        }
+
+        logger.log(`Event listener restarting (${selection.join(', ')})`);
         await this.disableBaichuanEventSubscription();
         await this.ensureBaichuanEventSubscription();
+        this.lastAppliedDispatchEventsKey = key;
     }
 
     private markActivity(): void {
@@ -996,8 +1042,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
         if (!this.isEventDispatchEnabled()) return;
 
-        const debugEvents = Boolean((this.storageSettings.values as any).debugEventLogs);
-        if (debugEvents) {
+        if (this.isEventLogsEnabled()) {
             logger.debug(`Events received: ${JSON.stringify(events)}`);
         }
 
@@ -1034,7 +1079,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     private normalizeDebugLogs(value: unknown): string[] {
-        const allowed = new Set(['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'debugH264', 'debugParamSets']);
+        const allowed = new Set(['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'debugH264', 'debugParamSets', 'eventLogs']);
 
         const items = Array.isArray(value) ? value : (typeof value === 'string' ? [value] : []);
         const out: string[] = [];
@@ -1053,31 +1098,22 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
         // Keep this as `any` so we don't need to import DebugOptions types here.
         const debugOptions: any = {};
+        // Only pass through Baichuan client debug flags.
+        const clientKeys = new Set(['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'debugH264', 'debugParamSets']);
         for (const k of sel) {
+            if (!clientKeys.has(k)) continue;
             debugOptions[k] = true;
         }
-        return debugOptions;
+        return Object.keys(debugOptions).length ? debugOptions : undefined;
     }
 
-    private normalizeDispatchEvents(value: unknown): Array<'motion' | 'objects'> {
-        const allowed = new Set(['motion', 'objects']);
-
-        // Back-compat: old boolean setting.
-        if (typeof value === 'boolean') return value ? ['motion', 'objects'] : [];
-
-        const items = Array.isArray(value) ? value : (typeof value === 'string' ? [value] : []);
-        const out: Array<'motion' | 'objects'> = [];
-        for (const v of items) {
-            if (typeof v !== 'string') continue;
-            const s = v.trim();
-            if (!allowed.has(s)) continue;
-            out.push(s as 'motion' | 'objects');
-        }
-        return Array.from(new Set(out));
+    private isEventLogsEnabled(): boolean {
+        const sel = new Set(this.normalizeDebugLogs((this.storageSettings.values as any).debugLogs));
+        return sel.has('eventLogs');
     }
 
     private getDispatchEventsSelection(): Set<'motion' | 'objects'> {
-        return new Set(this.normalizeDispatchEvents((this.storageSettings.values as any).dispatchEvents));
+        return new Set(this.storageSettings.values.dispatchEvents);
     }
 
     private isEventDispatchEnabled(): boolean {
@@ -1097,6 +1133,41 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         if (typeof cur === 'boolean') {
             (this.storageSettings.values as any).dispatchEvents = cur ? ['motion', 'objects'] : [];
         }
+    }
+
+    private migrateDebugEventLogsSetting(): void {
+        // Back-compat: old boolean debugEventLogs -> new debugLogs choice "eventLogs".
+        const legacy = (this.storageSettings.values as any).debugEventLogs;
+        if (typeof legacy !== 'boolean') return;
+
+        const sel = new Set(this.normalizeDebugLogs((this.storageSettings.values as any).debugLogs));
+        if (legacy) {
+            sel.add('eventLogs');
+            (this.storageSettings.values as any).debugLogs = Array.from(sel);
+        }
+
+        // Keep storage clean-ish (even if key may remain persisted).
+        (this.storageSettings.values as any).debugEventLogs = undefined;
+    }
+
+    private scheduleApplyEventDispatchSettings(): void {
+        // Debounce to avoid rapid apply loops while editing multi-select.
+        this.dispatchEventsApplySeq++;
+        const seq = this.dispatchEventsApplySeq;
+
+        if (this.dispatchEventsApplyTimer) {
+            clearTimeout(this.dispatchEventsApplyTimer);
+        }
+
+        this.dispatchEventsApplyTimer = setTimeout(() => {
+            // Fire-and-forget; never block settings UI.
+            this.applyEventDispatchSettings().catch((e) => {
+                // Only log once per debounce window.
+                if (seq === this.dispatchEventsApplySeq) {
+                    this.getLogger().warn('Failed to apply Dispatch Events setting', e);
+                }
+            });
+        }, 300);
     }
 
     async takeSnapshotInternal(timeout?: number) {

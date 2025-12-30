@@ -10,7 +10,11 @@ export type IntercomDeps = {
     withBaichuanRetry<T>(fn: () => Promise<T>): Promise<T>;
 };
 
-const DEFAULT_MAX_BACKLOG_MS = 250;
+// Keep this low: Reolink blocks are ~64ms at 16kHz (1025 samples).
+// A small backlog avoids multi-second latency when the pipeline stalls.
+// Aim for ~1 block of latency (a block is ~64ms at 16kHz for Reolink talk).
+// This clamps the internal buffer to (approximately) one block.
+const DEFAULT_MAX_BACKLOG_MS = 40;
 
 export class ReolinkBaichuanIntercom {
     private session: Awaited<ReturnType<ReolinkBaichuanApi["createTalkSession"]>> | undefined;
@@ -19,11 +23,19 @@ export class ReolinkBaichuanIntercom {
     private loggedCodecInfo = false;
 
     private readonly maxBacklogMs = DEFAULT_MAX_BACKLOG_MS;
+    private maxBacklogBytes: number | undefined;
+    private blocksPerPayload = 1;
 
     private sendChain: Promise<void> = Promise.resolve();
     private pcmBuffer: Buffer = Buffer.alloc(0);
 
     constructor(private deps: IntercomDeps) {
+    }
+
+    setBlocksPerPayload(value: number | undefined): void {
+        const v = Math.floor(Number(value));
+        if (!Number.isFinite(v)) return;
+        this.blocksPerPayload = Math.max(1, Math.min(8, v));
     }
 
     async start(media: MediaObject): Promise<void> {
@@ -65,7 +77,9 @@ export class ReolinkBaichuanIntercom {
             }
         }
 
-        const session = await this.deps.withBaichuanRetry(async () => api.createTalkSession(channel));
+        const session = await this.deps.withBaichuanRetry(async () => api.createTalkSession(channel, {
+            blocksPerPayload: this.blocksPerPayload,
+        }));
 
         this.session = session;
         this.pcmBuffer = Buffer.alloc(0);
@@ -77,6 +91,11 @@ export class ReolinkBaichuanIntercom {
         // Mirror native-api.ts: receive PCM s16le from the forwarder and encode IMA ADPCM in JS.
         const samplesPerBlock = blockSize * 2 + 1;
         const bytesNeeded = samplesPerBlock * 2; // Int16 PCM
+        this.maxBacklogBytes = Math.max(
+            bytesNeeded,
+            // bytes/sec = sampleRate * channels * 2 (s16)
+            Math.floor((this.maxBacklogMs / 1000) * sampleRate * 1 * 2),
+        );
 
         if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
             await this.stop();
@@ -98,6 +117,9 @@ export class ReolinkBaichuanIntercom {
             fullBlockSize,
             samplesPerBlock,
             bytesNeeded,
+            maxBacklogMs: this.maxBacklogMs,
+            maxBacklogBytes: this.maxBacklogBytes,
+            blocksPerPayload: this.blocksPerPayload,
         });
 
         // IMPORTANT: incoming audio from Scrypted/WebRTC is typically Opus.
@@ -223,9 +245,11 @@ export class ReolinkBaichuanIntercom {
                     : pcmChunk;
 
                 // Cap backlog to keep latency bounded (drop oldest samples).
-                const maxBytes = Math.max(bytesNeeded, Math.floor((this.maxBacklogMs / 1000) * 16000 * 2));
+                const maxBytes = this.maxBacklogBytes ?? bytesNeeded;
                 if (this.pcmBuffer.length > maxBytes) {
-                    this.pcmBuffer = this.pcmBuffer.subarray(this.pcmBuffer.length - maxBytes);
+                    // Align to 16-bit samples.
+                    const keep = maxBytes - (maxBytes % 2);
+                    this.pcmBuffer = this.pcmBuffer.subarray(this.pcmBuffer.length - keep);
                 }
 
                 while (this.pcmBuffer.length >= bytesNeeded) {
@@ -288,6 +312,12 @@ export class ReolinkBaichuanIntercom {
             "-i", url,
             // Ensure we only decode the first input's audio stream.
             "-map", "0:a:0?",
+
+            // Low-latency decode settings.
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-flush_packets", "1",
+
             "-vn", "-sn", "-dn",
             "-acodec", "pcm_s16le",
             "-ar", options.sampleRate.toString(),
