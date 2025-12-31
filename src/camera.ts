@@ -2,7 +2,7 @@ import type { BatteryInfo, DebugOptions, DeviceCapabilities, PtzCommand, Reolink
 import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, Sleep, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
 import { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
-import { BaichuanTransport, connectBaichuanWithTcpUdpFallback, createBaichuanApi, maskUid } from './connect';
+import { createBaichuanApi, maskUid, normalizeUid, type BaichuanTransport } from './connect';
 import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
 import { ReolinkPtzPresets } from "./presets";
@@ -177,7 +177,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     private lastSnapshotTaken: number | undefined;
     private streamManager: StreamManager;
 
-    private udpFallbackAlerted = false;
+    private uidMissingAlerted = false;
 
     private intercom: ReolinkBaichuanIntercom;
 
@@ -528,7 +528,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         this.ensureClientPromise = (async () => {
             if (this.baichuanApi && this.baichuanApi.client.loggedIn) return this.baichuanApi;
 
-            const { ipAddress, username, password, uid, useUdp } = this.storageSettings.values;
+            const { ipAddress, username, password, uid } = this.storageSettings.values;
 
             if (!ipAddress || !username || !password) {
                 throw new Error('Missing camera credentials');
@@ -540,53 +540,40 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
             const debugOptions = this.getBaichuanDebugOptions();
 
-            // Se useUdp è impostato, usa direttamente UDP senza provare TCP
-            if (useUdp) {
-                this.getLogger().log(`Using UDP transport directly (useUdp=${useUdp})`);
-                const api = await createBaichuanApi(
-                    {
-                        host: ipAddress,
-                        username,
-                        password,
-                        uid,
-                        logger: this.console,
-                        ...(debugOptions ? { debugOptions } : {}),
-                    },
-                    'udp',
-                );
-                await api.login();
-                this.baichuanApi = api;
-                this.connectionTime = Date.now();
-                return api;
+            // Transport selection is deterministic: battery cameras use UDP/BCUDP, others use TCP.
+            // No automatic fallback between transports.
+            const isBattery = this.hasBattery();
+            const transport: BaichuanTransport = isBattery ? 'udp' : 'tcp';
+            const normalizedUid = normalizeUid(uid);
+
+            if (transport === 'udp' && !normalizedUid) {
+                if (!this.uidMissingAlerted) {
+                    this.uidMissingAlerted = true;
+                    this.log.a(
+                        `Battery camera ${this.name} (${ipAddress}) requires Reolink UID for UDP/BCUDP. Please set the UID in settings.`,
+                    );
+                }
+                throw new Error('UID is required for battery cameras (BCUDP)');
             }
 
-            // Altrimenti prova TCP con fallback a UDP
-            const { api, transport } = await connectBaichuanWithTcpUdpFallback(
+            if (transport === 'udp') {
+                this.getLogger().log(
+                    `Connecting via UDP/BCUDP (battery detected, uid=${normalizedUid ? maskUid(normalizedUid) : 'missing'})`,
+                );
+            }
+
+            const api = await createBaichuanApi(
                 {
                     host: ipAddress,
                     username,
                     password,
-                    uid,
+                    uid: normalizedUid,
                     logger: this.console,
                     ...(debugOptions ? { debugOptions } : {}),
                 },
-                ({ uid: normalizedUid, uidMissing }) => {
-                    const uidMsg = !uidMissing && normalizedUid ? `UID ${maskUid(normalizedUid)}` : 'UID MISSING';
-                    if (!this.udpFallbackAlerted) {
-                        this.udpFallbackAlerted = true;
-                        this.log.a(
-                            `Baichuan TCP failed for camera ${this.name} (${ipAddress}). This appears to be a battery camera: UID is required and UDP/BCUDP will be used (${uidMsg}).`,
-                        );
-                    }
-                },
+                transport,
             );
-
-            // Se il fallback ha usato UDP, salva la setting per usare sempre UDP in futuro
-            if (transport === 'udp') {
-                await this.storageSettings.putSetting('useUdp', 'true');
-                this.getLogger().log(`TCP fallback to UDP detected. Saving useUdp setting for future connections.`);
-            }
-
+            await api.login();
             this.baichuanApi = api;
             this.connectionTime = Date.now();
             return api;
@@ -616,17 +603,22 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     private async createStreamClient(): Promise<ReolinkBaichuanApi> {
-        const { ipAddress, username, password, uid, useUdp } = this.storageSettings.values;
+        const { ipAddress, username, password, uid } = this.storageSettings.values;
         if (!ipAddress || !username || !password) {
             throw new Error('Missing camera credentials');
         }
 
-        // Usa la setting useUdp per determinare il transport invece di ottenere dal client primario
-        // Questo garantisce che lo stream client usi lo stesso transport del client principale
-        const transport: BaichuanTransport = useUdp ? 'udp' : 'tcp';
-
-        if (useUdp) {
-            this.getLogger().log(`Creating stream client with UDP transport (useUdp=${useUdp})`);
+        const isBattery = this.hasBattery();
+        const transport: BaichuanTransport = isBattery ? 'udp' : 'tcp';
+        const normalizedUid = normalizeUid(uid);
+        if (transport === 'udp' && !normalizedUid) {
+            if (!this.uidMissingAlerted) {
+                this.uidMissingAlerted = true;
+                this.log.a(
+                    `Battery camera ${this.name} (${ipAddress}) requires Reolink UID for UDP/BCUDP. Please set the UID in settings.`,
+                );
+            }
+            throw new Error('UID is required for battery cameras (BCUDP)');
         }
 
         const debugOptions = this.getBaichuanDebugOptions();
@@ -635,7 +627,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 host: ipAddress,
                 username,
                 password,
-                uid,
+                uid: normalizedUid,
                 logger: this.console,
                 ...(debugOptions ? { debugOptions } : {}),
             },
@@ -724,12 +716,13 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                     motion = this.shouldDispatchMotion();
                     break;
                 case 'doorbell':
-                    this.binaryState = true;
-                    if (this.doorbellBinaryTimeout) clearTimeout(this.doorbellBinaryTimeout);
-                    this.doorbellBinaryTimeout = setTimeout(() => {
-                        this.binaryState = false;
-                        this.doorbellBinaryTimeout = undefined;
-                    }, 2000);
+                    if (!this.doorbellBinaryTimeout) {
+                        this.binaryState = true;
+                        this.doorbellBinaryTimeout = setTimeout(() => {
+                            this.binaryState = false;
+                            this.doorbellBinaryTimeout = undefined;
+                        }, 2000);
+                    }
 
                     motion = this.shouldDispatchMotion();
                     break;
