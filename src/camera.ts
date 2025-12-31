@@ -1,4 +1,4 @@
-import type { BatteryInfo, DeviceCapabilities, PtzCommand, ReolinkBaichuanApi, ReolinkSimpleEvent, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { BatteryInfo, DebugOptions, DeviceCapabilities, PtzCommand, ReolinkBaichuanApi, ReolinkSimpleEvent, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, Sleep, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
 import { RtspClient } from "../../scrypted/common/src/rtsp-server";
@@ -553,6 +553,20 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         return api;
     }
 
+    private getBaichuanDebugOptions(): any | undefined {
+        const sel = new Set<string>(this.storageSettings.values.debugLogs);
+        if (!sel.size) return undefined;
+
+        const debugOptions: DebugOptions = {};
+        // Only pass through Baichuan client debug flags.
+        const clientKeys = new Set(['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'debugH264', 'debugParamSets']);
+        for (const k of sel) {
+            if (!clientKeys.has(k)) continue;
+            debugOptions[k] = true;
+        }
+        return Object.keys(debugOptions).length ? debugOptions : undefined;
+    }
+
     private async createStreamClient(): Promise<ReolinkBaichuanApi> {
         // Ensure the main client is initialized first so we know if this device needs UDP.
         const primary = await this.ensureClient();
@@ -635,7 +649,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     private onSimpleEvent = (ev: any) => {
         try {
             if (!this.isEventDispatchEnabled()) return;
-            if (this.isEventLogsEnabled()) {
+            if (this.storageSettings.values.dispatchEvents.includes('eventLogs')) {
                 this.getLogger().debug(`Baichuan event: ${JSON.stringify(ev)}`);
             }
             const channel = this.getRtspChannel();
@@ -780,48 +794,45 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     async getVideoTextOverlays(): Promise<Record<string, VideoTextOverlay>> {
-        const client = this.getClient();
-        if (!client) {
-            return;
-        }
-        // TODO: restore
-        // const { cachedOsd } = this.storageSettings.values;
+        const client = await this.ensureClient();
+        const channel = this.getRtspChannel();
 
-        // return {
-        //     osdChannel: {
-        //         text: cachedOsd.value.Osd.osdChannel.enable ? cachedOsd.value.Osd.osdChannel.name : undefined,
-        //     },
-        //     osdTime: {
-        //         text: !!cachedOsd.value.Osd.osdTime.enable,
-        //         readonly: true,
-        //     }
-        // }
+        const osd = await client.getOsd(channel);
+
+        return {
+            osdChannel: {
+                text: osd?.osdChannel?.enable ? osd.osdChannel.name : undefined,
+            },
+            osdTime: {
+                text: !!osd?.osdTime?.enable,
+                readonly: true,
+            },
+        };
     }
 
     async setVideoTextOverlay(id: 'osdChannel' | 'osdTime', value: VideoTextOverlay): Promise<void> {
         const client = await this.ensureClient();
-        if (!client) {
-            return;
+        const channel = this.getRtspChannel();
+
+        const osd = await client.getOsd(channel);
+
+        if (id === 'osdChannel') {
+            const nextName = typeof value?.text === 'string' ? value.text.trim() : '';
+            const enable = !!nextName || value?.text === true;
+            osd.osdChannel.enable = enable ? 1 : 0;
+            // Name must always be valid when enabled.
+            if (enable) {
+                osd.osdChannel.name = nextName || osd.osdChannel.name || this.name || 'Camera';
+            }
         }
-        // TODO: restore
+        else if (id === 'osdTime') {
+            osd.osdTime.enable = value?.text ? 1 : 0;
+        }
+        else {
+            throw new Error('unknown overlay: ' + id);
+        }
 
-        // const osd = await client.getOsd();
-
-        // if (id === 'osdChannel') {
-        //     osd.osdChannel.enable = value.text ? 1 : 0;
-        //     // name must always be valid.
-        //     osd.osdChannel.name = typeof value.text === 'string' && value.text
-        //         ? value.text
-        //         : osd.osdChannel.name || 'Camera';
-        // }
-        // else if (id === 'osdTime') {
-        //     osd.osdTime.enable = value.text ? 1 : 0;
-        // }
-        // else {
-        //     throw new Error('unknown overlay: ' + id);
-        // }
-
-        // await client.setOsd(channel, osd);
+        await client.setOsd(channel, osd);
     }
 
     updatePtzCaps() {
@@ -852,7 +863,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         const channel = this.getRtspChannel();
 
         // Preset navigation.
-        const preset = (command as any).preset;
+        const preset = command.preset;
         if (preset !== undefined && preset !== null) {
             const presetId = Number(preset);
             if (!Number.isFinite(presetId)) {
@@ -1062,7 +1073,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
         if (!this.isEventDispatchEnabled()) return;
 
-        if (this.isEventLogsEnabled()) {
+        if (this.storageSettings.values.dispatchEvents.includes('eventLogs')) {
             logger.debug(`Events received: ${JSON.stringify(events)}`);
         }
 
@@ -1096,40 +1107,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             }
             sdk.deviceManager.onDeviceEvent(this.nativeId, ScryptedInterface.ObjectDetector, od);
         }
-    }
-
-    private normalizeDebugLogs(value: unknown): string[] {
-        const allowed = new Set(['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'debugH264', 'debugParamSets', 'eventLogs']);
-
-        const items = Array.isArray(value) ? value : (typeof value === 'string' ? [value] : []);
-        const out: string[] = [];
-        for (const v of items) {
-            if (typeof v !== 'string') continue;
-            const s = v.trim();
-            if (!allowed.has(s)) continue;
-            out.push(s);
-        }
-        return Array.from(new Set(out));
-    }
-
-    private getBaichuanDebugOptions(): any | undefined {
-        const sel = new Set(this.normalizeDebugLogs((this.storageSettings.values as any).debugLogs));
-        if (!sel.size) return undefined;
-
-        // Keep this as `any` so we don't need to import DebugOptions types here.
-        const debugOptions: any = {};
-        // Only pass through Baichuan client debug flags.
-        const clientKeys = new Set(['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'debugH264', 'debugParamSets']);
-        for (const k of sel) {
-            if (!clientKeys.has(k)) continue;
-            debugOptions[k] = true;
-        }
-        return Object.keys(debugOptions).length ? debugOptions : undefined;
-    }
-
-    private isEventLogsEnabled(): boolean {
-        const sel = new Set(this.normalizeDebugLogs((this.storageSettings.values as any).debugLogs));
-        return sel.has('eventLogs');
     }
 
     private getDispatchEventsSelection(): Set<'motion' | 'objects'> {
@@ -1237,7 +1214,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 : selected?.video?.codec?.includes('264') ? 'H264'
                     : undefined;
 
-            const { host, port, sdp, audio } = await this.streamManager.getRfcStream(channel, profile, streamKey, expectedVideoType as any);
+            const { host, port, sdp, audio } = await this.streamManager.getRfcStream(channel, profile, streamKey, expectedVideoType);
 
             const { url: _ignoredUrl, ...mso }: any = selected;
             mso.container = 'rtp';
@@ -1245,7 +1222,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 mso.audio ||= {};
                 mso.audio.codec = audio.codec;
                 mso.audio.sampleRate = audio.sampleRate;
-                (mso.audio as any).channels = audio.channels;
+                mso.audio.channels = audio.channels;
             }
 
             const rfc = {
