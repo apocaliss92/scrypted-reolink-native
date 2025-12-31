@@ -1,4 +1,4 @@
-import sdk, { DeviceCreator, DeviceCreatorSettings, DeviceInformation, DeviceProvider, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedNativeId, Setting } from "@scrypted/sdk";
+import sdk, { DeviceCreator, DeviceCreatorSettings, DeviceInformation, DeviceProvider, ScryptedDeviceBase, ScryptedDeviceType, ScryptedNativeId, Setting } from "@scrypted/sdk";
 import { ReolinkNativeCamera } from "./camera";
 import { connectBaichuanWithTcpUdpFallback, maskUid } from "./connect";
 import { getDeviceInterfaces } from "./utils";
@@ -49,7 +49,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 const deviceInfo = await api.getInfo();
                 const name = deviceInfo?.name;
                 const rtspChannel = 0;
-                const { abilities, capabilities } = await api.getDeviceCapabilities(rtspChannel);
+                const { abilities, capabilities } = await api.getDeviceCapabilities(rtspChannel, { probeAi: false });
 
                 this.console.log(JSON.stringify({ abilities, capabilities, deviceInfo }));
 

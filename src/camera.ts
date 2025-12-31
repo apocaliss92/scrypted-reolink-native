@@ -1,13 +1,12 @@
-import type { BatteryInfo, DebugOptions, DeviceCapabilities, PtzCommand, ReolinkBaichuanApi, ReolinkSimpleEvent, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, Sleep, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
+import type { BatteryInfo, DebugOptions, DeviceCapabilities, PtzCommand, ReolinkBaichuanApi, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, Sleep, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
-import { RtspClient } from "../../scrypted/common/src/rtsp-server";
 import { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
+import { BaichuanTransport, connectBaichuanWithTcpUdpFallback, createBaichuanApi, maskUid } from './connect';
 import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
 import { ReolinkPtzPresets } from "./presets";
 import { parseStreamProfileFromId, StreamManager } from './stream-utils';
-import { BaichuanTransport, connectBaichuanWithTcpUdpFallback, createBaichuanApi, maskUid } from './connect';
 import { getDeviceInterfaces } from "./utils";
 
 export const moToB64 = async (mo: MediaObject) => {
@@ -159,9 +158,10 @@ class ReolinkCameraPirSensor extends ScryptedDeviceBase implements OnOff {
 }
 
 // export class ReolinkNativeCamera extends ScryptedDeviceBase implements Camera, DeviceProvider, Intercom, ObjectDetector, PanTiltZoom, Sleep, VideoTextOverlays {
-export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCamera, Settings, Camera, DeviceProvider, Intercom, ObjectDetector, PanTiltZoom, Sleep, VideoTextOverlays {
+export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCamera, Settings, Camera, DeviceProvider, Intercom, ObjectDetector, PanTiltZoom, Sleep, VideoTextOverlays, BinarySensor {
     videoStreamOptions: Promise<UrlMediaStreamOptions[]>;
     motionTimeout: NodeJS.Timeout;
+    private doorbellBinaryTimeout: NodeJS.Timeout | undefined;
     siren: ReolinkCameraSiren;
     floodlight: ReolinkCameraFloodlight;
     pirSensor: ReolinkCameraPirSensor;
@@ -644,7 +644,11 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         const channel = this.getRtspChannel();
 
         try {
-            const { capabilities, abilities, support, presets } = await api.getDeviceCapabilities(channel);
+            const { capabilities, abilities, support, presets } = await this.withBaichuanRetry(async () =>
+                api.getDeviceCapabilities(channel, {
+                    probeAi: false,
+                })
+            );
             this.storageSettings.values.capabilities = capabilities;
             this.ptzPresets.setCachedPtzPresets(presets);
 
@@ -704,7 +708,13 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                     motion = this.shouldDispatchMotion();
                     break;
                 case 'doorbell':
-                    // Placeholder: treat doorbell as motion.
+                    this.binaryState = true;
+                    if (this.doorbellBinaryTimeout) clearTimeout(this.doorbellBinaryTimeout);
+                    this.doorbellBinaryTimeout = setTimeout(() => {
+                        this.binaryState = false;
+                        this.doorbellBinaryTimeout = undefined;
+                    }, 2000);
+
                     motion = this.shouldDispatchMotion();
                     break;
                 case 'people':
@@ -747,6 +757,11 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         this.unsubscribedToEvents();
 
         if (!enabled) {
+            if (this.doorbellBinaryTimeout) {
+                clearTimeout(this.doorbellBinaryTimeout);
+                this.doorbellBinaryTimeout = undefined;
+            }
+            this.binaryState = false;
             return;
         }
 
