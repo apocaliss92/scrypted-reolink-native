@@ -5,6 +5,14 @@ import type {
     VideoType,
 } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 
+import sdk, {
+    type MediaObject,
+    type RequestMediaStreamOptions,
+    type ResponseMediaStreamOptions,
+} from "@scrypted/sdk";
+
+import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
+
 export interface StreamManagerOptions {
     /**
      * Creates a dedicated Baichuan session for streaming.
@@ -25,6 +33,113 @@ export function parseStreamProfileFromId(id: string | undefined): StreamProfile 
         return 'ext';
 
     return;
+}
+
+export async function fetchVideoStreamOptionsFromApi(
+    client: ReolinkBaichuanApi,
+    channel: number,
+): Promise<UrlMediaStreamOptions[]> {
+    const streamMetadata: any = await (client as any).getStreamMetadata(channel);
+    return buildVideoStreamOptionsFromStreamMetadata(streamMetadata);
+}
+
+export function buildVideoStreamOptionsFromStreamMetadata(streamMetadata: any): UrlMediaStreamOptions[] {
+    const streams: UrlMediaStreamOptions[] = [];
+    const list: any[] = streamMetadata?.streams || [];
+
+    for (const stream of list) {
+        const profile = stream.profile as StreamProfile;
+        const codec = String(stream.videoEncType || '').includes('264')
+            ? 'h264'
+            : String(stream.videoEncType || '').includes('265')
+                ? 'h265'
+                : String(stream.videoEncType || '').toLowerCase();
+
+        const id = profile === 'main'
+            ? 'mainstream'
+            : profile === 'sub'
+                ? 'substream'
+                : 'extstream';
+        const name = profile === 'main'
+            ? 'Main Stream'
+            : profile === 'sub'
+                ? 'Sub Stream'
+                : 'Ext Stream';
+
+        streams.push({
+            name,
+            id,
+            container: 'rtp',
+            video: { codec, width: stream.width, height: stream.height },
+            url: ``,
+        });
+    }
+
+    return streams;
+}
+
+export function selectStreamOption(
+    vsos: UrlMediaStreamOptions[] | undefined,
+    request: RequestMediaStreamOptions,
+): UrlMediaStreamOptions {
+    if (!request) throw new Error('video streams not set up or no longer exists.');
+    const selected = vsos?.find((s) => s.id === request.id) || vsos?.[0];
+    if (!selected) throw new Error('No stream options available');
+    return selected;
+}
+
+export function expectedVideoTypeFromUrlMediaStreamOptions(selected: UrlMediaStreamOptions): 'H264' | 'H265' | undefined {
+    const codec = (selected as any)?.video?.codec;
+    if (typeof codec !== 'string') return undefined;
+    if (codec.includes('265')) return 'H265';
+    if (codec.includes('264')) return 'H264';
+    return undefined;
+}
+
+export async function createRfc4571MediaObjectFromStreamManager(params: {
+    streamManager: StreamManager;
+    channel: number;
+    profile: StreamProfile;
+    streamKey: string;
+    expectedVideoType?: 'H264' | 'H265';
+    selected: UrlMediaStreamOptions;
+    sourceId: string;
+    onDetectedCodec?: (detectedCodec: 'h264' | 'h265') => void;
+}): Promise<MediaObject> {
+    const { streamManager, channel, profile, streamKey, expectedVideoType, selected, sourceId, onDetectedCodec } = params;
+
+    const { host, port, sdp, audio } = await streamManager.getRfcStream(channel, profile, streamKey, expectedVideoType);
+
+    // Update cached stream options with the detected codec (helps prebuffer/NVR avoid mismatch).
+    try {
+        const detected = /a=rtpmap:\d+\s+(H26[45])\//.exec(sdp)?.[1];
+        if (detected) {
+            const dc = detected === 'H265' ? 'h265' : 'h264';
+            onDetectedCodec?.(dc);
+        }
+    }
+    catch {
+        // ignore
+    }
+
+    const { url: _ignoredUrl, ...mso }: any = selected;
+    mso.container = 'rtp';
+    if (audio) {
+        mso.audio ||= {};
+        mso.audio.codec = audio.codec;
+        mso.audio.sampleRate = audio.sampleRate;
+        mso.audio.channels = audio.channels;
+    }
+
+    const rfc = {
+        url: `tcp://${host}:${port}`,
+        sdp,
+        mediaStreamOptions: mso as ResponseMediaStreamOptions,
+    };
+
+    return await sdk.mediaManager.createMediaObject(Buffer.from(JSON.stringify(rfc)), 'x-scrypted/x-rfc4571', {
+        sourceId,
+    });
 }
 
 export class StreamManager {

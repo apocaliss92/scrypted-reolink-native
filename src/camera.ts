@@ -1,12 +1,19 @@
-import type { BatteryInfo, DebugOptions, DeviceCapabilities, PtzCommand, ReolinkBaichuanApi, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, Sleep, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
+import type { DebugOptions, DeviceCapabilities, PtzCommand, ReolinkBaichuanApi, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
 import { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
-import { createBaichuanApi, maskUid, normalizeUid, type BaichuanTransport } from './connect';
+import { createBaichuanApi } from './connect';
 import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
 import { ReolinkPtzPresets } from "./presets";
-import { parseStreamProfileFromId, StreamManager } from './stream-utils';
+import {
+    createRfc4571MediaObjectFromStreamManager,
+    expectedVideoTypeFromUrlMediaStreamOptions,
+    fetchVideoStreamOptionsFromApi,
+    parseStreamProfileFromId,
+    selectStreamOption,
+    StreamManager,
+} from './stream-utils';
 import { getDeviceInterfaces } from "./utils";
 
 export const moToB64 = async (mo: MediaObject) => {
@@ -55,10 +62,11 @@ class ReolinkCameraSiren extends ScryptedDeviceBase implements OnOff {
     private async setSiren(on: boolean) {
         this.camera.markActivity();
 
-        const api = await this.camera.ensureClient();
         const channel = this.camera.getRtspChannel();
-
-        await this.camera.withBaichuanRetry(async () => await api.setSiren(channel, on));
+        await this.camera.withBaichuanRetry(async () => {
+            const api = await this.camera.ensureClient();
+            return await api.setSiren(channel, on);
+        });
     }
 }
 
@@ -109,62 +117,20 @@ class ReolinkCameraFloodlight extends ScryptedDeviceBase implements OnOff, Brigh
     private async setFloodlight(on?: boolean, brightness?: number) {
         this.camera.markActivity();
 
-        const api = await this.camera.ensureClient();
         const channel = this.camera.getRtspChannel();
-
-        await this.camera.withBaichuanRetry(async () => await api.setWhiteLedState(channel, on, brightness));
+        await this.camera.withBaichuanRetry(async () => {
+            const api = await this.camera.ensureClient();
+            return await api.setWhiteLedState(channel, on, brightness);
+        });
     }
 }
 
-class ReolinkCameraPirSensor extends ScryptedDeviceBase implements OnOff {
-    constructor(public camera: ReolinkNativeCamera, nativeId: string) {
-        super(nativeId);
-    }
-
-    async turnOff() {
-        this.camera.getLogger().log(`PIR toggle: turnOff (device=${this.nativeId})`);
-        this.on = false;
-        try {
-            await this.setPir(false);
-            this.camera.getLogger().log(`PIR toggle: turnOff ok (device=${this.nativeId})`);
-        }
-        catch (e) {
-            this.camera.getLogger().warn(`PIR toggle: turnOff failed (device=${this.nativeId})`, e);
-            throw e;
-        }
-    }
-
-    async turnOn() {
-        this.camera.getLogger().log(`PIR toggle: turnOn (device=${this.nativeId})`);
-        this.on = true;
-        try {
-            await this.setPir(true);
-            this.camera.getLogger().log(`PIR toggle: turnOn ok (device=${this.nativeId})`);
-        }
-        catch (e) {
-            this.camera.getLogger().warn(`PIR toggle: turnOn failed (device=${this.nativeId})`, e);
-            throw e;
-        }
-    }
-
-    private async setPir(on: boolean) {
-        this.camera.markActivity();
-
-        const api = await this.camera.ensureClient();
-        const channel = this.camera.getRtspChannel();
-
-        await this.camera.withBaichuanRetry(async () => await api.setPirInfo(channel, { enable: on ? 1 : 0 }));
-    }
-}
-
-// export class ReolinkNativeCamera extends ScryptedDeviceBase implements Camera, DeviceProvider, Intercom, ObjectDetector, PanTiltZoom, Sleep, VideoTextOverlays {
-export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCamera, Settings, Camera, DeviceProvider, Intercom, ObjectDetector, PanTiltZoom, Sleep, VideoTextOverlays, BinarySensor {
+export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCamera, Settings, Camera, DeviceProvider, Intercom, ObjectDetector, PanTiltZoom, VideoTextOverlays, BinarySensor {
     videoStreamOptions: Promise<UrlMediaStreamOptions[]>;
     motionTimeout: NodeJS.Timeout;
     private doorbellBinaryTimeout: NodeJS.Timeout | undefined;
     siren: ReolinkCameraSiren;
     floodlight: ReolinkCameraFloodlight;
-    pirSensor: ReolinkCameraPirSensor;
     private baichuanApi: ReolinkBaichuanApi | undefined;
     private ensureClientPromise: Promise<ReolinkBaichuanApi> | undefined;
     private connectionTime: number | undefined;
@@ -177,8 +143,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     private lastSnapshotTaken: number | undefined;
     private streamManager: StreamManager;
 
-    private uidMissingAlerted = false;
-
     private intercom: ReolinkBaichuanIntercom;
 
     private ptzPresets: ReolinkPtzPresets;
@@ -186,11 +150,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     storageSettings = new StorageSettings(this, {
         ipAddress: {
             title: 'IP Address',
-            type: 'string',
-        },
-        uid: {
-            title: 'UID',
-            description: 'Reolink UID (required for battery cameras / BCUDP).',
             type: 'string',
         },
         username: {
@@ -309,7 +268,10 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 const logger = this.getLogger();
                 logger.log(`PTZ presets: create preset requested (name=${name})`);
 
-                const preset = await this.withBaichuanRetry(async () => await this.ptzPresets.createPtzPreset(name));
+                const preset = await this.withBaichuanRetry(async () => {
+                    await this.ensureClient();
+                    return await this.ptzPresets.createPtzPreset(name);
+                });
                 const selection = `${preset.id}=${preset.name}`;
 
                 // Auto-select created preset.
@@ -344,7 +306,10 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 const logger = this.getLogger();
                 logger.log(`PTZ presets: update position requested (presetId=${presetId})`);
 
-                await this.withBaichuanRetry(async () => await this.ptzPresets.updatePtzPresetToCurrentPosition(presetId));
+                await this.withBaichuanRetry(async () => {
+                    await this.ensureClient();
+                    return await this.ptzPresets.updatePtzPresetToCurrentPosition(presetId);
+                });
                 logger.log(`PTZ presets: update position ok (presetId=${presetId})`);
             },
         },
@@ -364,7 +329,10 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 const logger = this.getLogger();
                 logger.log(`PTZ presets: delete requested (presetId=${presetId})`);
 
-                await this.withBaichuanRetry(async () => await this.ptzPresets.deletePtzPreset(presetId));
+                await this.withBaichuanRetry(async () => {
+                    await this.ensureClient();
+                    return await this.ptzPresets.deletePtzPreset(presetId);
+                });
 
                 // If we deleted the selected preset, clear selection.
                 await this.storageSettings.putSetting('ptzSelectedPreset', '');
@@ -377,20 +345,11 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             json: true,
             defaultValue: [],
         },
-        // cachedOsd: {
-        //     multiple: true,
-        //     hide: true,
-        //     json: true,
-        //     defaultValue: [],
-        // },
-        prebufferSet: {
-            type: 'boolean',
-            hide: true
-        },
-        useUdp: {
-            type: 'boolean',
+        cachedOsd: {
+            multiple: true,
             hide: true,
-            defaultValue: false
+            json: true,
+            defaultValue: [],
         },
         intercomBlocksPerPayload: {
             subgroup: 'Advanced',
@@ -460,6 +419,10 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             this.baichuanApi = undefined;
             this.connectionTime = undefined;
             this.ensureClientPromise = undefined;
+            if (this.passiveRefreshTimer) {
+                clearTimeout(this.passiveRefreshTimer);
+                this.passiveRefreshTimer = undefined;
+            }
         }
 
         if (reason) {
@@ -478,6 +441,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             }
 
             await this.resetBaichuanClient(e);
+            // Important: callers must re-acquire the client inside fn.
             return await fn();
         }
     }
@@ -489,11 +453,15 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     async init() {
         const logger = this.getLogger();
 
-        // Initialize Baichuan API
-        await this.ensureClient();
-
-        // Refresh cached device metadata/abilities as early as possible, since we use them for interface gating.
-        await this.refreshDeviceState();
+        // At init it's OK to wake the camera to fetch full capabilities/state.
+        // If this fails (offline camera), continue device setup and rely on later activity.
+        try {
+            await this.ensureClient();
+            await this.refreshDeviceState();
+        }
+        catch (e) {
+            logger.warn('Failed to connect/refresh during init', e);
+        }
 
         await this.reportDevices();
         this.updateDeviceInfo();
@@ -509,73 +477,65 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
         // Periodic status refresh + event resubscribe.
         this.startPeriodicTasks();
-
-        if (this.hasBattery() && !this.storageSettings.getItem('prebufferSet')) {
-            const device = sdk.systemManager.getDeviceById<Settings>(this.id);
-            logger.log('Disabling prebbufer for battery cam');
-            await device.putSetting('prebuffer:enabledStreams', '[]');
-            this.storageSettings.values.prebufferSet = true;
-        }
     }
 
     async ensureClient(): Promise<ReolinkBaichuanApi> {
-        if (this.baichuanApi && this.baichuanApi.client.loggedIn) return this.baichuanApi;
+        // Always open a fresh main session. Do not persist/reuse old sessions, which can go stale
+        // and cause streaming to stop receiving frames.
 
-        // Prevent concurrent login storms. Multiple callers (init, options queries, refresh, events)
-        // may race here and otherwise create multiple Baichuan sessions in parallel.
+        // Prevent concurrent login storms. Multiple callers may race here and otherwise create
+        // multiple Baichuan sessions in parallel.
         if (this.ensureClientPromise) return await this.ensureClientPromise;
 
         this.ensureClientPromise = (async () => {
-            if (this.baichuanApi && this.baichuanApi.client.loggedIn) return this.baichuanApi;
-
-            const { ipAddress, username, password, uid } = this.storageSettings.values;
+            const { ipAddress, username, password } = this.storageSettings.values;
 
             if (!ipAddress || !username || !password) {
                 throw new Error('Missing camera credentials');
             }
 
+            // Tear down any previous session to avoid persisting stale logins.
             if (this.baichuanApi) {
-                await this.baichuanApi.close();
+                try {
+                    this.baichuanApi.offSimpleEvent(this.onSimpleEvent);
+                }
+                catch {
+                    // ignore
+                }
+
+                try {
+                    await this.baichuanApi.close();
+                }
+                catch {
+                    // ignore
+                }
             }
 
             const debugOptions = this.getBaichuanDebugOptions();
-
-            // Transport selection is deterministic: battery cameras use UDP/BCUDP, others use TCP.
-            // No automatic fallback between transports.
-            const isBattery = this.hasBattery();
-            const transport: BaichuanTransport = isBattery ? 'udp' : 'tcp';
-            const normalizedUid = normalizeUid(uid);
-
-            if (transport === 'udp' && !normalizedUid) {
-                if (!this.uidMissingAlerted) {
-                    this.uidMissingAlerted = true;
-                    this.log.a(
-                        `Battery camera ${this.name} (${ipAddress}) requires Reolink UID for UDP/BCUDP. Please set the UID in settings.`,
-                    );
-                }
-                throw new Error('UID is required for battery cameras (BCUDP)');
-            }
-
-            if (transport === 'udp') {
-                this.getLogger().log(
-                    `Connecting via UDP/BCUDP (battery detected, uid=${normalizedUid ? maskUid(normalizedUid) : 'missing'})`,
-                );
-            }
 
             const api = await createBaichuanApi(
                 {
                     host: ipAddress,
                     username,
                     password,
-                    uid: normalizedUid,
                     logger: this.console,
                     ...(debugOptions ? { debugOptions } : {}),
                 },
-                transport,
+                'tcp',
             );
             await api.login();
             this.baichuanApi = api;
             this.connectionTime = Date.now();
+
+            // Re-attach event handler if enabled.
+            if (this.isEventDispatchEnabled()) {
+                try {
+                    api.onSimpleEvent(this.onSimpleEvent);
+                }
+                catch {
+                    // ignore
+                }
+            }
             return api;
         })();
 
@@ -603,22 +563,9 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     private async createStreamClient(): Promise<ReolinkBaichuanApi> {
-        const { ipAddress, username, password, uid } = this.storageSettings.values;
+        const { ipAddress, username, password } = this.storageSettings.values;
         if (!ipAddress || !username || !password) {
             throw new Error('Missing camera credentials');
-        }
-
-        const isBattery = this.hasBattery();
-        const transport: BaichuanTransport = isBattery ? 'udp' : 'tcp';
-        const normalizedUid = normalizeUid(uid);
-        if (transport === 'udp' && !normalizedUid) {
-            if (!this.uidMissingAlerted) {
-                this.uidMissingAlerted = true;
-                this.log.a(
-                    `Battery camera ${this.name} (${ipAddress}) requires Reolink UID for UDP/BCUDP. Please set the UID in settings.`,
-                );
-            }
-            throw new Error('UID is required for battery cameras (BCUDP)');
         }
 
         const debugOptions = this.getBaichuanDebugOptions();
@@ -627,13 +574,13 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 host: ipAddress,
                 username,
                 password,
-                uid: normalizedUid,
                 logger: this.console,
                 ...(debugOptions ? { debugOptions } : {}),
             },
-            transport,
+            'tcp',
         );
         await api.login();
+
         return api;
     }
 
@@ -652,11 +599,12 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         const channel = this.getRtspChannel();
 
         try {
-            const { capabilities, abilities, support, presets } = await this.withBaichuanRetry(async () =>
-                api.getDeviceCapabilities(channel, {
+            const { capabilities, abilities, support, presets } = await this.withBaichuanRetry(async () => {
+                const api = await this.ensureClient();
+                return await api.getDeviceCapabilities(channel, {
                     probeAi: false,
-                })
-            );
+                });
+            });
             this.storageSettings.values.capabilities = capabilities;
             this.ptzPresets.setCachedPtzPresets(presets);
 
@@ -705,6 +653,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             if (this.storageSettings.values.dispatchEvents.includes('eventLogs')) {
                 this.getLogger().debug(`Baichuan event: ${JSON.stringify(ev)}`);
             }
+
             const channel = this.getRtspChannel();
             if (ev?.channel !== undefined && ev.channel !== channel) return;
 
@@ -713,7 +662,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
             switch (ev?.type) {
                 case 'motion':
-                    motion = this.shouldDispatchMotion();
+                    motion = true;
                     break;
                 case 'doorbell':
                     if (!this.doorbellBinaryTimeout) {
@@ -721,10 +670,10 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                         this.doorbellBinaryTimeout = setTimeout(() => {
                             this.binaryState = false;
                             this.doorbellBinaryTimeout = undefined;
-                        }, 2000);
+                        }, 5000);
                     }
 
-                    motion = this.shouldDispatchMotion();
+                    motion = true;
                     break;
                 case 'people':
                 case 'vehicle':
@@ -745,9 +694,19 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         }
     }
 
+    private passiveRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+    private cachedVideoStreamOptions: UrlMediaStreamOptions[] | undefined;
+
     private unsubscribedToEvents() {
         const api = this.getClient();
-        api.offSimpleEvent(this.onSimpleEvent);
+        if (!api) return;
+        try {
+            api.offSimpleEvent(this.onSimpleEvent);
+        }
+        catch {
+            // ignore
+        }
     }
 
     private async subscribeToEvents(): Promise<void> {
@@ -790,21 +749,12 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         this.lastActivityMs = Date.now();
     }
 
-    private shouldAvoidWakingBatteryCamera(): boolean {
-        if (!this.hasBattery()) return false;
-        if (this.sleeping) return true;
-
-        // If we don't already have an active logged-in client, don't try to connect/login.
-        const api = this.getClient();
-        if (!api?.client?.loggedIn) return true;
-
-        // If there's no recent activity, avoid periodic polling/resubscribe.
-        const ageMs = Date.now() - this.lastActivityMs;
-        return ageMs > 30_000;
-    }
-
     async release() {
         this.statusPollTimer && clearInterval(this.statusPollTimer);
+        if (this.passiveRefreshTimer) {
+            clearTimeout(this.passiveRefreshTimer);
+            this.passiveRefreshTimer = undefined;
+        }
         return this.resetBaichuanClient();
     }
 
@@ -818,13 +768,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     private async periodic10sTick(): Promise<void> {
-        if (this.shouldAvoidWakingBatteryCamera()) return;
-
-        // For wired cameras, reconnecting is fine.
-        if (!this.hasBattery()) {
-            await this.ensureClient();
-        }
-
+        await this.ensureClient();
         await this.refreshAuxDevicesStatus();
     }
 
@@ -846,23 +790,18 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         catch {
             // ignore
         }
-
-        try {
-            if (this.hasPirEvents()) {
-                const pir = await api.getPirInfo(channel);
-                if (this.pirSensor) this.pirSensor.on = !!pir.enabled;
-            }
-        }
-        catch {
-            // ignore
-        }
     }
 
     async getVideoTextOverlays(): Promise<Record<string, VideoTextOverlay>> {
         const client = await this.ensureClient();
         const channel = this.getRtspChannel();
 
-        const osd = await client.getOsd(channel);
+        let osd = this.storageSettings.values.cachedOsd;
+
+        if (!osd.length) {
+            osd = await client.getOsd(channel);
+            this.storageSettings.values.cachedOsd = osd;
+        }
 
         return {
             osdChannel: {
@@ -1032,11 +971,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         return Boolean(capabilities?.hasFloodlight);
     }
 
-    hasBattery() {
-        const capabilities = this.getAbilities();
-        return Boolean(capabilities?.hasBattery);
-    }
-
     hasIntercom() {
         const capabilities = this.getAbilities();
         return Boolean(capabilities?.hasIntercom);
@@ -1064,30 +998,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     hasPtzCtrl() {
         const capabilities = this.getAbilities();
         return Boolean(capabilities?.hasPtz);
-    }
-
-    hasPirEvents() {
-        const capabilities = this.getAbilities();
-        return Boolean(capabilities?.hasPir);
-    }
-
-    async processBatteryData(data: BatteryInfo) {
-        const logger = this.getLogger();
-        const batteryLevel = data.batteryPercent;
-        const sleeping = data.sleeping || false;
-        // const debugEvents = this.storageSettings.values.debugEvents;
-
-        // if (debugEvents) {
-        //     logger.debug(`Battery info received: ${JSON.stringify(data)}`);
-        // }
-
-        if (sleeping !== this.sleeping) {
-            this.sleeping = sleeping;
-        }
-
-        if (batteryLevel !== this.batteryLevel) {
-            this.batteryLevel = batteryLevel ?? this.batteryLevel;
-        }
     }
 
     async updateDeviceInfo() {
@@ -1194,31 +1104,23 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     async takePicture(options?: RequestPictureOptions): Promise<MediaObject> {
-        const isBattery = this.hasBattery();
         const now = Date.now();
         const logger = this.getLogger();
-
-        const isMaxTimePassed = !this.lastSnapshotTaken || ((now - this.lastSnapshotTaken) > 1000 * 60 * 60);
-        const isBatteryTimePassed = !this.lastSnapshotTaken || ((now - this.lastSnapshotTaken) > 1000 * 15);
+        const isMaxTimePassed = !this.lastSnapshotTaken || ((now - this.lastSnapshotTaken) > 1000 * 60);
         let canTake = false;
 
         if (!this.lastB64Snapshot || !this.lastSnapshotTaken) {
             logger.log('Allowing new snapshot because not taken yet');
             canTake = true;
-        } else if (this.sleeping && isMaxTimePassed) {
-            logger.log('Allowing new snapshot while sleeping because older than 1 hour');
-            canTake = true;
-        } else if (!this.sleeping && isBattery && isBatteryTimePassed) {
-            logger.log('Allowing new snapshot because older than 15 seconds');
+        } else if (isMaxTimePassed) {
+            logger.log('Allowing new snapshot because older than 60 seconds');
             canTake = true;
         } else {
-            canTake = true;
+            canTake = false;
         }
 
         if (canTake) {
-            if (this.connectionTime && (Date.now() - this.connectionTime) > 5000) {
-                return this.takeSnapshotInternal(options?.timeout);
-            }
+            return this.takeSnapshotInternal(options?.timeout);
         } else if (this.lastB64Snapshot) {
             const mo = await b64ToMo(this.lastB64Snapshot);
 
@@ -1236,13 +1138,8 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
     async getVideoStream(vso: RequestMediaStreamOptions): Promise<MediaObject> {
         this.markActivity();
-        if (!vso)
-            throw new Error('video streams not set up or no longer exists.');
-
         const vsos = await this.getVideoStreamOptions();
-        const selected = vsos?.find(s => s.id === vso.id) || vsos?.[0];
-        if (!selected)
-            throw new Error('No stream options available');
+        const selected = selectStreamOption(vsos, vso);
         this.getLogger().log(`Creating video stream for option id=${selected.id} name=${selected.name}`);
 
         const profile = parseStreamProfileFromId(selected.id) || 'main';
@@ -1251,35 +1148,25 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             const channel = this.getRtspChannel();
             const streamKey = `${channel}_${profile}`;
 
-            const expectedVideoType = selected?.video?.codec?.includes('265') ? 'H265'
-                : selected?.video?.codec?.includes('264') ? 'H264'
-                    : undefined;
+            const expectedVideoType = expectedVideoTypeFromUrlMediaStreamOptions(selected);
+            return await createRfc4571MediaObjectFromStreamManager({
+                streamManager: this.streamManager,
+                channel,
+                profile,
+                streamKey,
+                expectedVideoType,
+                selected,
+                sourceId: this.id,
+                onDetectedCodec: (detectedCodec) => {
+                    const id = profile === 'main' ? 'mainstream' : profile === 'sub' ? 'substream' : 'extstream';
+                    const name = profile === 'main' ? 'Main Stream' : profile === 'sub' ? 'Sub Stream' : 'Ext Stream';
 
-            const { host, port, sdp, audio } = await this.streamManager.getRfcStream(channel, profile, streamKey, expectedVideoType);
-
-            const { url: _ignoredUrl, ...mso }: any = selected;
-            mso.container = 'rtp';
-            if (audio) {
-                mso.audio ||= {};
-                mso.audio.codec = audio.codec;
-                mso.audio.sampleRate = audio.sampleRate;
-                mso.audio.channels = audio.channels;
-            }
-
-            const rfc = {
-                url: `tcp://${host}:${port}`,
-                sdp,
-                mediaStreamOptions: mso as ResponseMediaStreamOptions,
-            };
-
-            const jsonString = JSON.stringify(rfc);
-            return await sdk.mediaManager.createMediaObject(
-                Buffer.from(jsonString),
-                'x-scrypted/x-rfc4571',
-                {
-                    sourceId: this.id,
+                    const prev = this.cachedVideoStreamOptions ?? [];
+                    const next = prev.filter((s) => s.id !== id);
+                    next.push({ name, id, container: 'rtp', video: { codec: detectedCodec }, url: `` });
+                    this.cachedVideoStreamOptions = next;
                 },
-            );
+            });
         });
     }
 
@@ -1288,35 +1175,8 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         return this.withBaichuanRetry(async () => {
             const client = await this.ensureClient();
             const channel = this.storageSettings.values.rtspChannel;
-            const streamMetadata = await client.getStreamMetadata(channel);
-
-            const streams: UrlMediaStreamOptions[] = [];
-
-            // Only return stable identifiers + codec info. RTSP server is ensured on-demand in createVideoStream.
-            for (const stream of streamMetadata.streams) {
-                const profile = stream.profile as StreamProfile;
-                const codec = stream.videoEncType.includes('264') ? 'h264' : stream.videoEncType.includes('265') ? 'h265' : stream.videoEncType.toLowerCase();
-                const id = profile === 'main'
-                    ? 'mainstream'
-                    : profile === 'sub'
-                        ? 'substream'
-                        : 'extstream';
-                const name = profile === 'main'
-                    ? 'Main Stream'
-                    : profile === 'sub'
-                        ? 'Sub Stream'
-                        : 'Ext Stream';
-
-                streams.push({
-                    name,
-                    id,
-                    // We return RFC4571 (RTP over TCP). Mark as RTP so other plugins do not attempt RTSP prebuffering.
-                    container: 'rtp',
-                    video: { codec, width: stream.width, height: stream.height },
-                    url: ``,
-                });
-            }
-
+            const streams = await fetchVideoStreamOptionsFromApi(client, channel);
+            this.cachedVideoStreamOptions = streams;
             return streams;
         });
     }
@@ -1336,7 +1196,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     async reportDevices() {
         const hasSiren = this.hasSiren();
         const hasFloodlight = this.hasFloodlight();
-        const hasPirEvents = this.hasPirEvents();
 
         const devices: Device[] = [];
 
@@ -1376,23 +1235,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             devices.push(floodlightDevice);
         }
 
-        if (hasPirEvents) {
-            const pirNativeId = `${this.nativeId}-pir`;
-            const pirDevice: Device = {
-                providerNativeId: this.nativeId,
-                name: `${this.name} PIR sensor`,
-                nativeId: pirNativeId,
-                info: {
-                    ...this.info,
-                },
-                interfaces: [
-                    ScryptedInterface.OnOff
-                ],
-                type: ScryptedDeviceType.Switch,
-            };
-
-            devices.push(pirDevice);
-        }
 
         sdk.deviceManager.onDevicesChanged({
             providerNativeId: this.nativeId,
@@ -1407,9 +1249,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         } else if (nativeId.endsWith('-floodlight')) {
             this.floodlight ||= new ReolinkCameraFloodlight(this, nativeId);
             return this.floodlight;
-        } else if (nativeId.endsWith('-pir')) {
-            this.pirSensor ||= new ReolinkCameraPirSensor(this, nativeId);
-            return this.pirSensor;
         }
     }
 
@@ -1418,8 +1257,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             delete this.siren;
         } else if (nativeId.endsWith('-floodlight')) {
             delete this.floodlight;
-        } else if (nativeId.endsWith('-pir')) {
-            delete this.pirSensor;
         }
     }
 

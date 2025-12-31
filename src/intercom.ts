@@ -39,8 +39,6 @@ export class ReolinkBaichuanIntercom {
         );
 
         await this.stop();
-
-        const api = await this.camera.ensureClient();
         const channel = this.camera.getRtspChannel();
 
         // Best-effort: log codec requirements exposed by the camera.
@@ -48,6 +46,7 @@ export class ReolinkBaichuanIntercom {
         if (!this.loggedCodecInfo) {
             this.loggedCodecInfo = true;
             try {
+                const api = await this.camera.ensureClient();
                 const ability = await api.getTalkAbility(channel);
                 const audioConfigs = ability.audioConfigList?.map((c) => ({
                     audioType: c.audioType,
@@ -68,9 +67,12 @@ export class ReolinkBaichuanIntercom {
             }
         }
 
-        const session = await this.camera.withBaichuanRetry(async () => api.createTalkSession(channel, {
-            blocksPerPayload: this.blocksPerPayload,
-        }));
+        const session = await this.camera.withBaichuanRetry(async () => {
+            const api = await this.camera.ensureClient();
+            return await api.createTalkSession(channel, {
+                blocksPerPayload: this.blocksPerPayload,
+            });
+        });
 
         this.session = session;
         this.pcmBuffer = Buffer.alloc(0);

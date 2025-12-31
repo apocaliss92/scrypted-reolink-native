@@ -9,6 +9,7 @@ export type BaichuanConnectInputs = {
     uid?: string;
     logger?: Console;
     debugOptions?: unknown;
+    keepAliveInterval?: number;
 };
 
 export function normalizeUid(uid?: string): string | undefined {
@@ -55,7 +56,8 @@ export async function createBaichuanApi(inputs: BaichuanConnectInputs, transport
         // uncaught exception. Ensure we always have a listener.
         try {
             api.client.on("error", (err: unknown) => {
-                const logger = inputs.logger ?? console;
+                const logger = inputs.logger;
+                if (!logger) return;
                 const msg = (err as any)?.message || (err as any)?.toString?.() || String(err);
                 logger.error(`[BaichuanClient] error (${transport}) ${inputs.host}: ${msg}`);
             });
@@ -85,10 +87,12 @@ export async function createBaichuanApi(inputs: BaichuanConnectInputs, transport
         transport: "udp",
         udp: {
             mode: "uid",
+            implementation: "neolink-v2",
             uid,
             host: inputs.host,
             broadcast: false,
         },
+        keepAliveInterval: inputs.keepAliveInterval ?? 0,
     });
     attachErrorHandler(api);
     return api;

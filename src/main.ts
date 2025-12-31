@@ -1,16 +1,17 @@
 import sdk, { DeviceCreator, DeviceCreatorSettings, DeviceInformation, DeviceProvider, ScryptedDeviceBase, ScryptedDeviceType, ScryptedNativeId, Setting } from "@scrypted/sdk";
 import { ReolinkNativeCamera } from "./camera";
-import { connectBaichuanWithTcpUdpFallback, maskUid } from "./connect";
+import { ReolinkNativeBatteryCamera } from "./camera-battery";
+import { createBaichuanApi } from "./connect";
 import { getDeviceInterfaces } from "./utils";
 
 class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, DeviceCreator {
-    devices = new Map<string, ReolinkNativeCamera>();
+    devices = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera>();
 
     getScryptedDeviceCreator(): string {
         return 'Reolink Native camera';
     }
 
-    async getDevice(nativeId: ScryptedNativeId): Promise<ReolinkNativeCamera> {
+    async getDevice(nativeId: ScryptedNativeId): Promise<ReolinkNativeCamera | ReolinkNativeBatteryCamera> {
         if (this.devices.has(nativeId)) {
             return this.devices.get(nativeId);
         }
@@ -27,9 +28,14 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
         const username = settings.username?.toString();
         const password = settings.password?.toString();
         const uid = settings.uid?.toString();
+        const isBatteryCam = settings.isBatteryCam === true || settings.isBatteryCam?.toString() === 'true';
+
+        if (isBatteryCam && !uid) {
+            throw new Error('UID is required for battery cameras (BCUDP)');
+        }
 
         if (ipAddress && username && password) {
-            const { api } = await connectBaichuanWithTcpUdpFallback(
+            const api = await createBaichuanApi(
                 {
                     host: ipAddress,
                     username,
@@ -37,13 +43,10 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                     uid,
                     logger: this.console,
                 },
-                ({ uid: normalizedUid, uidMissing }) => {
-                    const uidMsg = !uidMissing && normalizedUid ? `UID ${maskUid(normalizedUid)}` : 'UID MISSING';
-                    this.console.log(
-                        `Baichuan TCP failed during discovery for ${ipAddress}; falling back to UDP/BCUDP (${uidMsg}).`,
-                    );
-                },
+                isBatteryCam ? 'udp' : 'tcp',
             );
+
+            await api.login();
 
             try {
                 const deviceInfo = await api.getInfo();
@@ -53,7 +56,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
                 this.console.log(JSON.stringify({ abilities, capabilities, deviceInfo }));
 
-                nativeId = deviceInfo.serialNumber;
+                nativeId = `${deviceInfo.serialNumber}${isBatteryCam ? '-battery-cam' : '-cam'}`;
 
                 settings.newCamera ||= name;
 
@@ -70,13 +73,13 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                     providerNativeId: this.nativeId,
                 });
 
-                const device = await this.getDevice(nativeId) as ReolinkNativeCamera;
+                const device = await this.getDevice(nativeId);
                 device.info = info;
                 device.storageSettings.values.username = username;
                 device.storageSettings.values.password = password;
                 device.storageSettings.values.rtspChannel = rtspChannel;
                 device.storageSettings.values.ipAddress = ipAddress;
-                if (uid) device.storageSettings.values.uid = uid;
+                if (isBatteryCam && uid) (device as ReolinkNativeBatteryCamera).storageSettings.values.uid = uid;
                 device.storageSettings.values.capabilities = capabilities;
                 device.updateDeviceInfo();
 
@@ -109,6 +112,12 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 placeholder: '192.168.2.222',
             },
             {
+                key: 'isBatteryCam',
+                title: 'Is Battery Camera',
+                description: 'Enable for Reolink battery cameras. Uses UDP/BCUDP for discovery and streaming. Requires UID.',
+                type: 'boolean',
+            },
+            {
                 key: 'username',
                 title: 'Username',
             },
@@ -126,6 +135,9 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
     }
 
     createCamera(nativeId: string) {
+        if (nativeId.endsWith('-battery-cam')) {
+            return new ReolinkNativeBatteryCamera(nativeId, this);
+        }
         return new ReolinkNativeCamera(nativeId, this);
     }
 }
