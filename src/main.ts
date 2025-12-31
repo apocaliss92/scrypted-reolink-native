@@ -1,5 +1,6 @@
 import sdk, { DeviceCreator, DeviceCreatorSettings, DeviceInformation, DeviceProvider, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedNativeId, Setting } from "@scrypted/sdk";
 import { ReolinkNativeCamera } from "./camera";
+import { connectBaichuanWithTcpUdpFallback, maskUid } from "./connect";
 
 class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, DeviceCreator {
     devices = new Map<string, ReolinkNativeCamera>();
@@ -35,14 +36,24 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
         const username = settings.username?.toString();
         const password = settings.password?.toString();
+        const uid = settings.uid?.toString();
 
         if (ipAddress && username && password) {
-            const { ReolinkBaichuanApi } = await import("@apocaliss92/reolink-baichuan-js");
-            const api = new ReolinkBaichuanApi({
-                host: ipAddress,
-                username,
-                password,
-            });
+            const { api } = await connectBaichuanWithTcpUdpFallback(
+                {
+                    host: ipAddress,
+                    username,
+                    password,
+                    uid,
+                    logger: this.console,
+                },
+                ({ uid: normalizedUid, uidMissing }) => {
+                    const uidMsg = !uidMissing && normalizedUid ? `UID ${maskUid(normalizedUid)}` : 'UID MISSING';
+                    this.console.log(
+                        `Baichuan TCP failed during discovery for ${ipAddress}; falling back to UDP/BCUDP (${uidMsg}).`,
+                    );
+                },
+            );
 
             try {
                 const deviceInfo = await api.getInfo();
@@ -70,6 +81,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 device.storageSettings.values.password = password;
                 device.storageSettings.values.rtspChannel = rtspChannel;
                 device.storageSettings.values.ipAddress = ipAddress;
+                if (uid) device.storageSettings.values.uid = uid;
                 device.storageSettings.values.capabilities = capabilities;
                 device.updateDeviceInfo();
 

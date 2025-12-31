@@ -7,6 +7,7 @@ import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
 import { ReolinkPtzPresets } from "./presets";
 import { parseStreamProfileFromId, StreamManager } from './stream-utils';
+import { connectBaichuanWithTcpUdpFallback, createBaichuanApi, maskUid } from './connect';
 
 export const moToB64 = async (mo: MediaObject) => {
     const bufferImage = await sdk.mediaManager.convertMediaObjectToBuffer(mo, 'image/jpeg');
@@ -179,6 +180,8 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     private lastSnapshotTaken: number | undefined;
     private streamManager: StreamManager;
 
+    private udpFallbackAlerted = false;
+
     private dispatchEventsApplyTimer: NodeJS.Timeout | undefined;
     private dispatchEventsApplySeq = 0;
 
@@ -193,6 +196,11 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     storageSettings = new StorageSettings(this, {
         ipAddress: {
             title: 'IP Address',
+            type: 'string',
+        },
+        uid: {
+            title: 'UID',
+            description: 'Reolink UID (required for battery cameras / BCUDP).',
             type: 'string',
         },
         username: {
@@ -552,7 +560,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             return this.baichuanApi;
         }
 
-        const { ipAddress, username, password } = this.storageSettings.values;
+        const { ipAddress, username, password, uid } = this.storageSettings.values;
 
         if (!ipAddress || !username || !password) {
             throw new Error('Missing camera credentials');
@@ -563,18 +571,29 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 await this.baichuanApi.close();
             }
 
-            const { ReolinkBaichuanApi } = await import("@apocaliss92/reolink-baichuan-js");
             const debugOptions = this.getBaichuanDebugOptions();
-            this.baichuanApi = new ReolinkBaichuanApi({
-                host: ipAddress,
-                username,
-                password,
-                logger: this.console,
-                ...(debugOptions ? { debugOptions } : {}),
-            });
+            const { api } = await connectBaichuanWithTcpUdpFallback(
+                {
+                    host: ipAddress,
+                    username,
+                    password,
+                    uid,
+                    logger: this.console,
+                    ...(debugOptions ? { debugOptions } : {}),
+                },
+                ({ uid: normalizedUid, uidMissing }) => {
+                    const uidMsg = !uidMissing && normalizedUid ? `UID ${maskUid(normalizedUid)}` : 'UID MISSING';
+                    if (!this.udpFallbackAlerted) {
+                        this.udpFallbackAlerted = true;
+                        this.log.a(
+                            `Baichuan TCP failed for camera ${this.name} (${ipAddress}). This appears to be a battery camera: UID is required and UDP/BCUDP will be used (${uidMsg}).`,
+                        );
+                    }
+                },
+            );
 
-            await this.baichuanApi.login();
-            return this.baichuanApi;
+            this.baichuanApi = api;
+            return api;
         })();
 
         try {
@@ -589,20 +608,27 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     private async createStreamClient(): Promise<ReolinkBaichuanApi> {
-        const { ipAddress, username, password } = this.storageSettings.values;
+        // Ensure the main client is initialized first so we know if this device needs UDP.
+        const primary = await this.ensureClient();
+        const transport = primary.client.getTransport();
+
+        const { ipAddress, username, password, uid } = this.storageSettings.values;
         if (!ipAddress || !username || !password) {
             throw new Error('Missing camera credentials');
         }
 
-        const { ReolinkBaichuanApi } = await import('@apocaliss92/reolink-baichuan-js');
         const debugOptions = this.getBaichuanDebugOptions();
-        const api = new ReolinkBaichuanApi({
-            host: ipAddress,
-            username,
-            password,
-            logger: this.console,
-            ...(debugOptions ? { debugOptions } : {}),
-        });
+        const api = await createBaichuanApi(
+            {
+                host: ipAddress,
+                username,
+                password,
+                uid,
+                logger: this.console,
+                ...(debugOptions ? { debugOptions } : {}),
+            },
+            transport,
+        );
         await api.login();
         return api;
     }
