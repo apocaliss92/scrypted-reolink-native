@@ -1,6 +1,6 @@
 {
    "name": "@apocaliss92/scrypted-reolink-native",
-   "version": "0.0.3",
+   "version": "0.0.4",
    "description": "Reolink Native plugin for Scrypted",
    "author": "@apocaliss92",
    "license": "Apache",
