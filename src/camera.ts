@@ -165,8 +165,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     floodlight: ReolinkCameraFloodlight;
     pirSensor: ReolinkCameraPirSensor;
     private baichuanApi: ReolinkBaichuanApi | undefined;
-    private baichuanInitPromise: Promise<ReolinkBaichuanApi> | undefined;
-    private refreshDeviceStatePromise: Promise<void> | undefined;
+    private refreshingState = false;
 
     private subscribedToEvents = false;
     private onSimpleEvent: ((ev: ReolinkSimpleEvent) => void) | undefined;
@@ -470,7 +469,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 }
             }
             this.baichuanApi = undefined;
-            this.baichuanInitPromise = undefined;
             this.subscribedToEvents = false;
             this.eventsApi = undefined;
         }
@@ -502,9 +500,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     async init() {
         const logger = this.getLogger();
 
-        // Migrate older boolean value to the new multi-select format.
-        this.migrateDispatchEventsSetting();
-
         // Initialize Baichuan API
         await this.ensureClient();
 
@@ -514,21 +509,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         await this.reportDevices();
         this.updateDeviceInfo();
         this.updatePtzCaps();
-
-        const interfaces = await this.getDeviceInterfaces();
-
-        const device: Device = {
-            nativeId: this.nativeId,
-            providerNativeId: this.plugin.nativeId,
-            name: this.name,
-            interfaces,
-            type: this.type as ScryptedDeviceType,
-            info: this.info,
-        };
-
-        logger.log(`Updating device interfaces: ${JSON.stringify(interfaces)}`);
-
-        await sdk.deviceManager.onDeviceDiscovered(device);
 
         // Start event subscription after discovery.
         try {
@@ -552,10 +532,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     async ensureClient(): Promise<ReolinkBaichuanApi> {
-        if (this.baichuanInitPromise) {
-            return this.baichuanInitPromise;
-        }
-
         if (this.baichuanApi && this.baichuanApi.client.loggedIn) {
             return this.baichuanApi;
         }
@@ -566,45 +542,33 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             throw new Error('Missing camera credentials');
         }
 
-        this.baichuanInitPromise = (async () => {
-            if (this.baichuanApi) {
-                await this.baichuanApi.close();
-            }
-
-            const debugOptions = this.getBaichuanDebugOptions();
-            const { api } = await connectBaichuanWithTcpUdpFallback(
-                {
-                    host: ipAddress,
-                    username,
-                    password,
-                    uid,
-                    logger: this.console,
-                    ...(debugOptions ? { debugOptions } : {}),
-                },
-                ({ uid: normalizedUid, uidMissing }) => {
-                    const uidMsg = !uidMissing && normalizedUid ? `UID ${maskUid(normalizedUid)}` : 'UID MISSING';
-                    if (!this.udpFallbackAlerted) {
-                        this.udpFallbackAlerted = true;
-                        this.log.a(
-                            `Baichuan TCP failed for camera ${this.name} (${ipAddress}). This appears to be a battery camera: UID is required and UDP/BCUDP will be used (${uidMsg}).`,
-                        );
-                    }
-                },
-            );
-
-            this.baichuanApi = api;
-            return api;
-        })();
-
-        try {
-            return await this.baichuanInitPromise;
+        if (this.baichuanApi) {
+            await this.baichuanApi.close();
         }
-        finally {
-            // If login failed, allow future retries.
-            if (!this.baichuanApi?.client?.loggedIn) {
-                this.baichuanInitPromise = undefined;
-            }
-        }
+
+        const debugOptions = this.getBaichuanDebugOptions();
+        const { api } = await connectBaichuanWithTcpUdpFallback(
+            {
+                host: ipAddress,
+                username,
+                password,
+                uid,
+                logger: this.console,
+                ...(debugOptions ? { debugOptions } : {}),
+            },
+            ({ uid: normalizedUid, uidMissing }) => {
+                const uidMsg = !uidMissing && normalizedUid ? `UID ${maskUid(normalizedUid)}` : 'UID MISSING';
+                if (!this.udpFallbackAlerted) {
+                    this.udpFallbackAlerted = true;
+                    this.log.a(
+                        `Baichuan TCP failed for camera ${this.name} (${ipAddress}). This appears to be a battery camera: UID is required and UDP/BCUDP will be used (${uidMsg}).`,
+                    );
+                }
+            },
+        );
+
+        this.baichuanApi = api;
+        return api;
     }
 
     private async createStreamClient(): Promise<ReolinkBaichuanApi> {
@@ -638,30 +602,52 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     private async refreshDeviceState(): Promise<void> {
-        if (this.refreshDeviceStatePromise) return this.refreshDeviceStatePromise;
+        if (this.refreshingState) {
+            return;
+        }
+        this.refreshingState = true;
 
-        this.refreshDeviceStatePromise = (async () => {
-            const logger = this.getLogger();
-            const api = await this.ensureClient();
-            const channel = this.getRtspChannel();
+        const logger = this.getLogger();
+        const api = await this.ensureClient();
+        const channel = this.getRtspChannel();
 
-            try {
-                const { capabilities, abilities, support, presets } = await api.getDeviceCapabilities(channel);
-                this.storageSettings.values.capabilities = capabilities;
-                this.ptzPresets.setCachedPtzPresets(presets);
-                this.console.log(`Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets })}`);
-            }
-            catch (e) {
-                logger.warn('Failed to refresh abilities', e);
-            }
+        try {
+            const { capabilities, abilities, support, presets } = await api.getDeviceCapabilities(channel);
+            this.storageSettings.values.capabilities = capabilities;
+            this.ptzPresets.setCachedPtzPresets(presets);
+            this.console.log(`Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets })}`);
+        }
+        catch (e) {
+            logger.error('Failed to refresh abilities', e);
+        }
 
-            // Best-effort status refreshes.
-            await this.refreshAuxDevicesStatus().catch(() => { });
-        })().finally(() => {
-            this.refreshDeviceStatePromise = undefined;
-        });
+        try {
+            await this.refreshAuxDevicesStatus();
+        }
+        catch (e) {
+            logger.error('Failed to refresh device status', e);
+        }
 
-        return this.refreshDeviceStatePromise;
+        try {
+            const interfaces = await this.getDeviceInterfaces();
+
+            const device: Device = {
+                nativeId: this.nativeId,
+                providerNativeId: this.plugin.nativeId,
+                name: this.name,
+                interfaces,
+                type: this.type as ScryptedDeviceType,
+                info: this.info,
+            };
+
+            logger.log(`Updating device interfaces: ${JSON.stringify(interfaces)}`);
+
+            await sdk.deviceManager.onDeviceDiscovered(device);
+        } catch (e) {
+            logger.error('Failed to update device interfaces', e);
+        }
+
+        this.refreshingState = false;
     }
 
     private async ensureBaichuanEventSubscription(): Promise<void> {
@@ -1114,6 +1100,11 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         return Boolean(capabilities?.hasBattery);
     }
 
+    hasIntercom() {
+        const capabilities = this.getAbilities();
+        return Boolean(capabilities?.hasIntercom);
+    }
+
     getPtzCapabilities() {
         const capabilities = this.getAbilities();
         const hasZoom = Boolean(capabilities?.hasZoom);
@@ -1146,32 +1137,19 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         ];
 
         try {
-            // Expose Intercom if the camera supports Baichuan talkback.
-            try {
-                const api = this.getClient();
-                if (api) {
-                    const ability = await api.getTalkAbility(this.getRtspChannel());
-                    if (Array.isArray((ability as any)?.audioConfigList) && (ability as any).audioConfigList.length > 0) {
-                        interfaces.push(ScryptedInterface.Intercom);
-                    }
-                }
-            }
-            catch {
-                // ignore: camera likely doesn't support talkback
-            }
-
             const { hasPtz } = this.getPtzCapabilities();
 
             if (hasPtz) {
                 interfaces.push(ScryptedInterface.PanTiltZoom);
             }
-            if ((await this.getObjectTypes()).classes.length > 0) {
-                interfaces.push(ScryptedInterface.ObjectDetector);
-            }
+            interfaces.push(ScryptedInterface.ObjectDetector);
             if (this.hasSiren() || this.hasFloodlight() || this.hasPirEvents())
                 interfaces.push(ScryptedInterface.DeviceProvider);
             if (this.hasBattery()) {
                 interfaces.push(ScryptedInterface.Battery, ScryptedInterface.Sleep);
+            }
+            if (this.hasIntercom()) {
+                interfaces.push(ScryptedInterface.Intercom);
             }
         } catch (e) {
             this.getLogger().error('Error getting device interfaces', e);
@@ -1307,13 +1285,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
     private shouldDispatchObjects(): boolean {
         return this.getDispatchEventsSelection().has('objects');
-    }
-
-    private migrateDispatchEventsSetting(): void {
-        const cur = (this.storageSettings.values as any).dispatchEvents;
-        if (typeof cur === 'boolean') {
-            (this.storageSettings.values as any).dispatchEvents = cur ? ['motion', 'objects'] : [];
-        }
     }
 
     private scheduleApplyEventDispatchSettings(): void {
