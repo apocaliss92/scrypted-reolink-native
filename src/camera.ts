@@ -166,6 +166,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     floodlight: ReolinkCameraFloodlight;
     pirSensor: ReolinkCameraPirSensor;
     private baichuanApi: ReolinkBaichuanApi | undefined;
+    private ensureClientPromise: Promise<ReolinkBaichuanApi> | undefined;
     private connectionTime: number | undefined;
     private refreshingState = false;
 
@@ -458,6 +459,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         finally {
             this.baichuanApi = undefined;
             this.connectionTime = undefined;
+            this.ensureClientPromise = undefined;
         }
 
         if (reason) {
@@ -517,26 +519,49 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     async ensureClient(): Promise<ReolinkBaichuanApi> {
-        if (this.baichuanApi && this.baichuanApi.client.loggedIn) {
-            return this.baichuanApi;
-        }
+        if (this.baichuanApi && this.baichuanApi.client.loggedIn) return this.baichuanApi;
 
-        const { ipAddress, username, password, uid, useUdp } = this.storageSettings.values;
+        // Prevent concurrent login storms. Multiple callers (init, options queries, refresh, events)
+        // may race here and otherwise create multiple Baichuan sessions in parallel.
+        if (this.ensureClientPromise) return await this.ensureClientPromise;
 
-        if (!ipAddress || !username || !password) {
-            throw new Error('Missing camera credentials');
-        }
+        this.ensureClientPromise = (async () => {
+            if (this.baichuanApi && this.baichuanApi.client.loggedIn) return this.baichuanApi;
 
-        if (this.baichuanApi) {
-            await this.baichuanApi.close();
-        }
+            const { ipAddress, username, password, uid, useUdp } = this.storageSettings.values;
 
-        const debugOptions = this.getBaichuanDebugOptions();
+            if (!ipAddress || !username || !password) {
+                throw new Error('Missing camera credentials');
+            }
 
-        // Se useUdp è impostato, usa direttamente UDP senza provare TCP
-        if (useUdp) {
-            this.getLogger().log(`Using UDP transport directly (useUdp=${useUdp})`);
-            const api = await createBaichuanApi(
+            if (this.baichuanApi) {
+                await this.baichuanApi.close();
+            }
+
+            const debugOptions = this.getBaichuanDebugOptions();
+
+            // Se useUdp è impostato, usa direttamente UDP senza provare TCP
+            if (useUdp) {
+                this.getLogger().log(`Using UDP transport directly (useUdp=${useUdp})`);
+                const api = await createBaichuanApi(
+                    {
+                        host: ipAddress,
+                        username,
+                        password,
+                        uid,
+                        logger: this.console,
+                        ...(debugOptions ? { debugOptions } : {}),
+                    },
+                    'udp',
+                );
+                await api.login();
+                this.baichuanApi = api;
+                this.connectionTime = Date.now();
+                return api;
+            }
+
+            // Altrimenti prova TCP con fallback a UDP
+            const { api, transport } = await connectBaichuanWithTcpUdpFallback(
                 {
                     host: ipAddress,
                     username,
@@ -545,44 +570,35 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                     logger: this.console,
                     ...(debugOptions ? { debugOptions } : {}),
                 },
-                'udp',
+                ({ uid: normalizedUid, uidMissing }) => {
+                    const uidMsg = !uidMissing && normalizedUid ? `UID ${maskUid(normalizedUid)}` : 'UID MISSING';
+                    if (!this.udpFallbackAlerted) {
+                        this.udpFallbackAlerted = true;
+                        this.log.a(
+                            `Baichuan TCP failed for camera ${this.name} (${ipAddress}). This appears to be a battery camera: UID is required and UDP/BCUDP will be used (${uidMsg}).`,
+                        );
+                    }
+                },
             );
-            await api.login();
+
+            // Se il fallback ha usato UDP, salva la setting per usare sempre UDP in futuro
+            if (transport === 'udp') {
+                await this.storageSettings.putSetting('useUdp', 'true');
+                this.getLogger().log(`TCP fallback to UDP detected. Saving useUdp setting for future connections.`);
+            }
+
             this.baichuanApi = api;
             this.connectionTime = Date.now();
             return api;
+        })();
+
+        try {
+            return await this.ensureClientPromise;
         }
-
-        // Altrimenti prova TCP con fallback a UDP
-        const { api, transport } = await connectBaichuanWithTcpUdpFallback(
-            {
-                host: ipAddress,
-                username,
-                password,
-                uid,
-                logger: this.console,
-                ...(debugOptions ? { debugOptions } : {}),
-            },
-            ({ uid: normalizedUid, uidMissing }) => {
-                const uidMsg = !uidMissing && normalizedUid ? `UID ${maskUid(normalizedUid)}` : 'UID MISSING';
-                if (!this.udpFallbackAlerted) {
-                    this.udpFallbackAlerted = true;
-                    this.log.a(
-                        `Baichuan TCP failed for camera ${this.name} (${ipAddress}). This appears to be a battery camera: UID is required and UDP/BCUDP will be used (${uidMsg}).`,
-                    );
-                }
-            },
-        );
-
-        // Se il fallback ha usato UDP, salva la setting per usare sempre UDP in futuro
-        if (transport === 'udp') {
-            await this.storageSettings.putSetting('useUdp', 'true');
-            this.getLogger().log(`TCP fallback to UDP detected. Saving useUdp setting for future connections.`);
+        finally {
+            // Allow future reconnects (e.g. after close/reset) and avoid pinning rejected promises.
+            this.ensureClientPromise = undefined;
         }
-
-        this.baichuanApi = api;
-        this.connectionTime = Date.now();
-        return api;
     }
 
     private getBaichuanDebugOptions(): any | undefined {
@@ -654,7 +670,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
 
             try {
-                const interfaces = getDeviceInterfaces({
+                const { interfaces, type } = getDeviceInterfaces({
                     capabilities,
                     logger: this.console,
                 });
@@ -664,7 +680,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                     providerNativeId: this.plugin.nativeId,
                     name: this.name,
                     interfaces,
-                    type: this.type as ScryptedDeviceType,
+                    type,
                     info: this.info,
                 };
 

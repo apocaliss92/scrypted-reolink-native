@@ -1,5 +1,5 @@
 import type { DeviceCapabilities } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import { ScryptedInterface } from "@scrypted/sdk";
+import { ScryptedDeviceType, ScryptedInterface } from "@scrypted/sdk";
 
 export const getDeviceInterfaces = (props: {
     capabilities: DeviceCapabilities,
@@ -48,5 +48,5 @@ export const getDeviceInterfaces = (props: {
         logger.error('Error getting device interfaces', e);
     }
 
-    return interfaces;
+    return { interfaces, type: capabilities.isDoorbell ? ScryptedDeviceType.Doorbell : ScryptedDeviceType.Camera };
 }

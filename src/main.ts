@@ -54,11 +54,10 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 this.console.log(JSON.stringify({ abilities, capabilities, deviceInfo }));
 
                 nativeId = deviceInfo.serialNumber;
-                const type = capabilities.isDoorbell ? ScryptedDeviceType.DataSource : ScryptedDeviceType.Camera;
 
                 settings.newCamera ||= name;
 
-                const interfaces = getDeviceInterfaces({
+                const { interfaces, type } = getDeviceInterfaces({
                     capabilities,
                     logger: this.console,
                 });
