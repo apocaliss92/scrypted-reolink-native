@@ -1,23 +1,13 @@
 import sdk, { DeviceCreator, DeviceCreatorSettings, DeviceInformation, DeviceProvider, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedNativeId, Setting } from "@scrypted/sdk";
 import { ReolinkNativeCamera } from "./camera";
 import { connectBaichuanWithTcpUdpFallback, maskUid } from "./connect";
+import { getDeviceInterfaces } from "./utils";
 
 class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, DeviceCreator {
     devices = new Map<string, ReolinkNativeCamera>();
 
     getScryptedDeviceCreator(): string {
         return 'Reolink Native camera';
-    }
-
-    getCameraInterfaces() {
-        return [
-            ScryptedInterface.Reboot,
-            ScryptedInterface.VideoCameraConfiguration,
-            ScryptedInterface.Camera,
-            ScryptedInterface.AudioSensor,
-            ScryptedInterface.MotionSensor,
-            ScryptedInterface.VideoTextOverlays,
-        ];
     }
 
     async getDevice(nativeId: ScryptedNativeId): Promise<ReolinkNativeCamera> {
@@ -64,14 +54,20 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 this.console.log(JSON.stringify({ abilities, capabilities, deviceInfo }));
 
                 nativeId = deviceInfo.serialNumber;
+                const type = capabilities.isDoorbell ? ScryptedDeviceType.DataSource : ScryptedDeviceType.Camera;
 
                 settings.newCamera ||= name;
+
+                const interfaces = getDeviceInterfaces({
+                    capabilities,
+                    logger: this.console,
+                });
 
                 await sdk.deviceManager.onDeviceDiscovered({
                     nativeId,
                     name,
-                    interfaces: this.getCameraInterfaces(),
-                    type: ScryptedDeviceType.Camera,
+                    interfaces,
+                    type,
                     providerNativeId: this.nativeId,
                 });
 

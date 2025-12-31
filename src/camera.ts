@@ -7,7 +7,8 @@ import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
 import { ReolinkPtzPresets } from "./presets";
 import { parseStreamProfileFromId, StreamManager } from './stream-utils';
-import { connectBaichuanWithTcpUdpFallback, createBaichuanApi, maskUid } from './connect';
+import { BaichuanTransport, connectBaichuanWithTcpUdpFallback, createBaichuanApi, maskUid } from './connect';
+import { getDeviceInterfaces } from "./utils";
 
 export const moToB64 = async (mo: MediaObject) => {
     const bufferImage = await sdk.mediaManager.convertMediaObjectToBuffer(mo, 'image/jpeg');
@@ -177,8 +178,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
     private udpFallbackAlerted = false;
 
-    intercomClient: RtspClient;
-
     private intercom: ReolinkBaichuanIntercom;
 
     private ptzPresets: ReolinkPtzPresets;
@@ -239,7 +238,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 oldSel.delete('eventLogs');
                 newSel.delete('eventLogs');
 
-                const changed = oldSel.size !== newSel.size || Array.from(oldSel).some((k) => !newSel.has(k));
+                const changed = oldSel.size !== newSel.size;
                 if (changed) {
                     await this.resetBaichuanClient('debugLogs changed');
                 }
@@ -387,6 +386,11 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             type: 'boolean',
             hide: true
         },
+        useUdp: {
+            type: 'boolean',
+            hide: true,
+            defaultValue: false
+        },
         intercomBlocksPerPayload: {
             subgroup: 'Advanced',
             title: 'Intercom Blocks Per Payload',
@@ -517,7 +521,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             return this.baichuanApi;
         }
 
-        const { ipAddress, username, password, uid } = this.storageSettings.values;
+        const { ipAddress, username, password, uid, useUdp } = this.storageSettings.values;
 
         if (!ipAddress || !username || !password) {
             throw new Error('Missing camera credentials');
@@ -528,7 +532,29 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         }
 
         const debugOptions = this.getBaichuanDebugOptions();
-        const { api } = await connectBaichuanWithTcpUdpFallback(
+
+        // Se useUdp è impostato, usa direttamente UDP senza provare TCP
+        if (useUdp) {
+            this.getLogger().log(`Using UDP transport directly (useUdp=${useUdp})`);
+            const api = await createBaichuanApi(
+                {
+                    host: ipAddress,
+                    username,
+                    password,
+                    uid,
+                    logger: this.console,
+                    ...(debugOptions ? { debugOptions } : {}),
+                },
+                'udp',
+            );
+            await api.login();
+            this.baichuanApi = api;
+            this.connectionTime = Date.now();
+            return api;
+        }
+
+        // Altrimenti prova TCP con fallback a UDP
+        const { api, transport } = await connectBaichuanWithTcpUdpFallback(
             {
                 host: ipAddress,
                 username,
@@ -547,6 +573,12 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 }
             },
         );
+
+        // Se il fallback ha usato UDP, salva la setting per usare sempre UDP in futuro
+        if (transport === 'udp') {
+            await this.storageSettings.putSetting('useUdp', 'true');
+            this.getLogger().log(`TCP fallback to UDP detected. Saving useUdp setting for future connections.`);
+        }
 
         this.baichuanApi = api;
         this.connectionTime = Date.now();
@@ -568,13 +600,17 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     private async createStreamClient(): Promise<ReolinkBaichuanApi> {
-        // Ensure the main client is initialized first so we know if this device needs UDP.
-        const primary = await this.ensureClient();
-        const transport = primary.client.getTransport();
-
-        const { ipAddress, username, password, uid } = this.storageSettings.values;
+        const { ipAddress, username, password, uid, useUdp } = this.storageSettings.values;
         if (!ipAddress || !username || !password) {
             throw new Error('Missing camera credentials');
+        }
+
+        // Usa la setting useUdp per determinare il transport invece di ottenere dal client primario
+        // Questo garantisce che lo stream client usi lo stesso transport del client principale
+        const transport: BaichuanTransport = useUdp ? 'udp' : 'tcp';
+
+        if (useUdp) {
+            this.getLogger().log(`Creating stream client with UDP transport (useUdp=${useUdp})`);
         }
 
         const debugOptions = this.getBaichuanDebugOptions();
@@ -611,6 +647,30 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             const { capabilities, abilities, support, presets } = await api.getDeviceCapabilities(channel);
             this.storageSettings.values.capabilities = capabilities;
             this.ptzPresets.setCachedPtzPresets(presets);
+
+
+            try {
+                const interfaces = getDeviceInterfaces({
+                    capabilities,
+                    logger: this.console,
+                });
+
+                const device: Device = {
+                    nativeId: this.nativeId,
+                    providerNativeId: this.plugin.nativeId,
+                    name: this.name,
+                    interfaces,
+                    type: this.type as ScryptedDeviceType,
+                    info: this.info,
+                };
+
+                logger.log(`Updating device interfaces: ${JSON.stringify(interfaces)}`);
+
+                await sdk.deviceManager.onDeviceDiscovered(device);
+            } catch (e) {
+                logger.error('Failed to update device interfaces', e);
+            }
+
             this.console.log(`Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets })}`);
         }
         catch (e) {
@@ -622,25 +682,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         }
         catch (e) {
             logger.error('Failed to refresh device status', e);
-        }
-
-        try {
-            const interfaces = await this.getDeviceInterfaces();
-
-            const device: Device = {
-                nativeId: this.nativeId,
-                providerNativeId: this.plugin.nativeId,
-                name: this.name,
-                interfaces,
-                type: this.type as ScryptedDeviceType,
-                info: this.info,
-            };
-
-            logger.log(`Updating device interfaces: ${JSON.stringify(interfaces)}`);
-
-            await sdk.deviceManager.onDeviceDiscovered(device);
-        } catch (e) {
-            logger.error('Failed to update device interfaces', e);
         }
 
         this.refreshingState = false;
@@ -977,6 +1018,11 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         return Boolean(capabilities?.hasIntercom);
     }
 
+    isDoorbell() {
+        const capabilities = this.getAbilities() as any;
+        return Boolean(capabilities?.isDoorbell);
+    }
+
     getPtzCapabilities() {
         const capabilities = this.getAbilities();
         const hasZoom = Boolean(capabilities?.hasZoom);
@@ -999,35 +1045,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     hasPirEvents() {
         const capabilities = this.getAbilities();
         return Boolean(capabilities?.hasPir);
-    }
-
-    async getDeviceInterfaces() {
-        const interfaces = [
-            ScryptedInterface.VideoCamera,
-            ScryptedInterface.Settings,
-            ...this.plugin.getCameraInterfaces(),
-        ];
-
-        try {
-            const { hasPtz } = this.getPtzCapabilities();
-
-            if (hasPtz) {
-                interfaces.push(ScryptedInterface.PanTiltZoom);
-            }
-            interfaces.push(ScryptedInterface.ObjectDetector);
-            if (this.hasSiren() || this.hasFloodlight() || this.hasPirEvents())
-                interfaces.push(ScryptedInterface.DeviceProvider);
-            if (this.hasBattery()) {
-                interfaces.push(ScryptedInterface.Battery, ScryptedInterface.Sleep);
-            }
-            if (this.hasIntercom()) {
-                interfaces.push(ScryptedInterface.Intercom);
-            }
-        } catch (e) {
-            this.getLogger().error('Error getting device interfaces', e);
-        }
-
-        return interfaces;
     }
 
     async processBatteryData(data: BatteryInfo) {
