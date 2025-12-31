@@ -113,54 +113,39 @@ export class ReolinkPtzPresets {
         const existing = await client.getPtzPresets(channel);
         const existingIds = new Set(existing.map((p) => p.id));
 
-        const maxAttempts = 5;
-        let lastUpdated: PtzPreset[] = [];
-        let chosenId: number | undefined;
-
-        const initialId = presetId ?? this.nextFreePresetId(existing);
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            const id = presetId ?? (initialId + attempt);
-            if (!presetId && existingIds.has(id)) continue;
-
-            await client.setPtzPreset(channel, id, trimmed);
-
-            const updated = await client.getPtzPresets(channel);
-            lastUpdated = updated;
-
-            const persisted = updated.some((p) => p.id === id);
-            if (persisted) {
-                chosenId = id;
-                break;
-            }
-
-            // If the camera isn't exposing any presets at all, it may be keeping low IDs reserved/disabled.
-            // Try the next ID.
+        const id = presetId ?? this.nextFreePresetId(existing);
+        if (presetId === undefined && existingIds.has(id)) {
+            // Should not happen because nextFreePresetId returns unused id.
+            throw new Error(`PTZ preset id already in use: ${id}`);
         }
 
-        if (chosenId === undefined) {
-            this.setCachedPtzPresets(lastUpdated);
-            this.syncEnabledPresetsSettingAndCaps(lastUpdated);
+        await client.setPtzPreset(channel, id, trimmed);
+
+        const updated = await client.getPtzPresets(channel);
+        const persisted = updated.some((p) => p.id === id);
+        this.setCachedPtzPresets(updated);
+
+        if (!persisted) {
+            this.syncEnabledPresetsSettingAndCaps(updated);
             throw new Error(
-                `PTZ preset save did not persist (camera returned an empty/unchanged preset list). Try a different preset id.`
+                `PTZ preset save did not persist (camera returned an empty/unchanged preset list). Try again.`
             );
         }
-
-        this.setCachedPtzPresets(lastUpdated);
 
         // If the "presets" setting is in use, auto-add the newly created preset so it becomes
         // immediately selectable/visible in the UI. If it's empty/unconfigured, don't start using it.
         const enabled = (this.storageSettings.values.presets ?? []) as string[];
         if (enabled.length) {
-            const already = enabled.some((e) => this.parsePresetIdFromSettingValue(e) === chosenId);
+            const already = enabled.some((e) => this.parsePresetIdFromSettingValue(e) === id);
             if (!already) {
-                enabled.push(`${chosenId}=${trimmed}`);
+                enabled.push(`${id}=${trimmed}`);
                 this.storageSettings.values.presets = enabled;
             }
         }
 
         // Re-apply enabled mapping (so custom names/filters remain effective after setCachedPtzPresets).
-        this.syncEnabledPresetsSettingAndCaps(lastUpdated);
-        return { id: chosenId, name: trimmed };
+        this.syncEnabledPresetsSettingAndCaps(updated);
+        return { id, name: trimmed };
     }
 
     /** Overwrite an existing preset with the current PTZ position (and keep its current name). */

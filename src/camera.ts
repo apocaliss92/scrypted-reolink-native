@@ -165,26 +165,17 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     floodlight: ReolinkCameraFloodlight;
     pirSensor: ReolinkCameraPirSensor;
     private baichuanApi: ReolinkBaichuanApi | undefined;
+    private connectionTime: number | undefined;
     private refreshingState = false;
-
-    private subscribedToEvents = false;
-    private onSimpleEvent: ((ev: ReolinkSimpleEvent) => void) | undefined;
-    private eventsApi: ReolinkBaichuanApi | undefined;
 
     private periodicStarted = false;
     private statusPollTimer: NodeJS.Timeout | undefined;
-    private eventsRestartTimer: NodeJS.Timeout | undefined;
     private lastActivityMs = Date.now();
     private lastB64Snapshot: string | undefined;
     private lastSnapshotTaken: number | undefined;
     private streamManager: StreamManager;
 
     private udpFallbackAlerted = false;
-
-    private dispatchEventsApplyTimer: NodeJS.Timeout | undefined;
-    private dispatchEventsApplySeq = 0;
-
-    private lastAppliedDispatchEventsKey: string | undefined;
 
     intercomClient: RtspClient;
 
@@ -229,7 +220,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             defaultValue: ['motion', 'objects'],
             choices: ['motion', 'objects'],
             onPut: async () => {
-                this.scheduleApplyEventDispatchSettings();
+                await this.subscribeToEvents();
             },
         },
         debugLogs: {
@@ -454,23 +445,15 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
     private async resetBaichuanClient(reason?: any): Promise<void> {
         try {
+            this.unsubscribedToEvents();
             await this.baichuanApi?.close();
         }
         catch (e) {
             this.getLogger().warn('Error closing Baichuan client during reset', e);
         }
         finally {
-            if (this.eventsApi && this.onSimpleEvent) {
-                try {
-                    this.eventsApi.simpleEvents.off('event', this.onSimpleEvent);
-                }
-                catch {
-                    // ignore
-                }
-            }
             this.baichuanApi = undefined;
-            this.subscribedToEvents = false;
-            this.eventsApi = undefined;
+            this.connectionTime = undefined;
         }
 
         if (reason) {
@@ -512,9 +495,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
         // Start event subscription after discovery.
         try {
-            if (this.isEventDispatchEnabled()) {
-                await this.ensureBaichuanEventSubscription();
-            }
+            await this.subscribeToEvents();
         }
         catch (e) {
             logger.warn('Failed to subscribe to Baichuan events', e);
@@ -568,6 +549,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         );
 
         this.baichuanApi = api;
+        this.connectionTime = Date.now();
         return api;
     }
 
@@ -650,155 +632,79 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         this.refreshingState = false;
     }
 
-    private async ensureBaichuanEventSubscription(): Promise<void> {
-        if (!this.isEventDispatchEnabled()) {
-            await this.disableBaichuanEventSubscription();
-            return;
-        }
-        if (this.subscribedToEvents) return;
-        const api = await this.ensureClient();
-
+    private onSimpleEvent = (ev: any) => {
         try {
-            await api.subscribeEvents();
+            if (!this.isEventDispatchEnabled()) return;
+            if (this.isEventLogsEnabled()) {
+                this.getLogger().debug(`Baichuan event: ${JSON.stringify(ev)}`);
+            }
+            const channel = this.getRtspChannel();
+            if (ev?.channel !== undefined && ev.channel !== channel) return;
+
+            const objects: string[] = [];
+            let motion = false;
+
+            switch (ev?.type) {
+                case 'motion':
+                    motion = this.shouldDispatchMotion();
+                    break;
+                case 'doorbell':
+                    // Placeholder: treat doorbell as motion.
+                    motion = this.shouldDispatchMotion();
+                    break;
+                case 'people':
+                case 'vehicle':
+                case 'animal':
+                case 'face':
+                case 'package':
+                case 'other':
+                    if (this.shouldDispatchObjects()) objects.push(ev.type);
+                    break;
+                default:
+                    return;
+            }
+
+            this.processEvents({ motion, objects }).catch(() => { });
         }
         catch {
-            // Some firmwares don't require explicit subscribe or may reject it.
+            // ignore
         }
-
-        this.onSimpleEvent ||= (ev: any) => {
-            try {
-                if (!this.isEventDispatchEnabled()) return;
-                if (this.isEventLogsEnabled()) {
-                    this.getLogger().debug(`Baichuan event: ${JSON.stringify(ev)}`);
-                }
-                const channel = this.getRtspChannel();
-                if (ev?.channel !== undefined && ev.channel !== channel) return;
-
-                const objects: string[] = [];
-                let motion = false;
-
-                switch (ev?.type) {
-                    case 'motion':
-                        motion = this.shouldDispatchMotion();
-                        break;
-                    case 'doorbell':
-                        // Placeholder: treat doorbell as motion.
-                        motion = this.shouldDispatchMotion();
-                        break;
-                    case 'people':
-                    case 'vehicle':
-                    case 'animal':
-                    case 'face':
-                    case 'package':
-                    case 'other':
-                        if (this.shouldDispatchObjects()) objects.push(ev.type);
-                        break;
-                    default:
-                        return;
-                }
-
-                this.processEvents({ motion, objects }).catch(() => { });
-            }
-            catch {
-                // ignore
-            }
-        };
-
-        // Attach the handler to the current API instance, and detach from any previous instance.
-        if (this.eventsApi && this.eventsApi !== api && this.onSimpleEvent) {
-            try {
-                this.eventsApi.simpleEvents.off('event', this.onSimpleEvent);
-            }
-            catch {
-                // ignore
-            }
-        }
-        if (this.eventsApi !== api && this.onSimpleEvent) {
-            api.simpleEvents.on('event', this.onSimpleEvent);
-            this.eventsApi = api;
-        }
-
-        this.subscribedToEvents = true;
     }
 
-    private async disableBaichuanEventSubscription(): Promise<void> {
-        // Do not wake up battery cameras / do not force login: best-effort cleanup only.
+    private unsubscribedToEvents() {
         const api = this.getClient();
-        if (api?.client?.loggedIn) {
-            try {
-                await api.unsubscribeEvents();
-            }
-            catch {
-                // ignore
-            }
-        }
-
-        if (this.eventsApi && this.onSimpleEvent) {
-            try {
-                this.eventsApi.simpleEvents.off('event', this.onSimpleEvent);
-            }
-            catch {
-                // ignore
-            }
-        }
-
-        this.subscribedToEvents = false;
-        this.eventsApi = undefined;
-
-        if (this.motionTimeout) {
-            clearTimeout(this.motionTimeout);
-        }
-        this.motionDetected = false;
+        api.offSimpleEvent(this.onSimpleEvent);
     }
 
-    private async applyEventDispatchSettings(): Promise<void> {
+    private async subscribeToEvents(): Promise<void> {
         const logger = this.getLogger();
         const selection = Array.from(this.getDispatchEventsSelection()).sort();
-        const key = selection.join(',');
-        const prevKey = this.lastAppliedDispatchEventsKey;
+        const enabled = selection.length > 0;
 
-        if (prevKey !== undefined && prevKey !== key) {
-            logger.log(`Dispatch Events changed: ${selection.length ? selection.join(', ') : '(disabled)'}`);
-        }
-
-        // User-initiated settings change counts as activity.
+        // Settings change / init counts as activity.
         this.markActivity();
 
-        // Empty selection disables everything.
-        if (!this.isEventDispatchEnabled()) {
-            if (this.subscribedToEvents) {
-                logger.log('Event listener stopped (Dispatch Events disabled)');
-            }
-            await this.disableBaichuanEventSubscription();
-            this.lastAppliedDispatchEventsKey = key;
-            return;
-        }
-
-        // If motion is not selected, ensure state is cleared.
         if (!this.shouldDispatchMotion()) {
             if (this.motionTimeout) clearTimeout(this.motionTimeout);
             this.motionDetected = false;
         }
 
-        // Apply immediately even if we were already subscribed.
-        // If nothing actually changed and we're already subscribed, avoid a noisy resubscribe.
-        if (prevKey === key && this.subscribedToEvents) {
-            // Track baseline so later changes are logged.
-            this.lastAppliedDispatchEventsKey = key;
+        this.unsubscribedToEvents();
+
+        if (!enabled) {
             return;
         }
 
-        if (!this.subscribedToEvents) {
-            logger.log(`Event listener started (${selection.join(', ')})`);
-            await this.ensureBaichuanEventSubscription();
-            this.lastAppliedDispatchEventsKey = key;
+        const api = await this.ensureClient();
+
+        try {
+            api.onSimpleEvent(this.onSimpleEvent);
+            logger.log(`Subscribed to events (${selection.join(', ')})`);
+        }
+        catch (e) {
+            logger.warn('Failed to attach Baichuan event handler', e);
             return;
         }
-
-        logger.log(`Event listener restarting (${selection.join(', ')})`);
-        await this.disableBaichuanEventSubscription();
-        await this.ensureBaichuanEventSubscription();
-        this.lastAppliedDispatchEventsKey = key;
     }
 
     markActivity(): void {
@@ -820,7 +726,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
     async release() {
         this.statusPollTimer && clearInterval(this.statusPollTimer);
-        this.eventsRestartTimer && clearInterval(this.eventsRestartTimer);
         return this.resetBaichuanClient();
     }
 
@@ -831,10 +736,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         this.statusPollTimer = setInterval(() => {
             this.periodic10sTick().catch(() => { });
         }, 10_000);
-
-        this.eventsRestartTimer = setInterval(() => {
-            this.periodic60sRestartEvents().catch(() => { });
-        }, 60_000);
     }
 
     private async periodic10sTick(): Promise<void> {
@@ -846,46 +747,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         }
 
         await this.refreshAuxDevicesStatus();
-
-        // Best-effort: ensure we're subscribed.
-        if (this.isEventDispatchEnabled() && !this.subscribedToEvents) {
-            if (this.hasBattery()) {
-                const api = this.getClient();
-                if (!api?.client?.loggedIn) return;
-            }
-            await this.ensureBaichuanEventSubscription();
-        }
-    }
-
-    private async periodic60sRestartEvents(): Promise<void> {
-        if (this.shouldAvoidWakingBatteryCamera()) return;
-
-        if (!this.isEventDispatchEnabled()) {
-            await this.disableBaichuanEventSubscription();
-            return;
-        }
-
-        // Wired cameras can reconnect; battery cameras only operate on an existing active client.
-        if (!this.hasBattery()) {
-            await this.ensureClient();
-        }
-        else {
-            const api = this.getClient();
-            if (!api?.client?.loggedIn) return;
-        }
-
-        const api = this.getClient();
-        if (!api) return;
-
-        try {
-            await api.unsubscribeEvents();
-        }
-        catch {
-            // ignore
-        }
-
-        this.subscribedToEvents = false;
-        await this.ensureBaichuanEventSubscription();
     }
 
     private async refreshAuxDevicesStatus(): Promise<void> {
@@ -1287,26 +1148,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         return this.getDispatchEventsSelection().has('objects');
     }
 
-    private scheduleApplyEventDispatchSettings(): void {
-        // Debounce to avoid rapid apply loops while editing multi-select.
-        this.dispatchEventsApplySeq++;
-        const seq = this.dispatchEventsApplySeq;
-
-        if (this.dispatchEventsApplyTimer) {
-            clearTimeout(this.dispatchEventsApplyTimer);
-        }
-
-        this.dispatchEventsApplyTimer = setTimeout(() => {
-            // Fire-and-forget; never block settings UI.
-            this.applyEventDispatchSettings().catch((e) => {
-                // Only log once per debounce window.
-                if (seq === this.dispatchEventsApplySeq) {
-                    this.getLogger().warn('Failed to apply Dispatch Events setting', e);
-                }
-            });
-        }, 300);
-    }
-
     async takeSnapshotInternal(timeout?: number) {
         this.markActivity();
         return this.withBaichuanRetry(async () => {
@@ -1357,7 +1198,9 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         }
 
         if (canTake) {
-            return this.takeSnapshotInternal(options?.timeout);
+            if (this.connectionTime && (Date.now() - this.connectionTime) > 5000) {
+                return this.takeSnapshotInternal(options?.timeout);
+            }
         } else if (this.lastB64Snapshot) {
             const mo = await b64ToMo(this.lastB64Snapshot);
 
@@ -1382,6 +1225,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         const selected = vsos?.find(s => s.id === vso.id) || vsos?.[0];
         if (!selected)
             throw new Error('No stream options available');
+        this.getLogger().log(`Creating video stream for option id=${selected.id} name=${selected.name}`);
 
         const profile = parseStreamProfileFromId(selected.id) || 'main';
 
@@ -1396,8 +1240,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             const { host, port, sdp, audio } = await this.streamManager.getRfcStream(channel, profile, streamKey, expectedVideoType as any);
 
             const { url: _ignoredUrl, ...mso }: any = selected;
-            // This stream is delivered as RFC4571 (RTP over raw TCP), not RTSP.
-            // Mark it accordingly to avoid RTSP-specific handling in downstream plugins.
             mso.container = 'rtp';
             if (audio) {
                 mso.audio ||= {};
