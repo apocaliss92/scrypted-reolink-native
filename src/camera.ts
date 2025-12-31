@@ -230,7 +230,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             combobox: true,
             immediate: true,
             defaultValue: [],
-            choices: ['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'debugH264', 'debugParamSets', 'eventLogs'],
+            choices: ['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'traceEvents', 'debugH264', 'debugParamSets', 'eventLogs'],
             onPut: async (ov, value) => {
                 // Only reconnect if Baichuan-client flags changed; toggling event logs should be immediate.
                 const oldSel = new Set(ov);
@@ -238,7 +238,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 oldSel.delete('eventLogs');
                 newSel.delete('eventLogs');
 
-                const changed = oldSel.size !== newSel.size;
+                const changed = oldSel.size !== newSel.size || Array.from(oldSel).some((k) => !newSel.has(k));
                 if (changed) {
                     await this.resetBaichuanClient('debugLogs changed');
                 }
@@ -591,7 +591,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
         const debugOptions: DebugOptions = {};
         // Only pass through Baichuan client debug flags.
-        const clientKeys = new Set(['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'debugH264', 'debugParamSets']);
+        const clientKeys = new Set(['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'traceEvents', 'debugH264', 'debugParamSets']);
         for (const k of sel) {
             if (!clientKeys.has(k)) continue;
             debugOptions[k] = true;
