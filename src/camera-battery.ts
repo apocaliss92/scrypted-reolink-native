@@ -13,6 +13,9 @@ import sdk, {
     type Setting,
     type Settings,
     type VideoCamera,
+    Camera,
+    RequestPictureOptions,
+    ResponsePictureOptions,
 } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
@@ -123,14 +126,7 @@ export async function refreshBatteryAndPirWhileAwake(options: {
     }
 }
 
-/**
- * Minimal battery/UDP device.
- *
- * Constraints (by design):
- * - no polling, no snapshots, no events, no extra feature calls
- * - the only Baichuan API interaction is creating/using the streaming session
- */
-export class ReolinkNativeBatteryCamera extends ScryptedDeviceBase implements VideoCamera, Settings, DeviceProvider {
+export class ReolinkNativeBatteryCamera extends ScryptedDeviceBase implements Camera, VideoCamera, Settings, DeviceProvider {
     private streamManager: StreamManager;
     private cachedVideoStreamOptions: UrlMediaStreamOptions[] | undefined;
     private pirSensor: ReolinkBatteryPirSensor | undefined;
@@ -138,14 +134,41 @@ export class ReolinkNativeBatteryCamera extends ScryptedDeviceBase implements Vi
     private floodlight: ReolinkBatteryFloodlight | undefined;
     private initAttempts = 0;
     private fetchingStreams = false;
+    private lastPicture: { mo: MediaObject; atMs: number } | undefined;
+    private takePictureInFlight: Promise<MediaObject> | undefined;
+    /**
+     * IMPORTANT for BCUDP stability:
+     * Battery cams can disconnect the active UDP stream if we establish a second concurrent BCUDP session.
+     * Reuse the same logged-in UDP client for streaming + snapshots/ops while streaming.
+     */
+    private streamBaichuanApi: ReolinkBaichuanApi | undefined;
+    private streamBaichuanApiLoginPromise: Promise<ReolinkBaichuanApi> | undefined;
+
+    /**
+     * When we're NOT streaming, background tasks (snapshots, prebuffer, option refresh) can fire concurrently.
+     * Creating multiple BCUDP sessions in parallel makes the camera rotate did/cid and breaks login/streaming.
+     * Keep one shared "idle" session with refcount + delayed close to prevent session storms.
+     */
+    private idleBaichuanApi: ReolinkBaichuanApi | undefined;
+    private idleBaichuanApiLoginPromise: Promise<ReolinkBaichuanApi> | undefined;
+    private idleBaichuanApiRefCount = 0;
+    private idleBaichuanApiCloseTimer: NodeJS.Timeout | undefined;
 
     storageSettings = new StorageSettings(this, {
         ipAddress: { title: "IP Address", type: "string" },
         uid: { title: "UID", description: "Reolink UID (required for battery cameras / BCUDP).", type: "string" },
         username: { title: "Username", type: "string" },
         password: { title: "Password", type: "password" },
+        snapshotCacheMinutes: {
+            title: "Snapshot Cache Minutes",
+            group: 'Advanced',
+            description: "Return a cached snapshot if taken within the last N minutes.",
+            type: "number",
+            defaultValue: 5,
+        },
         rtspChannel: { type: "number", hide: true, defaultValue: 0 },
         capabilities: { json: true, hide: true },
+        mixinsSetup: { type: 'boolean', hide: true },
     });
 
     constructor(nativeId: string, public plugin: ReolinkNativePlugin) {
@@ -159,6 +182,42 @@ export class ReolinkNativeBatteryCamera extends ScryptedDeviceBase implements Vi
         setTimeout(async () => {
             await this.init();
         }, 2000);
+    }
+
+    async takePicture(options?: RequestPictureOptions): Promise<MediaObject> {
+        const { snapshotCacheMinutes = 5 } = this.storageSettings.values;
+        const cacheMs = snapshotCacheMinutes * 60_000;
+        if (cacheMs > 0 && this.lastPicture && Date.now() - this.lastPicture.atMs < cacheMs) {
+            this.console.log(`Returning cached snapshot, taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
+            return this.lastPicture.mo;
+        }
+
+        if (this.takePictureInFlight) {
+            return await this.takePictureInFlight;
+        }
+
+        this.console.log('Taking new snapshot from camera');
+        this.takePictureInFlight = (async () => {
+            const channel = this.getRtspChannel();
+            const snapshotBuffer = await this.withBaichuanClient(async (api) => {
+                return await api.getSnapshot(channel);
+            });
+            const mo = await sdk.mediaManager.createMediaObject(snapshotBuffer, 'image/jpeg');
+            this.lastPicture = { mo, atMs: Date.now() };
+            this.console.log(`Snapshot taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
+            return mo;
+        })();
+
+        try {
+            return await this.takePictureInFlight;
+        }
+        finally {
+            this.takePictureInFlight = undefined;
+        }
+    }
+
+    async getPictureOptions(): Promise<ResponsePictureOptions[]> {
+        return [];
     }
 
     private getRtspChannel(): number {
@@ -197,18 +256,107 @@ export class ReolinkNativeBatteryCamera extends ScryptedDeviceBase implements Vi
             // ignore
         }
 
-        // If main.ts hasn't populated capabilities yet, retry discovery shortly.
-        if (!this.storageSettings.values.capabilities && this.initAttempts < 5) {
-            setTimeout(() => {
-                this.init().catch(() => {
-                    // ignore
-                });
-            }, 2000);
+        if (!this.storageSettings.values.mixinsSetup) {
+            const device = sdk.systemManager.getDeviceById<Settings>(this.id);
+            this.console.log('Disabling prebbufer and snapshots from prebuffer');
+            await device.putSetting('prebuffer:enabledStreams', '[]');
+            await device.putSetting('snapshot:snapshotsFromPrebuffer', 'Disabled');
+            this.storageSettings.values.mixinsSetup = true;
         }
     }
 
     async release(): Promise<void> {
-        // No background tasks to stop; RFC4571 server tears down its own stream API.
+        // Tear down any cached BCUDP session.
+        try {
+            await this.streamBaichuanApi?.close();
+        }
+        catch {
+            // ignore
+        }
+        this.streamBaichuanApi = undefined;
+
+        try {
+            if (this.idleBaichuanApiCloseTimer) clearTimeout(this.idleBaichuanApiCloseTimer);
+        }
+        catch {
+            // ignore
+        }
+        this.idleBaichuanApiCloseTimer = undefined;
+        this.idleBaichuanApiRefCount = 0;
+        this.idleBaichuanApiLoginPromise = undefined;
+
+        try {
+            await this.idleBaichuanApi?.close();
+        }
+        catch {
+            // ignore
+        }
+        this.idleBaichuanApi = undefined;
+    }
+
+    private async acquireIdleBaichuanApi(): Promise<ReolinkBaichuanApi> {
+        // Cancel any pending close (we're about to reuse it).
+        if (this.idleBaichuanApiCloseTimer) {
+            clearTimeout(this.idleBaichuanApiCloseTimer);
+            this.idleBaichuanApiCloseTimer = undefined;
+        }
+
+        if (this.idleBaichuanApi) {
+            this.idleBaichuanApiRefCount++;
+            return this.idleBaichuanApi;
+        }
+        if (this.idleBaichuanApiLoginPromise) {
+            const api = await this.idleBaichuanApiLoginPromise;
+            this.idleBaichuanApiRefCount++;
+            return api;
+        }
+
+        const { ipAddress, username, password, uid } = this.storageSettings.values;
+        if (!ipAddress || !username || !password) throw new Error("Missing camera credentials");
+        const normalizedUid = normalizeUid(uid);
+        if (!normalizedUid) throw new Error("UID is required for battery cameras (BCUDP)");
+
+        this.idleBaichuanApiLoginPromise = (async () => {
+            const api = await createBaichuanApi(
+                {
+                    host: ipAddress,
+                    username,
+                    password,
+                    uid: normalizedUid,
+                    logger: this.console,
+                    keepAliveInterval: 0,
+                },
+                "udp",
+            );
+            await api.login();
+            this.idleBaichuanApi = api;
+            return api;
+        })();
+
+        try {
+            const api = await this.idleBaichuanApiLoginPromise;
+            this.idleBaichuanApiRefCount++;
+            return api;
+        }
+        finally {
+            this.idleBaichuanApiLoginPromise = undefined;
+        }
+    }
+
+    private releaseIdleBaichuanApi(api: ReolinkBaichuanApi): void {
+        if (this.idleBaichuanApi !== api) return;
+        this.idleBaichuanApiRefCount = Math.max(0, this.idleBaichuanApiRefCount - 1);
+        if (this.idleBaichuanApiRefCount > 0) return;
+
+        // Delay close slightly: snapshot + prebuffer often happen back-to-back.
+        if (this.idleBaichuanApiCloseTimer) clearTimeout(this.idleBaichuanApiCloseTimer);
+        this.idleBaichuanApiCloseTimer = setTimeout(() => {
+            const toClose = this.idleBaichuanApi;
+            this.idleBaichuanApi = undefined;
+            this.idleBaichuanApiCloseTimer = undefined;
+            if (!toClose) return;
+            toClose.close().catch(() => { });
+        }, 2500);
     }
 
     async updateDeviceInfo(): Promise<void> {
@@ -224,66 +372,98 @@ export class ReolinkNativeBatteryCamera extends ScryptedDeviceBase implements Vi
     }
 
     private async withBaichuanClient<T>(fn: (api: ReolinkBaichuanApi) => Promise<T>): Promise<T> {
-        const { ipAddress, username, password, uid } = this.storageSettings.values;
-        if (!ipAddress || !username || !password) throw new Error("Missing camera credentials");
-        const normalizedUid = normalizeUid(uid);
-        if (!normalizedUid) throw new Error("UID is required for battery cameras (BCUDP)");
+        // If a streaming BCUDP session is active, reuse it.
+        // Creating a second BCUDP session (even briefly for snapshots) can trigger the camera to
+        // disconnect the stream (observed as D2C_DISC in packet captures).
+        if (this.streamBaichuanApi) {
+            return await fn(this.streamBaichuanApi);
+        }
+        // If the streaming session is in the middle of logging in, wait and reuse it.
+        // This prevents a race at stream startup where a concurrent snapshot/metadata call
+        // would otherwise create a second BCUDP session, causing the camera to disconnect.
+        if (this.streamBaichuanApiLoginPromise) {
+            const api = await this.streamBaichuanApiLoginPromise;
+            return await fn(api);
+        }
 
-        const api = await createBaichuanApi(
-            {
-                host: ipAddress,
-                username,
-                password,
-                uid: normalizedUid,
-                logger: this.console,
-                keepAliveInterval: 0,
-            },
-            "udp",
-        );
-
-        await api.login();
+        // Not streaming: use a shared idle BCUDP session to avoid concurrent session storms.
+        const api = await this.acquireIdleBaichuanApi();
         try {
             return await fn(api);
-        } finally {
-            await api.close();
+        }
+        finally {
+            this.releaseIdleBaichuanApi(api);
         }
     }
 
     private async createStreamClient(): Promise<ReolinkBaichuanApi> {
+        if (this.streamBaichuanApi) {
+            return this.streamBaichuanApi;
+        }
+        if (this.streamBaichuanApiLoginPromise) {
+            return await this.streamBaichuanApiLoginPromise;
+        }
+
         const { ipAddress, username, password, uid } = this.storageSettings.values;
         if (!ipAddress || !username || !password) throw new Error("Missing camera credentials");
         const normalizedUid = normalizeUid(uid);
         if (!normalizedUid) throw new Error("UID is required for battery cameras (BCUDP)");
 
-        const api = await createBaichuanApi(
-            {
-                host: ipAddress,
-                username,
-                password,
-                uid: normalizedUid,
-                logger: this.console,
-                // For BCUDP streaming sessions, avoid BC-level Ping keepalive (cmd 93).
-                keepAliveInterval: 0,
-            },
-            "udp",
-        );
-        await api.login();
-        return api;
+        this.streamBaichuanApiLoginPromise = (async () => {
+            const api = await createBaichuanApi(
+                {
+                    host: ipAddress,
+                    username,
+                    password,
+                    uid: normalizedUid,
+                    logger: this.console,
+                    // For BCUDP streaming sessions, avoid BC-level Ping keepalive (cmd 93).
+                    keepAliveInterval: 0,
+                },
+                "udp",
+            );
+            await api.login();
+
+            // Clear cache on transport close so we can reconnect on next request.
+            try {
+                api.client.once("close", () => {
+                    if (this.streamBaichuanApi === api) {
+                        this.streamBaichuanApi = undefined;
+                    }
+                });
+            }
+            catch {
+                // ignore
+            }
+
+            this.streamBaichuanApi = api;
+            return api;
+        })();
+
+        try {
+            return await this.streamBaichuanApiLoginPromise;
+        }
+        finally {
+            this.streamBaichuanApiLoginPromise = undefined;
+        }
     }
 
     async getVideoStreamOptions(): Promise<UrlMediaStreamOptions[]> {
         if (this.cachedVideoStreamOptions?.length) return this.cachedVideoStreamOptions;
 
         while (this.fetchingStreams) {
+            // this.console.log('Waiting for concurrent stream fetch to complete...');
             await new Promise((resolve) => setTimeout(resolve, 500));
         }
 
         try {
             this.fetchingStreams = true;
+            // this.console.log('Fetching video stream options from camera...');
             const channel = this.getRtspChannel();
             const streams = await this.withBaichuanClient(async (api) => {
                 return fetchVideoStreamOptionsFromApi(api, channel);
             });
+            // this.console.log(`Fetched ${streams.length} video stream options from camera.`);
 
             this.cachedVideoStreamOptions = streams;
             this.fetchingStreams = false;

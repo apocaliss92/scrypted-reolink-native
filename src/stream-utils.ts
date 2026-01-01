@@ -39,7 +39,7 @@ export async function fetchVideoStreamOptionsFromApi(
     client: ReolinkBaichuanApi,
     channel: number,
 ): Promise<UrlMediaStreamOptions[]> {
-    const streamMetadata: any = await (client as any).getStreamMetadata(channel);
+    const streamMetadata: any = await client.getStreamMetadata(channel);
     return buildVideoStreamOptionsFromStreamMetadata(streamMetadata);
 }
 

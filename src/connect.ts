@@ -87,7 +87,6 @@ export async function createBaichuanApi(inputs: BaichuanConnectInputs, transport
         transport: "udp",
         udp: {
             mode: "uid",
-            implementation: "neolink-v2",
             uid,
             host: inputs.host,
             broadcast: false,

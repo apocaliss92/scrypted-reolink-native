@@ -139,8 +139,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     private periodicStarted = false;
     private statusPollTimer: NodeJS.Timeout | undefined;
     private lastActivityMs = Date.now();
-    private lastB64Snapshot: string | undefined;
-    private lastSnapshotTaken: number | undefined;
     private streamManager: StreamManager;
 
     private intercom: ReolinkBaichuanIntercom;
@@ -401,6 +399,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         const message = e?.message || e?.toString?.() || '';
         return typeof message === 'string' && (
             message.includes('Baichuan socket closed') ||
+            message.includes('Baichuan UDP stream closed') ||
             message.includes('socket hang up') ||
             message.includes('ECONNRESET') ||
             message.includes('EPIPE')
@@ -938,17 +937,18 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
     async getObjectTypes(): Promise<ObjectDetectionTypes> {
         try {
-            const client = await this.ensureClient();
-            const ai = await client.getAiState();
+            // const client = await this.ensureClient();
+            // const ai = await client.getAiState();
 
             const classes: string[] = [];
+            classes.push('people', 'vehicle', 'dog_cat', 'face', 'package')
             // AI state structure may vary, check if it's an object with support field
-            if (ai && typeof ai === 'object' && 'support' in ai) {
-                if (ai.support) {
-                    // Add common AI types if supported
-                    classes.push('people', 'vehicle', 'dog_cat', 'face', 'package');
-                }
-            }
+            // if (ai && typeof ai === 'object' && 'support' in ai) {
+            //     if (ai.support) {
+            //         // Add common AI types if supported
+            //         classes.push('people', 'vehicle', 'dog_cat', 'face', 'package');
+            //     }
+            // }
 
             return {
                 classes,
@@ -1076,16 +1076,13 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         return this.getDispatchEventsSelection().has('objects');
     }
 
-    async takeSnapshotInternal(timeout?: number) {
+    async takePicture(options?: RequestPictureOptions) {
         this.markActivity();
         return this.withBaichuanRetry(async () => {
             try {
-                const now = Date.now();
                 const client = await this.ensureClient();
                 const snapshotBuffer = await client.getSnapshot();
                 const mo = await this.createMediaObject(snapshotBuffer, 'image/jpeg');
-                this.lastB64Snapshot = await moToB64(mo);
-                this.lastSnapshotTaken = now;
 
                 return mo;
             } catch (e) {
@@ -1101,33 +1098,6 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
     getSettings(): Promise<Setting[]> {
         return this.storageSettings.getSettings();
-    }
-
-    async takePicture(options?: RequestPictureOptions): Promise<MediaObject> {
-        const now = Date.now();
-        const logger = this.getLogger();
-        const isMaxTimePassed = !this.lastSnapshotTaken || ((now - this.lastSnapshotTaken) > 1000 * 60);
-        let canTake = false;
-
-        if (!this.lastB64Snapshot || !this.lastSnapshotTaken) {
-            logger.log('Allowing new snapshot because not taken yet');
-            canTake = true;
-        } else if (isMaxTimePassed) {
-            logger.log('Allowing new snapshot because older than 60 seconds');
-            canTake = true;
-        } else {
-            canTake = false;
-        }
-
-        if (canTake) {
-            return this.takeSnapshotInternal(options?.timeout);
-        } else if (this.lastB64Snapshot) {
-            const mo = await b64ToMo(this.lastB64Snapshot);
-
-            return mo;
-        } else {
-            return null;
-        }
     }
 
     getRtspChannel(): number {
