@@ -59,7 +59,21 @@ export async function createBaichuanApi(inputs: BaichuanConnectInputs, transport
                 const logger = inputs.logger;
                 if (!logger) return;
                 const msg = (err as any)?.message || (err as any)?.toString?.() || String(err);
+                // Only log if it's not a recoverable error to avoid spam
+                if (typeof msg === 'string' && (
+                    msg.includes('Baichuan socket closed') ||
+                    msg.includes('Baichuan UDP stream closed')
+                )) {
+                    // Silently ignore recoverable socket close errors
+                    return;
+                }
                 logger.error(`[BaichuanClient] error (${transport}) ${inputs.host}: ${msg}`);
+            });
+            
+            // Handle 'close' event to prevent unhandled rejections from pending promises
+            api.client.on("close", () => {
+                // Socket closed - pending promises will be rejected, but we've already handled errors above
+                // This handler prevents the close event from causing issues
             });
         } catch {
             // ignore
@@ -69,8 +83,6 @@ export async function createBaichuanApi(inputs: BaichuanConnectInputs, transport
     if (transport === "tcp") {
         const api = new ReolinkBaichuanApi({
             ...base,
-            keepAliveInterval: 10000,
-            tcpSocketKeepAlive: true,
             transport: "tcp",
         });
         attachErrorHandler(api);
@@ -85,13 +97,7 @@ export async function createBaichuanApi(inputs: BaichuanConnectInputs, transport
     const api = new ReolinkBaichuanApi({
         ...base,
         transport: "udp",
-        udp: {
-            mode: "uid",
-            uid,
-            host: inputs.host,
-            broadcast: false,
-        },
-        keepAliveInterval: inputs.keepAliveInterval ?? 0,
+        uid,
     });
     attachErrorHandler(api);
     return api;

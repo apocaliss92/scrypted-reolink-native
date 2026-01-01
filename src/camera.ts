@@ -1,5 +1,5 @@
 import type { DebugOptions, DeviceCapabilities, PtzCommand, ReolinkBaichuanApi, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
+import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, RequestPictureOptions, ResponseMediaStreamOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from '@scrypted/sdk/storage-settings';
 import { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { createBaichuanApi } from './connect';
@@ -7,6 +7,7 @@ import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
 import { ReolinkPtzPresets } from "./presets";
 import {
+    buildVideoStreamOptionsFromRtspRtmp,
     createRfc4571MediaObjectFromStreamManager,
     expectedVideoTypeFromUrlMediaStreamOptions,
     fetchVideoStreamOptionsFromApi,
@@ -128,6 +129,7 @@ class ReolinkCameraFloodlight extends ScryptedDeviceBase implements OnOff, Brigh
 export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCamera, Settings, Camera, DeviceProvider, Intercom, ObjectDetector, PanTiltZoom, VideoTextOverlays, BinarySensor {
     videoStreamOptions: Promise<UrlMediaStreamOptions[]>;
     motionTimeout: NodeJS.Timeout;
+    private initComplete: boolean = false;
     private doorbellBinaryTimeout: NodeJS.Timeout | undefined;
     siren: ReolinkCameraSiren;
     floodlight: ReolinkCameraFloodlight;
@@ -145,23 +147,45 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
     private ptzPresets: ReolinkPtzPresets;
 
+    private cachedNetPort: { rtsp?: { port?: number; enable?: number }; rtmp?: { port?: number; enable?: number } } | undefined;
+
+    private lastNetPortCacheAttempt: number = 0;
+    private netPortCacheBackoffMs: number = 5000; // 5 seconds backoff on failure
+
     storageSettings = new StorageSettings(this, {
         ipAddress: {
             title: 'IP Address',
             type: 'string',
+            onPut: async () => {
+                // Invalidate cache when IP changes
+                this.cachedVideoStreamOptions = undefined;
+                this.cachedNetPort = undefined;
+            },
         },
         username: {
             type: 'string',
             title: 'Username',
+            onPut: async () => {
+                // Invalidate cache when username changes
+                this.cachedVideoStreamOptions = undefined;
+            },
         },
         password: {
             type: 'password',
             title: 'Password',
+            onPut: async () => {
+                // Invalidate cache when password changes
+                this.cachedVideoStreamOptions = undefined;
+            },
         },
         rtspChannel: {
             type: 'number',
             hide: true,
-            defaultValue: 0
+            defaultValue: 0,
+            onPut: async () => {
+                // Invalidate cache when channel changes
+                this.cachedVideoStreamOptions = undefined;
+            },
         },
         capabilities: {
             json: true,
@@ -356,6 +380,18 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
             type: 'number',
             defaultValue: 1,
         },
+        streamSource: {
+            title: 'Stream source',
+            description: 'Select the stream source. Default uses RTSP/RTMP if available, Native uses Baichuan protocol.',
+            type: 'string',
+            choices: ['Default', 'Native'],
+            defaultValue: 'Default',
+            onPut: async () => {
+                // Invalidate cache when stream source changes
+                this.cachedVideoStreamOptions = undefined;
+                this.cachedNetPort = undefined;
+            },
+        },
     });
 
     constructor(nativeId: string, public plugin: ReolinkNativePlugin) {
@@ -400,6 +436,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         return typeof message === 'string' && (
             message.includes('Baichuan socket closed') ||
             message.includes('Baichuan UDP stream closed') ||
+            message.includes('Baichuan TCP socket is not connected') ||
             message.includes('socket hang up') ||
             message.includes('ECONNRESET') ||
             message.includes('EPIPE')
@@ -439,9 +476,21 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 throw e;
             }
 
+            // Reset client and clear cache on recoverable error
             await this.resetBaichuanClient(e);
+            this.cachedNetPort = undefined;
+            
             // Important: callers must re-acquire the client inside fn.
-            return await fn();
+            try {
+                return await fn();
+            } catch (retryError) {
+                // If retry also fails with recoverable error, don't spam logs
+                if (this.isRecoverableBaichuanError(retryError)) {
+                    // Silently fail to avoid spam, but still throw to caller
+                    throw retryError;
+                }
+                throw retryError;
+            }
         }
     }
 
@@ -476,11 +525,16 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
         // Periodic status refresh + event resubscribe.
         this.startPeriodicTasks();
+
+        // Mark init as complete
+        this.initComplete = true;
     }
 
     async ensureClient(): Promise<ReolinkBaichuanApi> {
-        // Always open a fresh main session. Do not persist/reuse old sessions, which can go stale
-        // and cause streaming to stop receiving frames.
+        // Reuse existing client if socket is still connected and logged in
+        if (this.baichuanApi && this.baichuanApi.client.isSocketConnected() && this.baichuanApi.client.loggedIn) {
+            return this.baichuanApi;
+        }
 
         // Prevent concurrent login storms. Multiple callers may race here and otherwise create
         // multiple Baichuan sessions in parallel.
@@ -493,23 +547,42 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 throw new Error('Missing camera credentials');
             }
 
-            // Tear down any previous session to avoid persisting stale logins.
+            // Only tear down previous session if it exists and is not connected
             if (this.baichuanApi) {
-                try {
-                    this.baichuanApi.offSimpleEvent(this.onSimpleEvent);
-                }
-                catch {
-                    // ignore
-                }
+                const isConnected = this.baichuanApi.client.isSocketConnected();
+                if (!isConnected) {
+                    // Socket is closed, clean up
+                    try {
+                        this.baichuanApi.offSimpleEvent(this.onSimpleEvent);
+                    }
+                    catch {
+                        // ignore
+                    }
 
-                try {
-                    await this.baichuanApi.close();
-                }
-                catch {
-                    // ignore
+                    try {
+                        await this.baichuanApi.close();
+                    }
+                    catch {
+                        // ignore
+                    }
+                } else {
+                    // Socket is still connected, just re-attach event handler if needed
+                    if (this.isEventDispatchEnabled()) {
+                        try {
+                            this.baichuanApi.offSimpleEvent(this.onSimpleEvent);
+                            this.baichuanApi.onSimpleEvent(this.onSimpleEvent);
+                        }
+                        catch {
+                            // ignore
+                        }
+                    }
+                    // Reuse existing client
+                    this.connectionTime = Date.now();
+                    return this.baichuanApi;
                 }
             }
 
+            // Create new client only if we don't have a valid one
             const debugOptions = this.getBaichuanDebugOptions();
 
             const api = await createBaichuanApi(
@@ -523,6 +596,12 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
                 'tcp',
             );
             await api.login();
+            
+            // Verify socket is connected before returning
+            if (!api.client.isSocketConnected()) {
+                throw new Error('Socket not connected after login');
+            }
+            
             this.baichuanApi = api;
             this.connectionTime = Date.now();
 
@@ -977,7 +1056,7 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
     }
 
     isDoorbell() {
-        const capabilities = this.getAbilities() as any;
+        const capabilities = this.getAbilities();
         return Boolean(capabilities?.isDoorbell);
     }
 
@@ -1105,12 +1184,97 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
         return channel !== undefined ? Number(channel) : 0;
     }
 
+    private async ensureNetPortCache(): Promise<void> {
+        if (this.cachedNetPort) {
+            return;
+        }
+
+        // Implement backoff to avoid spam when socket is closed
+        const now = Date.now();
+        if (now - this.lastNetPortCacheAttempt < this.netPortCacheBackoffMs) {
+            // Use defaults if we're in backoff period
+            this.cachedNetPort = {
+                rtsp: { port: 554, enable: 1 },
+                rtmp: { port: 1935, enable: 1 },
+            };
+            return;
+        }
+
+        this.lastNetPortCacheAttempt = now;
+
+        try {
+            const client = await this.ensureClient();
+            this.cachedNetPort = await client.getNetPort();
+        } catch (e) {
+            // Only log if it's not a recoverable error to avoid spam
+            if (!this.isRecoverableBaichuanError(e)) {
+                this.getLogger().warn('Failed to get net port, using defaults', e);
+            }
+            // Use defaults if we can't get the ports
+            this.cachedNetPort = {
+                rtsp: { port: 554, enable: 1 },
+                rtmp: { port: 1935, enable: 1 },
+            };
+        }
+    }
+
+    getRtspAddress(): string {
+        const { ipAddress } = this.storageSettings.values;
+        const rtspPort = this.cachedNetPort?.rtsp?.port ?? 554;
+        return `${ipAddress}:${rtspPort}`;
+    }
+
+    getRtmpAddress(): string {
+        const { ipAddress } = this.storageSettings.values;
+        const rtmpPort = this.cachedNetPort?.rtmp?.port ?? 1935;
+        return `${ipAddress}:${rtmpPort}`;
+    }
+
+    addRtspCredentials(rtspUrl: string): string {
+        const { username, password } = this.storageSettings.values;
+        if (!username) {
+            return rtspUrl;
+        }
+        
+        try {
+            const url = new URL(rtspUrl);
+            
+            // For RTMP, add credentials as query parameters (matching reolink plugin behavior)
+            // The reolink plugin uses query parameters from client.parameters (token or user/password)
+            // Since we use Baichuan and don't have client.parameters, we use user/password
+            if (url.protocol === 'rtmp:') {
+                const params = url.searchParams;
+                params.set('user', username);
+                params.set('password', password || '');
+            } else {
+                // For RTSP, add credentials in URL auth
+                url.username = username;
+                url.password = password || '';
+            }
+            
+            return url.toString();
+        } catch (e) {
+            // If URL parsing fails, return original URL
+            this.getLogger().warn('Failed to parse URL for credentials', e);
+            return rtspUrl;
+        }
+    }
 
     async getVideoStream(vso: RequestMediaStreamOptions): Promise<MediaObject> {
         this.markActivity();
         const vsos = await this.getVideoStreamOptions();
         const selected = selectStreamOption(vsos, vso);
-        this.getLogger().log(`Creating video stream for option id=${selected.id} name=${selected.name}`);
+
+        // If stream has RTSP/RTMP URL, add credentials and create MediaStreamUrl
+        if (selected.url && (selected.container === 'rtsp' || selected.container === 'rtmp')) {
+            const urlWithCredentials = this.addRtspCredentials(selected.url);
+            const ret: MediaStreamUrl = {
+                container: selected.container,
+                url: urlWithCredentials,
+                mediaStreamOptions: selected,
+            };
+            return await this.createMediaObject(ret, ScryptedMimeTypes.MediaStreamUrl);
+        }
 
         const profile = parseStreamProfileFromId(selected.id) || 'main';
 
@@ -1142,10 +1306,81 @@ export class ReolinkNativeCamera extends ScryptedDeviceBase implements VideoCame
 
     async getVideoStreamOptions(): Promise<UrlMediaStreamOptions[]> {
         this.markActivity();
+        
+        // During init, return empty array to avoid connection issues
+        if (!this.initComplete) {
+            return [];
+        }
+
+        // Return cached options if available
+        if (this.cachedVideoStreamOptions) {
+            return this.cachedVideoStreamOptions;
+        }
+
         return this.withBaichuanRetry(async () => {
+            const streamSource = this.storageSettings.values.streamSource || 'Default';
+
             const client = await this.ensureClient();
+
+            // If setting is "Native", keep current behavior
+            if (streamSource === 'Native') {
+                const channel = this.storageSettings.values.rtspChannel;
+                const streams = await fetchVideoStreamOptionsFromApi(client, channel, this.console);
+                this.cachedVideoStreamOptions = streams;
+                return streams;
+            }
+
+            // If "Default", check if RTSP/RTMP are available
             const channel = this.storageSettings.values.rtspChannel;
-            const streams = await fetchVideoStreamOptionsFromApi(client, channel);
+            const { ipAddress, username, password } = this.storageSettings.values;
+
+            if (!ipAddress || !username || !password) {
+                // Fallback to Native behavior if credentials are missing
+                const streams = await fetchVideoStreamOptionsFromApi(client, channel, this.console);
+                this.cachedVideoStreamOptions = streams;
+                return streams;
+            }
+
+            // Ensure net port cache is populated (with error handling)
+            try {
+                await this.ensureNetPortCache();
+            } catch (e) {
+                // If we can't get net port, fallback to Native
+                if (!this.isRecoverableBaichuanError(e)) {
+                    this.getLogger().warn('Failed to ensure net port cache, falling back to Native', e);
+                }
+                const streams = await fetchVideoStreamOptionsFromApi(client, channel, this.console);
+                this.cachedVideoStreamOptions = streams;
+                return streams;
+            }
+
+            // Try to build RTSP/RTMP streams
+            try {
+                const streams = await buildVideoStreamOptionsFromRtspRtmp(
+                    client,
+                    channel,
+                    ipAddress,
+                    username,
+                    password,
+                    this.cachedNetPort,
+                );
+
+                // If we found RTSP/RTMP streams, use them
+                if (streams.length > 0) {
+                    this.cachedVideoStreamOptions = streams;
+                    return streams;
+                }
+            } catch (e) {
+                // Only log if it's not a recoverable error to avoid spam
+                if (!this.isRecoverableBaichuanError(e)) {
+                    this.getLogger().warn('Failed to build RTSP/RTMP stream options, falling back to Native', e);
+                }
+                // Clear cache on error to force retry on next call
+                this.cachedNetPort = undefined;
+            }
+
+            // Fallback to Native behavior if RTSP/RTMP are not available
+            const streams = await fetchVideoStreamOptionsFromApi(client, channel, this.console);
             this.cachedVideoStreamOptions = streams;
             return streams;
         });

@@ -461,7 +461,7 @@ export class ReolinkNativeBatteryCamera extends ScryptedDeviceBase implements Ca
             // this.console.log('Fetching video stream options from camera...');
             const channel = this.getRtspChannel();
             const streams = await this.withBaichuanClient(async (api) => {
-                return fetchVideoStreamOptionsFromApi(api, channel);
+                return fetchVideoStreamOptionsFromApi(api, channel, this.console);
             });
             // this.console.log(`Fetched ${streams.length} video stream options from camera.`);
 

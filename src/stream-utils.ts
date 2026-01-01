@@ -25,11 +25,29 @@ export interface StreamManagerOptions {
 export function parseStreamProfileFromId(id: string | undefined): StreamProfile | undefined {
     if (!id)
         return;
-    if (id === 'mainstream')
+
+    // Handle RTMP IDs: main.bcs, sub.bcs, ext.bcs
+    if (id.endsWith('.bcs')) {
+        const profile = id.replace('.bcs', '');
+        if (profile === 'main' || profile === 'sub' || profile === 'ext')
+            return profile as StreamProfile;
+    }
+
+    // Handle RTSP IDs: h264Preview_XX_main, h264Preview_XX_sub
+    if (id.startsWith('h264Preview_')) {
+        if (id.endsWith('_main'))
+            return 'main';
+        if (id.endsWith('_sub'))
+            return 'sub';
+    }
+
+    // Legacy format support
+    const baseId = id.replace(/_rtsp$|_rtmp$/, '');
+    if (baseId === 'mainstream')
         return 'main';
-    if (id === 'substream')
+    if (baseId === 'substream')
         return 'sub';
-    if (id === 'extstream')
+    if (baseId === 'extstream')
         return 'ext';
 
     return;
@@ -38,14 +56,12 @@ export function parseStreamProfileFromId(id: string | undefined): StreamProfile 
 export async function fetchVideoStreamOptionsFromApi(
     client: ReolinkBaichuanApi,
     channel: number,
+    logger: Console,
 ): Promise<UrlMediaStreamOptions[]> {
-    const streamMetadata: any = await client.getStreamMetadata(channel);
-    return buildVideoStreamOptionsFromStreamMetadata(streamMetadata);
-}
+    const streamMetadata = await client.getStreamMetadata(channel);
 
-export function buildVideoStreamOptionsFromStreamMetadata(streamMetadata: any): UrlMediaStreamOptions[] {
     const streams: UrlMediaStreamOptions[] = [];
-    const list: any[] = streamMetadata?.streams || [];
+    const list = streamMetadata?.streams || [];
 
     for (const stream of list) {
         const profile = stream.profile as StreamProfile;
@@ -78,6 +94,97 @@ export function buildVideoStreamOptionsFromStreamMetadata(streamMetadata: any): 
     return streams;
 }
 
+export async function buildVideoStreamOptionsFromRtspRtmp(
+    client: ReolinkBaichuanApi,
+    channel: number,
+    ipAddress: string,
+    username: string,
+    password: string,
+    cachedNetPort?: { rtsp?: { port?: number; enable?: number }; rtmp?: { port?: number; enable?: number } },
+): Promise<UrlMediaStreamOptions[]> {
+    const streams: UrlMediaStreamOptions[] = [];
+
+    // Use cached net port if provided, otherwise fetch it
+    const netPort = cachedNetPort || await client.getNetPort();
+    const rtspEnabled = netPort.rtsp?.enable === 1;
+    const rtmpEnabled = netPort.rtmp?.enable === 1;
+    const rtspPort = netPort.rtsp?.port ?? 554;
+    const rtmpPort = netPort.rtmp?.port ?? 1935;
+
+    if (!rtspEnabled && !rtmpEnabled) {
+        // If neither RTSP nor RTMP are enabled, return empty array
+        return streams;
+    }
+
+    // Get stream metadata to build options
+    const streamMetadata = await client.getStreamMetadata(channel);
+    const list = streamMetadata?.streams || [];
+
+    for (const stream of list) {
+        const profile = stream.profile as StreamProfile;
+        const codec = String(stream.videoEncType || '').includes('264')
+            ? 'h264'
+            : String(stream.videoEncType || '').includes('265')
+                ? 'h265'
+                : String(stream.videoEncType || '').toLowerCase();
+
+        // Build RTSP URL if enabled (RTSP doesn't support ext stream, only main and sub)
+        if (rtspEnabled && profile !== 'ext') {
+            // RTSP format: rtsp://ip:port/h264Preview_XX_profile
+            // XX is 1-based channel with 2-digit padding
+            const channelStr = String(channel + 1).padStart(2, '0');
+            const profileStr = profile === 'main' ? 'main' : 'sub';
+            const rtspPath = `/h264Preview_${channelStr}_${profileStr}`;
+            const rtspId = `h264Preview_${channelStr}_${profileStr}`;
+
+            streams.push({
+                name: `RTSP ${rtspId}`,
+                id: rtspId,
+                container: 'rtsp',
+                video: { codec, width: stream.width, height: stream.height },
+                url: `rtsp://${ipAddress}:${rtspPort}${rtspPath}`,
+            });
+        }
+
+        // Build RTMP URL if enabled (RTMP supports main, sub, and ext streams)
+        if (rtmpEnabled) {
+            // RTMP format: /bcs/channelX_stream.bcs?channel=X&stream=stream_type&user=username&password=password
+            // Based on reolink_aio api.py line 3295-3298:
+            // - stream in path is "main", "sub", or "ext" (not "main.bcs")
+            // - stream_type in query: 0 for main/ext, 1 for sub
+            // - credentials: user and password as query parameters
+            const streamName = profile === 'main' ? 'main' : profile === 'sub' ? 'sub' : 'ext';
+            const streamType = profile === 'sub' ? 1 : 0; // 0 for main/ext, 1 for sub
+            const rtmpId = `${streamName}.bcs`; // ID for Scrypted (main.bcs, sub.bcs, ext.bcs)
+
+            // Use channel directly (0-based) in path, matching reolink_aio behavior
+            const rtmpPath = `/bcs/channel${channel}_${streamName}.bcs`;
+            const rtmpUrl = new URL(`rtmp://${ipAddress}:${rtmpPort}${rtmpPath}`);
+            const params = rtmpUrl.searchParams;
+            params.set('channel', channel.toString());
+            params.set('stream', streamType.toString());
+            // Credentials will be added by addRtspCredentials as user/password query params
+
+            streams.push({
+                name: `RTMP ${rtmpId}`,
+                id: rtmpId,
+                container: 'rtmp',
+                video: { codec, width: stream.width, height: stream.height },
+                url: rtmpUrl.toString(),
+            });
+        }
+    }
+
+    // Sort streams: RTMP first, then RTSP
+    streams.sort((a, b) => {
+        if (a.container === 'rtmp' && b.container !== 'rtmp') return -1;
+        if (a.container !== 'rtmp' && b.container === 'rtmp') return 1;
+        return 0;
+    });
+
+    return streams;
+}
+
 export function selectStreamOption(
     vsos: UrlMediaStreamOptions[] | undefined,
     request: RequestMediaStreamOptions,
@@ -89,7 +196,7 @@ export function selectStreamOption(
 }
 
 export function expectedVideoTypeFromUrlMediaStreamOptions(selected: UrlMediaStreamOptions): 'H264' | 'H265' | undefined {
-    const codec = (selected as any)?.video?.codec;
+    const codec = selected?.video?.codec;
     if (typeof codec !== 'string') return undefined;
     if (codec.includes('265')) return 'H265';
     if (codec.includes('264')) return 'H264';
