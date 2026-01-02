@@ -21,6 +21,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
     private batteryUpdateTimer: NodeJS.Timeout | undefined;
     private lastBatteryLevel: number | undefined;
     private forceNewSnapshot: boolean = false;
+    private batteryUpdateInProgress: boolean = false;
 
     private isBatteryInfoLoggingEnabled(): boolean {
         const debugLogs = this.storageSettings.values.debugLogs || [];
@@ -150,43 +151,15 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
                     this.sleeping = false;
                 }
 
-                // Try to get battery info only when camera is awake.
-                // NOTE: getBatteryInfo in UDP mode is best-effort and should not force reconnect/login.
-                try {
-                    const batteryInfo = await api.getBatteryInfo(channel);
-                    if (this.isBatteryInfoLoggingEnabled()) {
-                        this.console.log('getBatteryInfo result:', JSON.stringify(batteryInfo));
-                    }
-
-                    // Update battery percentage and charge status
-                    if (batteryInfo.batteryPercent !== undefined) {
-                        const oldLevel = this.lastBatteryLevel;
-                        this.batteryLevel = batteryInfo.batteryPercent;
-                        this.lastBatteryLevel = batteryInfo.batteryPercent;
-
-                        // Log only if battery level changed
-                        if (oldLevel !== undefined && oldLevel !== batteryInfo.batteryPercent) {
-                            if (batteryInfo.chargeStatus !== undefined) {
-                                // chargeStatus: "0"=charging, "1"=discharging, "2"=full
-                                const charging = batteryInfo.chargeStatus === "0" || batteryInfo.chargeStatus === "2";
-                                this.console.log(`Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}% (charging: ${charging})`);
-                            } else {
-                                this.console.log(`Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}%`);
-                            }
-                        }
-                    }
-                } catch (batteryError) {
-                    // Silently ignore battery info errors to avoid spam
-                    this.console.debug('Failed to get battery info:', batteryError);
-                }
-
-                // When camera wakes up, align auxiliary devices state and force snapshot (once)
+                // When camera wakes up (transition from sleeping to awake), align auxiliary devices state and force snapshot (once)
                 if (wasSleeping) {
                     this.alignAuxDevicesState().catch(() => { });
                     if (this.forceNewSnapshot) {
                         this.takePicture().catch(() => { });
                     }
                 }
+                // NOTE: We don't call getBatteryInfo() here anymore to avoid timeouts.
+                // Battery updates are handled by updateBatteryAndSnapshot() which properly wakes the camera.
             } else {
                 // Unknown state
                 this.console.debug(`Sleep status unknown: ${sleepStatus.reason}`);
@@ -198,77 +171,118 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
     }
 
     private async updateBatteryAndSnapshot(): Promise<void> {
+        // Prevent multiple simultaneous calls
+        if (this.batteryUpdateInProgress) {
+            this.console.debug('Battery update already in progress, skipping');
+            return;
+        }
+
+        this.batteryUpdateInProgress = true;
         try {
             const channel = this.getRtspChannel();
-
             const updateIntervalMinutes = this.storageSettings.values.batteryUpdateIntervalMinutes ?? 10;
             this.console.log(`Force battery update interval started (every ${updateIntervalMinutes} minutes)`);
 
-            if (!this.baichuanApi) {
+            // Ensure we have a client connection
+            const api = await this.ensureClient();
+            if (!api) {
+                this.console.warn('Failed to ensure client connection for battery update');
                 return;
             }
 
-            const sleepStatus = this.baichuanApi.getSleepStatus({ channel });
-            if (sleepStatus.state !== 'awake') {
-                return;
+            // Check current sleep status
+            let sleepStatus = api.getSleepStatus({ channel });
+            
+            // If camera is sleeping, wake it up
+            if (sleepStatus.state === 'sleeping') {
+                this.console.log('Camera is sleeping, waking up for periodic update...');
+                try {
+                    await api.wakeUp(channel, { waitAfterWakeMs: 2000 });
+                    this.console.log('Wake command sent, waiting for camera to wake up...');
+                } catch (wakeError) {
+                    this.console.warn('Failed to wake up camera:', wakeError);
+                    return;
+                }
+
+                // Poll until camera is awake (with timeout)
+                const wakeTimeoutMs = 30000; // 30 seconds max
+                const startWakePoll = Date.now();
+                let awake = false;
+                
+                while (Date.now() - startWakePoll < wakeTimeoutMs) {
+                    await new Promise(resolve => setTimeout(resolve, 1000)); // Check every second
+                    sleepStatus = api.getSleepStatus({ channel });
+                    if (sleepStatus.state === 'awake') {
+                        awake = true;
+                        this.console.log('Camera is now awake');
+                        this.sleeping = false;
+                        break;
+                    }
+                }
+
+                if (!awake) {
+                    this.console.warn('Camera did not wake up within timeout, skipping update');
+                    return;
+                }
+            } else if (sleepStatus.state === 'awake') {
+                this.sleeping = false;
             }
 
+            // Now that camera is awake, update all states
+            // 1. Update battery info
             try {
-                const batteryInfo = await this.baichuanApi.getBatteryInfo(channel);
+                const batteryInfo = await api.getBatteryInfo(channel);
                 if (this.isBatteryInfoLoggingEnabled()) {
                     this.console.log('getBatteryInfo result:', JSON.stringify(batteryInfo));
                 }
+                
                 if (batteryInfo.batteryPercent !== undefined) {
+                    const oldLevel = this.lastBatteryLevel;
                     this.batteryLevel = batteryInfo.batteryPercent;
                     this.lastBatteryLevel = batteryInfo.batteryPercent;
+
+                    // Log only if battery level changed
+                    if (oldLevel !== undefined && oldLevel !== batteryInfo.batteryPercent) {
+                        if (batteryInfo.chargeStatus !== undefined) {
+                            // chargeStatus: "0"=charging, "1"=discharging, "2"=full
+                            const charging = batteryInfo.chargeStatus === "0" || batteryInfo.chargeStatus === "2";
+                            this.console.log(`Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}% (charging: ${charging})`);
+                        } else {
+                            this.console.log(`Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}%`);
+                        }
+                    } else if (oldLevel === undefined) {
+                        // First time setting battery level
+                        if (batteryInfo.chargeStatus !== undefined) {
+                            const charging = batteryInfo.chargeStatus === "0" || batteryInfo.chargeStatus === "2";
+                            this.console.log(`Battery level set: ${batteryInfo.batteryPercent}% (charging: ${charging})`);
+                        } else {
+                            this.console.log(`Battery level set: ${batteryInfo.batteryPercent}%`);
+                        }
+                    }
                 }
             } catch (e) {
-                this.console.debug('Failed to get battery info during periodic update:', e);
+                this.console.warn('Failed to get battery info during periodic update:', e);
             }
 
-            // // Wait a bit for the camera to fully wake up
-            // await new Promise(resolve => setTimeout(resolve, 2000));
+            // 2. Align auxiliary devices state
+            try {
+                await this.alignAuxDevicesState();
+            } catch (e) {
+                this.console.warn('Failed to align auxiliary devices state:', e);
+            }
 
-            // // Get battery info
-            // const batteryInfo = await api.getBatteryStatus(channel);
-            // if (batteryInfo.batteryPercent !== undefined) {
-            //     const oldLevel = this.lastBatteryLevel;
-            //     this.batteryLevel = batteryInfo.batteryPercent;
-            //     this.lastBatteryLevel = batteryInfo.batteryPercent;
-
-            //     // Log only if battery level changed
-            //     if (oldLevel !== undefined && oldLevel !== batteryInfo.batteryPercent) {
-            //         if (batteryInfo.chargeStatus !== undefined) {
-            //             // chargeStatus: "0"=charging, "1"=discharging, "2"=full
-            //             const charging = batteryInfo.chargeStatus === "0" || batteryInfo.chargeStatus === "2";
-            //             this.console.log(`Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}% (charging: ${charging})`);
-            //         } else {
-            //             this.console.log(`Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}%`);
-            //         }
-            //     } else if (oldLevel === undefined) {
-            //         // First time setting battery level
-            //         if (batteryInfo.chargeStatus !== undefined) {
-            //             const charging = batteryInfo.chargeStatus === "0" || batteryInfo.chargeStatus === "2";
-            //             this.console.log(`Battery level set: ${batteryInfo.batteryPercent}% (charging: ${charging})`);
-            //         } else {
-            //             this.console.log(`Battery level set: ${batteryInfo.batteryPercent}%`);
-            //         }
-            //     }
-            // }
-
-            // // Update snapshot
-            // try {
-            //     const snapshotBuffer = await api.getSnapshot(channel);
-            //     const mo = await sdk.mediaManager.createMediaObject(snapshotBuffer, 'image/jpeg');
-            //     this.lastPicture = { mo, atMs: Date.now() };
-            //     this.console.log('Snapshot updated');
-            // } catch (snapshotError) {
-            //     this.console.warn('Failed to update snapshot during periodic update', snapshotError);
-            // }
-
-            // this.sleeping = false;
+            // 3. Update snapshot
+            try {
+                this.forceNewSnapshot = true;
+                await this.takePicture();
+                this.console.log('Snapshot updated during periodic update');
+            } catch (snapshotError) {
+                this.console.warn('Failed to update snapshot during periodic update:', snapshotError);
+            }
         } catch (e) {
             this.console.warn('Failed to update battery and snapshot', e);
+        } finally {
+            this.batteryUpdateInProgress = false;
         }
     }
 
