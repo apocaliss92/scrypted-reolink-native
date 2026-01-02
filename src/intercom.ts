@@ -69,6 +69,22 @@ export class ReolinkBaichuanIntercom {
 
         const session = await this.camera.withBaichuanRetry(async () => {
             const api = await this.camera.ensureClient();
+            
+            // For UDP/battery cameras, wake up the camera if it's sleeping before creating talk session
+            if (this.camera.options?.type === 'battery') {
+                try {
+                    const sleepStatus = api.getSleepStatus({ channel });
+                    if (sleepStatus.state === 'sleeping') {
+                        logger.log('Camera is sleeping, waking up for intercom...');
+                        await api.wakeUp(channel, { waitAfterWakeMs: 2000 });
+                        // Wait a bit more to ensure camera is fully awake
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                    }
+                } catch (e) {
+                    logger.debug('Failed to check/wake camera for intercom, proceeding anyway', e);
+                }
+            }
+            
             return await api.createTalkSession(channel, {
                 blocksPerPayload: this.blocksPerPayload,
             });

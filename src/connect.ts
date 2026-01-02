@@ -66,9 +66,11 @@ export async function createBaichuanApi(props: {
                 // Only log if it's not a recoverable error to avoid spam
                 if (typeof msg === 'string' && (
                     msg.includes('Baichuan socket closed') ||
-                    msg.includes('Baichuan UDP stream closed')
+                    msg.includes('Baichuan UDP stream closed') ||
+                    msg.includes('Not running')
                 )) {
-                    // Silently ignore recoverable socket close errors
+                    // Silently ignore recoverable socket close errors and "Not running" errors
+                    // "Not running" is common for UDP/battery cameras when sleeping or during initialization
                     return;
                 }
                 logger.error(`[BaichuanClient] error (${transport}) ${inputs.host}: ${msg}`);
