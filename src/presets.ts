@@ -62,7 +62,7 @@ export class ReolinkPtzPresets {
 
     setCachedPtzPresets(presets: PtzPreset[] | undefined): void {
         const list = Array.isArray(presets) ? presets : [];
-        this.storageSettings.values.cachedPresets = list;
+        this.camera.presets = list;
 
         const mapped: Record<string, string> = {};
         for (const p of list) {
@@ -76,7 +76,7 @@ export class ReolinkPtzPresets {
     }
 
     getCachedPtzPresets(): PtzPreset[] {
-        const v = this.storageSettings.values.cachedPresets;
+        const v = this.camera.presets;
         return Array.isArray(v) ? (v as PtzPreset[]) : [];
     }
 

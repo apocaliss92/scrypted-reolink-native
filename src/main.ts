@@ -52,7 +52,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 const deviceInfo = await api.getInfo();
                 const name = deviceInfo?.name;
                 const rtspChannel = 0;
-                const { abilities, capabilities } = await api.getDeviceCapabilities(rtspChannel, { probeAi: false });
+                const { abilities, capabilities, objects, presets } = await api.getDeviceCapabilities(rtspChannel);
 
                 this.console.log(JSON.stringify({ abilities, capabilities, deviceInfo }));
 
@@ -75,6 +75,8 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
                 const device = await this.getDevice(nativeId);
                 device.info = info;
+                device.classes = objects;
+                device.presets = presets;
                 device.storageSettings.values.username = username;
                 device.storageSettings.values.password = password;
                 device.storageSettings.values.rtspChannel = rtspChannel;

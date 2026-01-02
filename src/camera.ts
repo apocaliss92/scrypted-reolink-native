@@ -34,30 +34,7 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
 
     constructor(nativeId: string, public plugin: ReolinkNativePlugin) {
         super(nativeId, plugin, {
-            protocol: 'tcp',
-            includeStreamSource: true,
-            onIpAddressPut: async () => {
-                // Invalidate cache when IP changes
-                this.cachedVideoStreamOptions = undefined;
-                this.cachedNetPort = undefined;
-            },
-            onUsernamePut: async () => {
-                // Invalidate cache when username changes
-                this.cachedVideoStreamOptions = undefined;
-            },
-            onPasswordPut: async () => {
-                // Invalidate cache when password changes
-                this.cachedVideoStreamOptions = undefined;
-            },
-            onRtspChannelPut: async () => {
-                // Invalidate cache when channel changes
-                this.cachedVideoStreamOptions = undefined;
-            },
-            onStreamSourcePut: async () => {
-                // Invalidate cache when stream source changes
-                this.cachedVideoStreamOptions = undefined;
-                this.cachedNetPort = undefined;
-            },
+            type: 'regular',
         });
     }
 
@@ -204,9 +181,10 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
         if (!api) return;
 
         const channel = this.getRtspChannel();
+        const { hasFloodlight } = this.getAbilities();
 
         try {
-            if (this.hasFloodlight()) {
+            if (hasFloodlight) {
                 const wl = await api.getWhiteLedState(channel);
                 if (this.floodlight) {
                     this.floodlight.on = !!wl.enabled;
@@ -264,6 +242,11 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
         }
     }
 
+    protected async withBaichuanClient<T>(fn: (api: ReolinkBaichuanApi) => Promise<T>): Promise<T> {
+        const client = await this.ensureClient();
+        return fn(client);
+    }
+
     async takePicture(options?: RequestPictureOptions) {
         return this.withBaichuanRetry(async () => {
             try {
@@ -281,88 +264,6 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
 
     async getPictureOptions(): Promise<ResponsePictureOptions[]> {
         return [];
-    }
-
-
-
-    async getVideoStreamOptions(): Promise<UrlMediaStreamOptions[]> {
-        // During init, return empty array to avoid connection issues
-        if (!this.initComplete) {
-            return [];
-        }
-
-        // Return cached options if available
-        if (this.cachedVideoStreamOptions) {
-            return this.cachedVideoStreamOptions;
-        }
-
-        return this.withBaichuanRetry(async () => {
-            const streamSource = this.storageSettings.values.streamSource || 'Default';
-
-            const client = await this.ensureClient();
-
-            // If setting is "Native", keep current behavior
-            if (streamSource === 'Native') {
-                const channel = this.storageSettings.values.rtspChannel;
-                const streams = await fetchVideoStreamOptionsFromApi(client, channel, this.console);
-                this.cachedVideoStreamOptions = streams;
-                return streams;
-            }
-
-            // If "Default", check if RTSP/RTMP are available
-            const channel = this.storageSettings.values.rtspChannel;
-            const { ipAddress, username, password } = this.storageSettings.values;
-
-            if (!ipAddress || !username || !password) {
-                // Fallback to Native behavior if credentials are missing
-                const streams = await fetchVideoStreamOptionsFromApi(client, channel, this.console);
-                this.cachedVideoStreamOptions = streams;
-                return streams;
-            }
-
-            // Ensure net port cache is populated (with error handling)
-            try {
-                await this.ensureNetPortCache();
-            } catch (e) {
-                // If we can't get net port, fallback to Native
-                if (!this.isRecoverableBaichuanError(e)) {
-                    this.getLogger().warn('Failed to ensure net port cache, falling back to Native', e);
-                }
-                const streams = await fetchVideoStreamOptionsFromApi(client, channel, this.console);
-                this.cachedVideoStreamOptions = streams;
-                return streams;
-            }
-
-            // Try to build RTSP/RTMP streams
-            try {
-                const streams = await buildVideoStreamOptionsFromRtspRtmp(
-                    client,
-                    channel,
-                    ipAddress,
-                    username,
-                    password,
-                    this.cachedNetPort,
-                );
-
-                // If we found RTSP/RTMP streams, use them
-                if (streams.length > 0) {
-                    this.cachedVideoStreamOptions = streams;
-                    return streams;
-                }
-            } catch (e) {
-                // Only log if it's not a recoverable error to avoid spam
-                if (!this.isRecoverableBaichuanError(e)) {
-                    this.getLogger().warn('Failed to build RTSP/RTMP stream options, falling back to Native', e);
-                }
-                // Clear cache on error to force retry on next call
-                this.cachedNetPort = undefined;
-            }
-
-            // Fallback to Native behavior if RTSP/RTMP are not available
-            const streams = await fetchVideoStreamOptionsFromApi(client, channel, this.console);
-            this.cachedVideoStreamOptions = streams;
-            return streams;
-        });
     }
 
     async getOtherSettings(): Promise<Setting[]> {

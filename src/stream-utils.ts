@@ -26,11 +26,16 @@ export function parseStreamProfileFromId(id: string | undefined): StreamProfile 
     if (!id)
         return;
 
+    // Handle native stream IDs: native_main, native_sub, native_ext
+    if (id.startsWith('native_')) {
+        const profile = id.replace('native_', '');
+        return profile as StreamProfile;
+    }
+
     // Handle RTMP IDs: main.bcs, sub.bcs, ext.bcs
     if (id.endsWith('.bcs')) {
         const profile = id.replace('.bcs', '');
-        if (profile === 'main' || profile === 'sub' || profile === 'ext')
-            return profile as StreamProfile;
+        return profile as StreamProfile;
     }
 
     // Handle RTSP IDs: h264Preview_XX_main, h264Preview_XX_sub
@@ -41,16 +46,14 @@ export function parseStreamProfileFromId(id: string | undefined): StreamProfile 
             return 'sub';
     }
 
-    // Legacy format support
-    const baseId = id.replace(/_rtsp$|_rtmp$/, '');
-    if (baseId === 'mainstream')
-        return 'main';
-    if (baseId === 'substream')
-        return 'sub';
-    if (baseId === 'extstream')
-        return 'ext';
-
     return;
+}
+
+/**
+ * Check if a stream ID represents a native Baichuan stream (prefixed with "native_")
+ */
+export function isNativeStreamId(id: string | undefined): boolean {
+    return id?.startsWith('native_') ?? false;
 }
 
 export async function fetchVideoStreamOptionsFromApi(
@@ -71,20 +74,9 @@ export async function fetchVideoStreamOptionsFromApi(
                 ? 'h265'
                 : String(stream.videoEncType || '').toLowerCase();
 
-        const id = profile === 'main'
-            ? 'mainstream'
-            : profile === 'sub'
-                ? 'substream'
-                : 'extstream';
-        const name = profile === 'main'
-            ? 'Main Stream'
-            : profile === 'sub'
-                ? 'Sub Stream'
-                : 'Ext Stream';
-
         streams.push({
-            name,
-            id,
+            name: `Native ${profile}`,
+            id: `native_${profile}`,
             container: 'rtp',
             video: { codec, width: stream.width, height: stream.height },
             url: ``,
