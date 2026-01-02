@@ -480,6 +480,10 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         this.streamManager = new StreamManager({
             createStreamClient: () => this.createStreamClient(),
             getLogger: () => this.getLogger(),
+            credentials: {
+                username: this.storageSettings.values.username || '',
+                password: this.storageSettings.values.password || '',
+            },
         });
 
         setTimeout(async () => {
@@ -1317,7 +1321,6 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             });
         };
 
-        // Use withBaichuanRetry (regular cameras have retry logic, battery cameras just execute)
         return await this.withBaichuanRetry(createStreamFn);
     }
 
