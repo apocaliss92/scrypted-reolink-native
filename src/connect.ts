@@ -39,7 +39,12 @@ export function isTcpFailureThatShouldFallbackToUdp(e: unknown): boolean {
     );
 }
 
-export async function createBaichuanApi(inputs: BaichuanConnectInputs, transport: BaichuanTransport): Promise<ReolinkBaichuanApi> {
+export async function createBaichuanApi(props: {
+    inputs: BaichuanConnectInputs,
+    transport: BaichuanTransport,
+    logger: Console,
+}): Promise<ReolinkBaichuanApi> {
+    const { inputs, transport, logger } = props;
     const { ReolinkBaichuanApi } = await import("@apocaliss92/reolink-baichuan-js");
 
     const base: BaichuanClientOptions = {
@@ -68,7 +73,7 @@ export async function createBaichuanApi(inputs: BaichuanConnectInputs, transport
                 }
                 logger.error(`[BaichuanClient] error (${transport}) ${inputs.host}: ${msg}`);
             });
-            
+
             // Handle 'close' event to prevent unhandled rejections from pending promises
             api.client.on("close", () => {
                 // Socket closed - pending promises will be rejected, but we've already handled errors above
@@ -109,46 +114,46 @@ export type UdpFallbackInfo = {
     tcpError: unknown;
 };
 
-export async function connectBaichuanWithTcpUdpFallback(
-    inputs: BaichuanConnectInputs,
-    onUdpFallback?: (info: UdpFallbackInfo) => void,
-): Promise<{ api: ReolinkBaichuanApi; transport: BaichuanTransport }> {
-    let tcpApi: ReolinkBaichuanApi | undefined;
-    try {
-        tcpApi = await createBaichuanApi(inputs, "tcp");
-        await tcpApi.login();
-        return { api: tcpApi, transport: "tcp" };
-    }
-    catch (e) {
-        try {
-            await tcpApi?.close();
-        }
-        catch {
-            // ignore
-        }
+// export async function connectBaichuanWithTcpUdpFallback(
+//     inputs: BaichuanConnectInputs,
+//     onUdpFallback?: (info: UdpFallbackInfo) => void,
+// ): Promise<{ api: ReolinkBaichuanApi; transport: BaichuanTransport }> {
+//     let tcpApi: ReolinkBaichuanApi | undefined;
+//     try {
+//         tcpApi = await createBaichuanApi(inputs, "tcp");
+//         await tcpApi.login();
+//         return { api: tcpApi, transport: "tcp" };
+//     }
+//     catch (e) {
+//         try {
+//             await tcpApi?.close();
+//         }
+//         catch {
+//             // ignore
+//         }
 
-        if (!isTcpFailureThatShouldFallbackToUdp(e)) {
-            throw e;
-        }
+//         if (!isTcpFailureThatShouldFallbackToUdp(e)) {
+//             throw e;
+//         }
 
-        const uid = normalizeUid(inputs.uid);
-        const uidMissing = !uid;
+//         const uid = normalizeUid(inputs.uid);
+//         const uidMissing = !uid;
 
-        onUdpFallback?.({
-            host: inputs.host,
-            uid,
-            uidMissing,
-            tcpError: e,
-        });
+//         onUdpFallback?.({
+//             host: inputs.host,
+//             uid,
+//             uidMissing,
+//             tcpError: e,
+//         });
 
-        if (uidMissing) {
-            throw new Error(
-                `Baichuan TCP failed and this camera likely requires UDP/BCUDP. Set the Reolink UID in settings to continue (ip=${inputs.host}).`,
-            );
-        }
+//         if (uidMissing) {
+//             throw new Error(
+//                 `Baichuan TCP failed and this camera likely requires UDP/BCUDP. Set the Reolink UID in settings to continue (ip=${inputs.host}).`,
+//             );
+//         }
 
-        const udpApi = await createBaichuanApi(inputs, "udp");
-        await udpApi.login();
-        return { api: udpApi, transport: "udp" };
-    }
-}
+//         const udpApi = await createBaichuanApi(inputs, "udp");
+//         await udpApi.login();
+//         return { api: udpApi, transport: "udp" };
+//     }
+// }

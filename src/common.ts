@@ -1,5 +1,5 @@
 import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
+import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, SettingValue, Settings, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings, StorageSettingsDict } from "@scrypted/sdk/storage-settings";
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { createBaichuanApi, normalizeUid, type BaichuanTransport } from "./connect";
@@ -101,19 +101,85 @@ class ReolinkCameraFloodlight extends ScryptedDeviceBase implements OnOff, Brigh
     }
 }
 
-class ReolinkCameraPirSensor extends ScryptedDeviceBase implements OnOff {
+class ReolinkCameraPirSensor extends ScryptedDeviceBase implements OnOff, Settings {
+    storageSettings = new StorageSettings(this, {
+        sensitive: {
+            title: 'PIR Sensitivity',
+            description: 'Detection sensitivity/threshold (higher = more sensitive)',
+            type: 'number',
+            defaultValue: 50,
+            range: [0, 100],
+        },
+        reduceAlarm: {
+            title: 'Reduce False Alarms',
+            description: 'Enable reduction of false alarm rate',
+            type: 'boolean',
+            defaultValue: false,
+        },
+        interval: {
+            title: 'PIR Detection Interval',
+            description: 'Detection interval in seconds',
+            type: 'number',
+            defaultValue: 5,
+            range: [1, 60],
+        },
+    });
+
     constructor(public camera: CommonCameraMixin, nativeId: string) {
         super(nativeId);
     }
 
+    async getSettings(): Promise<Setting[]> {
+        return this.storageSettings.getSettings();
+    }
+
+    async putSetting(key: string, value: SettingValue): Promise<void> {
+        await this.storageSettings.putSetting(key, value);
+
+        // Apply the new settings to the camera
+        const channel = this.camera.getRtspChannel();
+        const enabled = this.on ? 1 : 0;
+        const sensitive = this.storageSettings.values.sensitive;
+        const reduceAlarm = this.storageSettings.values.reduceAlarm ? 1 : 0;
+        const interval = this.storageSettings.values.interval;
+
+        await this.camera.withBaichuanRetry(async () => {
+            const api = await this.camera.ensureClient();
+            await api.setPirInfo(channel, {
+                enable: enabled,
+                sensitive: sensitive,
+                reduceAlarm: reduceAlarm,
+                interval: interval,
+            });
+        });
+    }
+
     async turnOff(): Promise<void> {
         this.on = false;
-        await this.camera.setPirEnabled(false);
+        await this.updatePirSettings();
     }
 
     async turnOn(): Promise<void> {
         this.on = true;
-        await this.camera.setPirEnabled(true);
+        await this.updatePirSettings();
+    }
+
+    private async updatePirSettings(): Promise<void> {
+        const channel = this.camera.getRtspChannel();
+        const enabled = this.on ? 1 : 0;
+        const sensitive = this.storageSettings.values.sensitive;
+        const reduceAlarm = this.storageSettings.values.reduceAlarm ? 1 : 0;
+        const interval = this.storageSettings.values.interval;
+
+        await this.camera.withBaichuanRetry(async () => {
+            const api = await this.camera.ensureClient();
+            await api.setPirInfo(channel, {
+                enable: enabled,
+                sensitive: sensitive,
+                reduceAlarm: reduceAlarm,
+                interval: interval,
+            });
+        });
     }
 }
 
@@ -498,10 +564,20 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                 logger.log(`Baichuan event: ${JSON.stringify(ev)}`);
             }
 
-            if (!this.isEventDispatchEnabled()) return;
+            if (!this.isEventDispatchEnabled()) {
+                if (this.storageSettings.values.dispatchEvents.includes('eventLogs')) {
+                    logger.debug('Event dispatch is disabled, ignoring event');
+                }
+                return;
+            }
 
             const channel = this.getRtspChannel();
-            if (ev?.channel !== undefined && ev.channel !== channel) return;
+            if (ev?.channel !== undefined && ev.channel !== channel) {
+                if (this.storageSettings.values.dispatchEvents.includes('eventLogs')) {
+                    logger.debug(`Event channel ${ev.channel} does not match camera channel ${channel}, ignoring`);
+                }
+                return;
+            }
 
             const objects: string[] = [];
             let motion = false;
@@ -509,6 +585,9 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             switch (ev?.type) {
                 case 'motion':
                     motion = true;
+                    if (this.storageSettings.values.dispatchEvents.includes('eventLogs')) {
+                        logger.log(`Motion event received (may be PIR or MD)`);
+                    }
                     break;
                 case 'doorbell':
                     this.handleDoorbellEvent();
@@ -524,13 +603,18 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                     motion = true;
                     break;
                 default:
+                    if (this.storageSettings.values.dispatchEvents.includes('eventLogs')) {
+                        logger.debug(`Unknown event type: ${ev?.type}`);
+                    }
                     return;
             }
 
-            this.processEvents({ motion, objects }).catch(() => { });
+            this.processEvents({ motion, objects }).catch((e) => {
+                logger.warn('Error processing events', e);
+            });
         }
-        catch {
-            // ignore
+        catch (e) {
+            this.getLogger().warn('Error in onSimpleEvent handler', e);
         }
     }
 
@@ -538,6 +622,8 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         const logger = this.getLogger();
         const selection = Array.from(this.getDispatchEventsSelection?.() ?? new Set()).sort();
         const enabled = selection.length > 0;
+
+        logger.log(`subscribeToEvents called: enabled=${enabled}, selection=[${selection.join(', ')}], protocol=${this.protocol}`);
 
         this.unsubscribedToEvents();
 
@@ -548,6 +634,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         }
 
         if (!enabled) {
+            logger.log('Event subscription disabled, unsubscribing');
             if (this.doorbellBinaryTimeout) {
                 clearTimeout(this.doorbellBinaryTimeout);
                 this.doorbellBinaryTimeout = undefined;
@@ -560,7 +647,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
         try {
             await api.onSimpleEvent(this.onSimpleEvent);
-            logger.log(`Subscribed to events (${selection.join(', ')})`);
+            logger.log(`Subscribed to events (${selection.join(', ')}) on ${this.protocol} connection`);
         }
         catch (e) {
             logger.warn('Failed to attach Baichuan event handler', e);
@@ -810,7 +897,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                 info: {
                     ...(this.info || {}),
                 },
-                interfaces: [ScryptedInterface.OnOff],
+                interfaces: [ScryptedInterface.OnOff, ScryptedInterface.Settings],
                 type: ScryptedDeviceType.Siren,
             });
         }
@@ -824,7 +911,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                 info: {
                     ...(this.info || {}),
                 },
-                interfaces: [ScryptedInterface.OnOff],
+                interfaces: [ScryptedInterface.OnOff, ScryptedInterface.Settings],
                 type: ScryptedDeviceType.Light,
             });
         }
@@ -838,7 +925,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                 info: {
                     ...(this.info || {}),
                 },
-                interfaces: [ScryptedInterface.OnOff],
+                interfaces: [ScryptedInterface.OnOff, ScryptedInterface.Settings],
                 type: ScryptedDeviceType.Switch,
             });
         }
@@ -951,9 +1038,25 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     async setPirEnabled(enabled: boolean): Promise<void> {
         const channel = this.getRtspChannel();
 
+        // Get current PIR settings from the sensor if available
+        let sensitive: number | undefined;
+        let reduceAlarm: number | undefined;
+        let interval: number | undefined;
+
+        if (this.pirSensor) {
+            sensitive = this.pirSensor.storageSettings.values.sensitive;
+            reduceAlarm = this.pirSensor.storageSettings.values.reduceAlarm ? 1 : 0;
+            interval = this.pirSensor.storageSettings.values.interval;
+        }
+
         await this.withBaichuanRetry(async () => {
             const api = await this.ensureClient();
-            return await api.setPirInfo(channel, { enable: enabled ? 1 : 0 });
+            return await api.setPirInfo(channel, {
+                enable: enabled ? 1 : 0,
+                ...(sensitive !== undefined ? { sensitive } : {}),
+                ...(reduceAlarm !== undefined ? { reduceAlarm } : {}),
+                ...(interval !== undefined ? { interval } : {}),
+            });
         });
     }
 
@@ -997,6 +1100,20 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                 try {
                     const pirState = await api.getPirInfo(channel);
                     this.pirSensor.on = pirState.enabled;
+
+                    // Update storage settings with current values from API
+                    if (pirState.state) {
+                        if (pirState.state.sensitive !== undefined) {
+                            this.pirSensor.storageSettings.values.sensitive = pirState.state.sensitive;
+                        }
+                        if (pirState.state.reduceAlarm !== undefined) {
+                            // Convert number (0/1) to boolean
+                            this.pirSensor.storageSettings.values.reduceAlarm = !!pirState.state.reduceAlarm;
+                        }
+                        if (pirState.state.interval !== undefined) {
+                            this.pirSensor.storageSettings.values.interval = pirState.state.interval;
+                        }
+                    }
                 } catch (e) {
                     this.getLogger().debug('Failed to align PIR state', e);
                 }
@@ -1268,14 +1385,17 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
             const api = await createBaichuanApi(
                 {
-                    host: ipAddress,
-                    username,
-                    password,
-                    uid: normalizedUid,
+                    inputs: {
+                        host: ipAddress,
+                        username,
+                        password,
+                        uid: normalizedUid,
+                        logger: this.console,
+                        ...(debugOptions ? { debugOptions } : {}),
+                    },
+                    transport: this.protocol,
                     logger: this.console,
-                    ...(debugOptions ? { debugOptions } : {}),
-                },
-                this.protocol,
+                }
             );
             await api.login();
 

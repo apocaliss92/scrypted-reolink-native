@@ -199,26 +199,22 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
 
     private async updateBatteryAndSnapshot(): Promise<void> {
         try {
-            const api = this.baichuanApi;
             const channel = this.getRtspChannel();
 
             const updateIntervalMinutes = this.storageSettings.values.batteryUpdateIntervalMinutes ?? 10;
             this.console.log(`Force battery update interval started (every ${updateIntervalMinutes} minutes)`);
 
-            // Do NOT wake the camera on a timer.
-            // This prevents battery cameras from ever entering sleep.
-            // Instead, if the camera is already awake, refresh battery info; snapshot is left on-demand.
-            if (!api) {
+            if (!this.baichuanApi) {
                 return;
             }
 
-            const sleepStatus = api.getSleepStatus({ channel });
+            const sleepStatus = this.baichuanApi.getSleepStatus({ channel });
             if (sleepStatus.state !== 'awake') {
                 return;
             }
 
             try {
-                const batteryInfo = await api.getBatteryInfo(channel);
+                const batteryInfo = await this.baichuanApi.getBatteryInfo(channel);
                 if (this.isBatteryInfoLoggingEnabled()) {
                     this.console.log('getBatteryInfo result:', JSON.stringify(batteryInfo));
                 }
@@ -324,14 +320,17 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
         const debugOptions = this.getBaichuanDebugOptions();
         const api = await createBaichuanApi(
             {
-                host: ipAddress,
-                username,
-                password,
-                uid: normalizedUid,
+                inputs: {
+                    host: ipAddress,
+                    username,
+                    password,
+                    uid: normalizedUid,
+                    logger: this.console,
+                    ...(debugOptions ? { debugOptions } : {}),
+                },
+                transport: 'udp',
                 logger: this.console,
-                ...(debugOptions ? { debugOptions } : {}),
-            },
-            'udp',
+            }
         );
         await api.login();
 

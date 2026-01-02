@@ -109,13 +109,16 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
         const debugOptions = this.getBaichuanDebugOptions();
         const api = await createBaichuanApi(
             {
-                host: ipAddress,
-                username,
-                password,
+                inputs: {
+                    host: ipAddress,
+                    username,
+                    password,
+                    logger: this.console,
+                    ...(debugOptions ? { debugOptions } : {}),
+                },
+                transport: 'tcp',
                 logger: this.console,
-                ...(debugOptions ? { debugOptions } : {}),
             },
-            'tcp',
         );
         await api.login();
 
@@ -146,7 +149,7 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
         this.statusPollTimer = setInterval(() => {
             this.periodic10sTick().catch(() => { });
         }, 10_000);
-        
+
         this.console.log('Periodic tasks started: status poll every 10s');
     }
 

@@ -37,13 +37,16 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
         if (ipAddress && username && password) {
             const api = await createBaichuanApi(
                 {
-                    host: ipAddress,
-                    username,
-                    password,
-                    uid,
+                    transport: isBatteryCam ? 'udp' : 'tcp',
                     logger: this.console,
-                },
-                isBatteryCam ? 'udp' : 'tcp',
+                    inputs: {
+                        host: ipAddress,
+                        username,
+                        password,
+                        uid,
+                        logger: this.console,
+                    }
+                }
             );
 
             await api.login();
