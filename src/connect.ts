@@ -9,7 +9,6 @@ export type BaichuanConnectInputs = {
     uid?: string;
     logger?: Console;
     debugOptions?: unknown;
-    keepAliveInterval?: number;
 };
 
 export function normalizeUid(uid?: string): string | undefined {
