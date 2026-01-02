@@ -38,31 +38,18 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
         });
     }
 
-
-    isRecoverableBaichuanError(e: any): boolean {
-        const message = e?.message || e?.toString?.() || '';
-        return typeof message === 'string' && (
-            message.includes('Baichuan socket closed') ||
-            message.includes('Baichuan UDP stream closed') ||
-            message.includes('Baichuan TCP socket is not connected') ||
-            message.includes('socket hang up') ||
-            message.includes('ECONNRESET') ||
-            message.includes('EPIPE')
-        );
-    }
-
     async resetBaichuanClient(reason?: any): Promise<void> {
         try {
             this.unsubscribedToEvents?.();
-            await (this as any).baichuanApi?.close();
+            await this.baichuanApi?.close();
         }
         catch (e) {
             this.getLogger().warn('Error closing Baichuan client during reset', e);
         }
         finally {
-            (this as any).baichuanApi = undefined;
-            (this as any).connectionTime = undefined;
-            (this as any).ensureClientPromise = undefined;
+            this.baichuanApi = undefined;
+            this.connectionTime = undefined;
+            this.ensureClientPromise = undefined;
             if (this.passiveRefreshTimer) {
                 clearTimeout(this.passiveRefreshTimer);
                 this.passiveRefreshTimer = undefined;
@@ -108,22 +95,10 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
 
     async init() {
         this.startPeriodicTasks();
-        await this.refreshAuxDevicesStatus();
+        // Align auxiliary devices state on init
+        await this.alignAuxDevicesState();
     }
 
-    getBaichuanDebugOptions(): any | undefined {
-        const sel = new Set<string>(this.storageSettings.values.debugLogs);
-        if (!sel.size) return undefined;
-
-        const debugOptions: DebugOptions = {};
-        // Only pass through Baichuan client debug flags.
-        const clientKeys = new Set(['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'traceEvents', 'debugH264', 'debugParamSets']);
-        for (const k of sel) {
-            if (!clientKeys.has(k)) continue;
-            debugOptions[k] = true;
-        }
-        return Object.keys(debugOptions).length ? debugOptions : undefined;
-    }
 
     async createStreamClient(): Promise<ReolinkBaichuanApi> {
         const { ipAddress, username, password } = this.storageSettings.values;
@@ -148,7 +123,7 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
     }
 
     getClient(): ReolinkBaichuanApi | undefined {
-        return (this as any).baichuanApi;
+        return this.baichuanApi;
     }
 
     private passiveRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -166,35 +141,18 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
         if (this.periodicStarted) return;
         this.periodicStarted = true;
 
+        this.console.log('Starting periodic tasks for regular camera');
+
         this.statusPollTimer = setInterval(() => {
             this.periodic10sTick().catch(() => { });
         }, 10_000);
+        
+        this.console.log('Periodic tasks started: status poll every 10s');
     }
 
     private async periodic10sTick(): Promise<void> {
         await this.ensureClient();
-        await this.refreshAuxDevicesStatus();
-    }
-
-    async refreshAuxDevicesStatus(): Promise<void> {
-        const api = this.getClient();
-        if (!api) return;
-
-        const channel = this.getRtspChannel();
-        const { hasFloodlight } = this.getAbilities();
-
-        try {
-            if (hasFloodlight) {
-                const wl = await api.getWhiteLedState(channel);
-                if (this.floodlight) {
-                    this.floodlight.on = !!wl.enabled;
-                    if (wl.brightness !== undefined) this.floodlight.brightness = wl.brightness;
-                }
-            }
-        }
-        catch {
-            // ignore
-        }
+        await this.alignAuxDevicesState();
     }
 
     async getDetectionInput(detectionId: string, eventId?: any): Promise<MediaObject> {

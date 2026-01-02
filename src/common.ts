@@ -166,10 +166,18 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         },
         snapshotCacheMinutes: {
             title: "Snapshot Cache Minutes",
-            group: 'Advanced',
+            subgroup: 'Advanced',
             description: "Return a cached snapshot if taken within the last N minutes.",
             type: "number",
             defaultValue: 5,
+            hide: true,
+        },
+        batteryUpdateIntervalMinutes: {
+            title: "Battery Update Interval (minutes)",
+            subgroup: 'Advanced',
+            description: "How often to wake up the camera and update battery status and snapshot (default: 10 minutes).",
+            type: "number",
+            defaultValue: 10,
             hide: true,
         },
         // Regular camera specific
@@ -194,7 +202,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             combobox: true,
             immediate: true,
             defaultValue: [],
-            choices: ['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'traceEvents', 'debugH264', 'debugParamSets', 'eventLogs'],
+            choices: ['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'traceEvents', 'debugH264', 'debugParamSets', 'eventLogs', 'batteryInfo'],
             onPut: async (ov, value) => {
                 // Only reconnect if Baichuan-client flags changed; toggling event logs should be immediate.
                 const oldSel = new Set(ov);
@@ -289,7 +297,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                 const logger = this.getLogger();
                 logger.log(`PTZ presets: create preset requested (name=${name})`);
 
-                const preset = await (this.withBaichuanRetry || (async (fn: () => Promise<any>) => fn()))(async () => {
+                const preset = await this.withBaichuanRetry(async () => {
                     await this.ensureClient();
                     if (!this.ptzPresets) {
                         throw new Error('PTZ presets not available');
@@ -330,7 +338,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                 const logger = this.getLogger();
                 logger.log(`PTZ presets: update position requested (presetId=${presetId})`);
 
-                await (this.withBaichuanRetry || (async (fn: () => Promise<any>) => fn()))(async () => {
+                await this.withBaichuanRetry(async () => {
                     await this.ensureClient();
                     return await (this.ptzPresets).updatePtzPresetToCurrentPosition(presetId);
                 });
@@ -353,7 +361,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                 const logger = this.getLogger();
                 logger.log(`PTZ presets: delete requested (presetId=${presetId})`);
 
-                await (this.withBaichuanRetry || (async (fn: () => Promise<any>) => fn()))(async () => {
+                await this.withBaichuanRetry(async () => {
                     await this.ensureClient();
                     return await (this.ptzPresets).deletePtzPreset(presetId);
                 });
@@ -371,7 +379,6 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     streamManager?: StreamManager;
     intercom?: ReolinkBaichuanIntercom;
 
-    // Auxiliary device instances
     siren?: ReolinkCameraSiren;
     floodlight?: ReolinkCameraFloodlight;
     pirSensor?: ReolinkCameraPirSensor;
@@ -392,13 +399,11 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     // Abstract init method that subclasses must implement
     abstract init(): Promise<void>;
 
-    withBaichuanRetry?<T>(fn: () => Promise<T>): Promise<T>;
+    abstract withBaichuanRetry<T>(fn: () => Promise<T>): Promise<T>;
     protected withBaichuanClient?<T>(fn: (api: ReolinkBaichuanApi) => Promise<T>): Promise<T>;
     motionTimeout?: NodeJS.Timeout;
     doorbellBinaryTimeout?: NodeJS.Timeout;
     initComplete?: boolean;
-    getBaichuanDebugOptions?(): any;
-    isRecoverableBaichuanError?(e: any): boolean;
     resetBaichuanClient?(reason?: any): Promise<void>;
 
     constructor(nativeId: string, public plugin: ReolinkNativePlugin, public options: CommonCameraMixinOptions) {
@@ -431,6 +436,32 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
     getLogger(): Console {
         return this.console;
+    }
+
+    getBaichuanDebugOptions(): any | undefined {
+        const sel = new Set<string>(this.storageSettings.values.debugLogs);
+        if (!sel.size) return undefined;
+
+        const debugOptions: any = {};
+        // Only pass through Baichuan client debug flags.
+        const clientKeys = new Set(['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'traceEvents', 'debugH264', 'debugParamSets']);
+        for (const k of sel) {
+            if (!clientKeys.has(k)) continue;
+            debugOptions[k] = true;
+        }
+        return Object.keys(debugOptions).length ? debugOptions : undefined;
+    }
+
+    isRecoverableBaichuanError(e: any): boolean {
+        const message = e?.message || e?.toString?.() || '';
+        return typeof message === 'string' && (
+            message.includes('Baichuan socket closed') ||
+            message.includes('Baichuan UDP stream closed') ||
+            message.includes('Baichuan TCP socket is not connected') ||
+            message.includes('socket hang up') ||
+            message.includes('ECONNRESET') ||
+            message.includes('EPIPE')
+        );
     }
 
     updatePtzCaps() {
@@ -899,61 +930,79 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         }
     }
 
-    // Auxiliary device control methods
     async setSirenEnabled(enabled: boolean): Promise<void> {
         const channel = this.getRtspChannel();
 
-        // Use withBaichuanClient if available (for battery cameras), otherwise use withBaichuanRetry or direct call
-        if (this.withBaichuanClient) {
-            await this.withBaichuanClient(async (api) => {
-                await api.setSiren(channel, enabled);
-            });
-        } else {
-            const retryFn = this.withBaichuanRetry || (async <T>(fn: () => Promise<T>): Promise<T> => {
-                return await fn();
-            });
-            await retryFn(async () => {
-                const api = await this.ensureClient();
-                return await api.setSiren(channel, enabled);
-            });
-        }
+        await this.withBaichuanRetry(async () => {
+            const api = await this.ensureClient();
+            return await api.setSiren(channel, enabled);
+        });
     }
 
     async setFloodlightState(on?: boolean, brightness?: number): Promise<void> {
         const channel = this.getRtspChannel();
 
-        // Use withBaichuanClient if available (for battery cameras), otherwise use withBaichuanRetry or direct call
-        if (this.withBaichuanClient) {
-            await this.withBaichuanClient(async (api) => {
-                await api.setWhiteLedState(channel, on, brightness);
-            });
-        } else {
-            const retryFn = this.withBaichuanRetry || (async <T>(fn: () => Promise<T>): Promise<T> => {
-                return await fn();
-            });
-            await retryFn(async () => {
-                const api = await this.ensureClient();
-                return await api.setWhiteLedState(channel, on, brightness);
-            });
-        }
+        await this.withBaichuanRetry(async () => {
+            const api = await this.ensureClient();
+            return await api.setWhiteLedState(channel, on, brightness);
+        });
     }
 
     async setPirEnabled(enabled: boolean): Promise<void> {
         const channel = this.getRtspChannel();
 
-        // Use withBaichuanClient if available (for battery cameras), otherwise use withBaichuanRetry or direct call
-        if (this.withBaichuanClient) {
-            await this.withBaichuanClient(async (api) => {
-                await api.setPirInfo(channel, { enable: enabled ? 1 : 0 });
-            });
-        } else {
-            const retryFn = this.withBaichuanRetry || (async <T>(fn: () => Promise<T>): Promise<T> => {
-                return await fn();
-            });
-            await retryFn(async () => {
-                const api = await this.ensureClient();
-                return await api.setPirInfo(channel, { enable: enabled ? 1 : 0 });
-            });
+        await this.withBaichuanRetry(async () => {
+            const api = await this.ensureClient();
+            return await api.setPirInfo(channel, { enable: enabled ? 1 : 0 });
+        });
+    }
+
+    /**
+     * Aligns auxiliary device states (siren, floodlight, PIR) with current API state.
+     * This should be called periodically for regular cameras and once when battery cameras wake up.
+     */
+    async alignAuxDevicesState(): Promise<void> {
+        const api = this.baichuanApi;
+        if (!api) return;
+
+        const channel = this.getRtspChannel();
+        const { hasSiren, hasFloodlight, hasPir } = this.getAbilities();
+
+        try {
+            // Align siren state
+            if (hasSiren && this.siren) {
+                try {
+                    const sirenState = await api.getSiren(channel);
+                    this.siren.on = sirenState.enabled;
+                } catch (e) {
+                    this.getLogger().debug('Failed to align siren state', e);
+                }
+            }
+
+            // Align floodlight state
+            if (hasFloodlight && this.floodlight) {
+                try {
+                    const wl = await api.getWhiteLedState(channel);
+                    this.floodlight.on = !!wl.enabled;
+                    if (wl.brightness !== undefined) {
+                        this.floodlight.brightness = wl.brightness;
+                    }
+                } catch (e) {
+                    this.getLogger().debug('Failed to align floodlight state', e);
+                }
+            }
+
+            // Align PIR state
+            if (hasPir && this.pirSensor) {
+                try {
+                    const pirState = await api.getPirInfo(channel);
+                    this.pirSensor.on = pirState.enabled;
+                } catch (e) {
+                    this.getLogger().debug('Failed to align PIR state', e);
+                }
+            }
+        } catch (e) {
+            this.getLogger().debug('Failed to align auxiliary devices state', e);
         }
     }
 
@@ -1139,24 +1188,20 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
                     const prev = this.cachedVideoStreamOptions ?? [];
                     const next = prev.filter((s) => s.id !== nativeId);
-                    next.push({ 
-                        name, 
-                        id: nativeId, 
-                        container: 'rtp', 
-                        video: { codec: detectedCodec }, 
-                        url: `` 
+                    next.push({
+                        name,
+                        id: nativeId,
+                        container: 'rtp',
+                        video: { codec: detectedCodec },
+                        url: ``
                     });
                     this.cachedVideoStreamOptions = next;
                 },
             });
         };
 
-        // Use withBaichuanRetry for regular cameras, direct call for battery cameras
-        if (this.withBaichuanRetry) {
-            return await this.withBaichuanRetry(createStreamFn);
-        } else {
-            return await createStreamFn();
-        }
+        // Use withBaichuanRetry (regular cameras have retry logic, battery cameras just execute)
+        return await this.withBaichuanRetry(createStreamFn);
     }
 
     // Client management
@@ -1214,7 +1259,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             }
 
             // Create new client
-            const debugOptions = this.getBaichuanDebugOptions?.();
+            const debugOptions = this.getBaichuanDebugOptions();
             const normalizedUid = this.protocol === 'udp' ? normalizeUid(uid) : undefined;
 
             if (this.protocol === 'udp' && !normalizedUid) {
@@ -1278,7 +1323,6 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         return Number.isFinite(id) ? id : undefined;
     }
 
-    // Refresh device state (capabilities, presets, interfaces, aux devices)
     async refreshDeviceState(): Promise<void> {
         if (this.refreshingState) {
             return;
@@ -1289,7 +1333,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         const channel = this.getRtspChannel();
 
         try {
-            const { capabilities, abilities, support, presets, objects } = await (this.withBaichuanRetry || (async (fn: () => Promise<any>) => fn()))(async () => {
+            const { capabilities, abilities, support, presets, objects } = await this.withBaichuanRetry(async () => {
                 const api = await this.ensureClient();
                 return await api.getDeviceCapabilities(channel);
             });
@@ -1381,6 +1425,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
         this.storageSettings.settings.snapshotCacheMinutes.hide = !isBattery;
         this.storageSettings.settings.uid.hide = !isBattery;
+        this.storageSettings.settings.batteryUpdateIntervalMinutes.hide = !isBattery;
 
         if (isBattery && !this.storageSettings.values.mixinsSetup) {
             try {
