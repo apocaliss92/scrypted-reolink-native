@@ -18,11 +18,13 @@ import {
     StreamManager,
 } from "./stream-utils";
 import { getDeviceInterfaces } from "./utils";
+import { ReolinkNativeNvrDevice } from "./nvr";
 
 export type CameraType = 'battery' | 'regular';
 
 export interface CommonCameraMixinOptions {
     type: CameraType;
+    nvrDevice?: ReolinkNativeNvrDevice; // Optional reference to NVR device
 }
 
 class ReolinkCameraSiren extends ScryptedDeviceBase implements OnOff {
@@ -138,7 +140,7 @@ class ReolinkCameraPirSensor extends ScryptedDeviceBase implements OnOff, Settin
         await this.storageSettings.putSetting(key, value);
 
         // Apply the new settings to the camera
-        const channel = this.camera.getRtspChannel();
+        const channel = this.camera.storageSettings.values.rtspChannel;
         const enabled = this.on ? 1 : 0;
         const sensitive = this.storageSettings.values.sensitive;
         const reduceAlarm = this.storageSettings.values.reduceAlarm ? 1 : 0;
@@ -166,7 +168,7 @@ class ReolinkCameraPirSensor extends ScryptedDeviceBase implements OnOff, Settin
     }
 
     private async updatePirSettings(): Promise<void> {
-        const channel = this.camera.getRtspChannel();
+        const channel = this.camera.storageSettings.values.rtspChannel;
         const enabled = this.on ? 1 : 0;
         const sensitive = this.storageSettings.values.sensitive;
         const reduceAlarm = this.storageSettings.values.reduceAlarm ? 1 : 0;
@@ -226,6 +228,11 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             onPut: async () => {
                 await this.credentialsChanged();
             }
+        },
+        isFromNvr: {
+            type: 'boolean',
+            hide: true,
+            defaultValue: false,
         },
         mixinsSetup: {
             type: 'boolean',
@@ -493,21 +500,15 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     initComplete?: boolean;
     resetBaichuanClient?(reason?: any): Promise<void>;
 
+    protected nvrDevice?: any; // Optional reference to NVR device
+
     constructor(nativeId: string, public plugin: ReolinkNativePlugin, public options: CommonCameraMixinOptions) {
         super(nativeId);
         // Set protocol based on camera type
-        this.protocol = options.type === 'battery' ? 'udp' : 'tcp';
+        this.protocol = !options.nvrDevice && options.type === 'battery' ? 'udp' : 'tcp';
 
-        this.streamManager = new StreamManager({
-            createStreamClient: () => this.createStreamClient(),
-            getLogger: () => this.getLogger(),
-            credentials: {
-                username: this.storageSettings.values.username || '',
-                password: this.storageSettings.values.password || '',
-            },
-            // For battery cameras, we use a shared connection
-            sharedConnection: options.type === 'battery',
-        });
+        // Store NVR device reference if provided
+        this.nvrDevice = options.nvrDevice;
 
         setTimeout(async () => {
             await this.parentInit();
@@ -515,12 +516,6 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     }
     createStreamClient(): Promise<ReolinkBaichuanApi> {
         throw new Error("Method not implemented.");
-    }
-
-    // Common method implementations
-    public getRtspChannel(): number {
-        const channel = this.storageSettings.values.rtspChannel;
-        return channel !== undefined ? Number(channel) : 0;
     }
 
     public getAbilities(): DeviceCapabilities {
@@ -589,7 +584,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                 return;
             }
 
-            const channel = this.getRtspChannel();
+            const channel = this.storageSettings.values.rtspChannel;
             if (ev?.channel !== undefined && ev.channel !== channel) {
                 if (this.isEventLogsEnabled()) {
                     logger.debug(`Event channel ${ev.channel} does not match camera channel ${channel}, ignoring`);
@@ -637,6 +632,10 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     }
 
     async subscribeToEvents(): Promise<void> {
+        if (this.nvrDevice) {
+            return;
+        }
+
         const logger = this.getLogger();
         const selection = Array.from(this.getDispatchEventsSelection?.() ?? new Set()).sort();
         const enabled = selection.length > 0;
@@ -676,7 +675,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     // VideoTextOverlays interface implementation
     async getVideoTextOverlays(): Promise<Record<string, VideoTextOverlay>> {
         const client = await this.ensureClient();
-        const channel = this.getRtspChannel();
+        const channel = this.storageSettings.values.rtspChannel;
 
         let osd = this.storageSettings.values.cachedOsd;
 
@@ -698,7 +697,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
     async setVideoTextOverlay(id: 'osdChannel' | 'osdTime', value: VideoTextOverlay): Promise<void> {
         const client = await this.ensureClient();
-        const channel = this.getRtspChannel();
+        const channel = this.storageSettings.values.rtspChannel;
 
         const osd = await client.getOsd(channel);
 
@@ -728,7 +727,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             return;
         }
 
-        const channel = this.getRtspChannel();
+        const channel = this.storageSettings.values.rtspChannel;
 
         // Preset navigation.
         const preset = command.preset;
@@ -959,9 +958,10 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         });
     }
 
-    // Settings methods
     async getSettings(): Promise<Setting[]> {
-        return await this.storageSettings.getSettings();
+        const settings = await this.storageSettings.getSettings();
+
+        return settings;
     }
 
     async putSetting(key: string, value: string): Promise<void> {
@@ -994,7 +994,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         const ip = this.storageSettings.values.ipAddress;
         try {
             const api = await this.ensureClient();
-            const deviceData = await api.getInfo();
+            const deviceData = await api.getInfo(this.storageSettings.values.rtspChannel);
             const info = this.info || {};
             info.ip = ip;
 
@@ -1002,7 +1002,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             info.firmware = deviceData?.firmwareVersion || deviceData?.firmVer;
             info.version = deviceData?.hardwareVersion || deviceData?.boardInfo;
             info.model = deviceData?.type || deviceData?.typeInfo;
-            info.manufacturer = 'Reolink native';
+            info.manufacturer = 'Reolink';
             info.managementUrl = `http://${ip}`;
             this.info = info;
         } catch (e) {
@@ -1041,7 +1041,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     }
 
     async setSirenEnabled(enabled: boolean): Promise<void> {
-        const channel = this.getRtspChannel();
+        const channel = this.storageSettings.values.rtspChannel;
 
         await this.withBaichuanRetry(async () => {
             const api = await this.ensureClient();
@@ -1050,7 +1050,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     }
 
     async setFloodlightState(on?: boolean, brightness?: number): Promise<void> {
-        const channel = this.getRtspChannel();
+        const channel = this.storageSettings.values.rtspChannel;
 
         await this.withBaichuanRetry(async () => {
             const api = await this.ensureClient();
@@ -1059,7 +1059,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     }
 
     async setPirEnabled(enabled: boolean): Promise<void> {
-        const channel = this.getRtspChannel();
+        const channel = this.storageSettings.values.rtspChannel;
 
         // Get current PIR settings from the sensor if available
         let sensitive: number | undefined;
@@ -1091,7 +1091,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         const api = this.baichuanApi;
         if (!api) return;
 
-        const channel = this.getRtspChannel();
+        const channel = this.storageSettings.values.rtspChannel;
         const { hasSiren, hasFloodlight, hasPir } = this.getAbilities();
 
         try {
@@ -1234,16 +1234,13 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             return [];
         }
 
-        // while (this.fetchingStreams) {
-        //     await new Promise((resolve) => setTimeout(resolve, 500));
-        // }
         this.fetchingStreams = true;
 
         let streams: UrlMediaStreamOptions[] = [];
 
         const client = await this.ensureClient();
 
-        const { ipAddress, username, password, rtspChannel } = this.storageSettings.values;
+        const { ipAddress, rtspChannel, isFromNvr } = this.storageSettings.values;
 
         try {
             await this.ensureNetPortCache();
@@ -1255,12 +1252,14 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
         try {
             streams = await buildVideoStreamOptionsFromRtspRtmp(
-                client,
-                rtspChannel,
-                ipAddress,
-                username,
-                password,
-                this.cachedNetPort,
+                {
+                    client,
+                    ipAddress,
+                    cachedNetPort: this.cachedNetPort,
+                    isFromNvr,
+                    rtspChannel,
+                    logger,
+                },
             );
         } catch (e) {
             if (!this.isRecoverableBaichuanError?.(e)) {
@@ -1269,12 +1268,8 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             this.cachedNetPort = undefined;
         }
 
-
-        const nativeStreams = await fetchVideoStreamOptionsFromApi(client, rtspChannel, this.getLogger());
-        streams = [...streams, ...nativeStreams];
-
         if (streams.length) {
-            logger.log('Fetched video stream options', streams);
+            logger.log('Fetched video stream options', { streams, netPort: this.cachedNetPort });
             this.cachedVideoStreamOptions = streams;
             return streams;
         }
@@ -1308,7 +1303,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         }
 
         const profile = parseStreamProfileFromId(selected.id) || 'main';
-        const channel = this.getRtspChannel();
+        const channel = this.storageSettings.values.rtspChannel;
         const streamKey = `${channel}_${profile}`;
         const expectedVideoType = expectedVideoTypeFromUrlMediaStreamOptions(selected);
 
@@ -1354,11 +1349,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         if (this.ensureClientPromise) return await this.ensureClientPromise;
 
         this.ensureClientPromise = (async () => {
-            const { ipAddress, username, password, uid } = this.storageSettings.values;
-
-            if (!ipAddress || !username || !password) {
-                throw new Error('Missing camera credentials');
-            }
+            const { ipAddress, username, password, uid, isFromNvr } = this.storageSettings.values;
 
             // Only tear down previous session if it exists and is not connected
             if (this.baichuanApi) {
@@ -1409,8 +1400,8 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                 {
                     inputs: {
                         host: ipAddress,
-                        username,
-                        password,
+                        username: username,
+                        password: password,
                         uid: normalizedUid,
                         logger: this.console,
                         debugOptions,
@@ -1472,7 +1463,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         this.refreshingState = true;
 
         const logger = this.getLogger();
-        const channel = this.getRtspChannel();
+        const channel = this.storageSettings.values.rtspChannel;
 
         try {
             const { capabilities, abilities, support, presets, objects } = await this.withBaichuanRetry(async () => {
@@ -1492,7 +1483,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
                 const device: Device = {
                     nativeId: this.nativeId,
-                    providerNativeId: this.plugin?.nativeId,
+                    providerNativeId: this.nvrDevice?.nativeId ?? this.plugin?.nativeId,
                     name: this.name,
                     interfaces,
                     type,
@@ -1564,6 +1555,19 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         }
 
         const isBattery = this.options.type === 'battery';
+        const { username, password } = this.storageSettings.values;
+
+        this.streamManager = new StreamManager({
+            createStreamClient: () => this.createStreamClient(),
+            getLogger: () => this.getLogger(),
+            credentials: {
+                username,
+                password
+            },
+            // For battery cameras, we use a shared connection
+            sharedConnection: isBattery,
+        });
+
 
         this.storageSettings.settings.snapshotCacheMinutes.hide = !isBattery;
         this.storageSettings.settings.uid.hide = !isBattery;
@@ -1589,6 +1593,18 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         }
         catch (e) {
             logger.warn('Failed to subscribe to Baichuan events', e);
+        }
+
+        const { isFromNvr } = this.storageSettings.values;
+
+        if (isFromNvr && this.nvrDevice) {
+            this.storageSettings.settings.username.hide = true;
+            this.storageSettings.settings.password.hide = true;
+            this.storageSettings.settings.ipAddress.hide = true;
+
+            this.storageSettings.settings.username.defaultValue = this.nvrDevice.storageSettings.values.username;
+            this.storageSettings.settings.password.defaultValue = this.nvrDevice.storageSettings.values.password;
+            this.storageSettings.settings.ipAddress.defaultValue = this.nvrDevice.storageSettings.values.ipAddress;
         }
 
         await this.init();

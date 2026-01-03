@@ -39,7 +39,7 @@ export class ReolinkBaichuanIntercom {
         );
 
         await this.stop();
-        const channel = this.camera.getRtspChannel();
+        const channel = this.camera.storageSettings.values.rtspChannel;
 
         // Best-effort: log codec requirements exposed by the camera.
         // This mirrors neolink's source of truth: TalkAbility (cmd_id=10).

@@ -1,7 +1,7 @@
 import sdk, { DeviceCreator, DeviceCreatorSettings, DeviceInformation, DeviceProvider, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedNativeId, Setting } from "@scrypted/sdk";
 import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
-import { ReolinkNativeNvrDevice } from "./nvr-native";
+import { ReolinkNativeNvrDevice } from "./nvr";
 import { autoDetectDeviceType, createBaichuanApi } from "./connect";
 import { getDeviceInterfaces } from "./utils";
 
@@ -76,7 +76,6 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             device.storageSettings.values.ipAddress = ipAddress;
             device.storageSettings.values.username = username;
             device.storageSettings.values.password = password;
-            device.storageSettings.values.channelNum = detection.channelNum;
             device.updateDeviceInfo(deviceInfo);
 
             return nativeId;
@@ -136,17 +135,15 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             }
 
             // Type guard: device is either ReolinkNativeCamera or ReolinkNativeBatteryCamera
-            device.info = deviceInfo as DeviceInformation;
+            device.info = deviceInfo;
             device.classes = objects;
             device.presets = presets;
             device.storageSettings.values.username = username;
             device.storageSettings.values.password = password;
             device.storageSettings.values.rtspChannel = rtspChannel;
             device.storageSettings.values.ipAddress = ipAddress;
-            if (detection.type === 'battery-cam' && detection.uid) {
-                (device as ReolinkNativeBatteryCamera).storageSettings.values.uid = detection.uid;
-            }
             device.storageSettings.values.capabilities = capabilities;
+            device.storageSettings.values.uid = detection.uid;
             device.updateDeviceInfo();
 
             return nativeId;

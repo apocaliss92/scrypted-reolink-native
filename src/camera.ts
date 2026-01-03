@@ -32,9 +32,10 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
     private statusPollTimer: NodeJS.Timeout | undefined;
 
 
-    constructor(nativeId: string, public plugin: ReolinkNativePlugin) {
+    constructor(nativeId: string, public plugin: ReolinkNativePlugin, nvrDevice?: any) {
         super(nativeId, plugin, {
             type: 'regular',
+            nvrDevice,
         });
     }
 
@@ -101,17 +102,14 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
 
     async createStreamClient(): Promise<ReolinkBaichuanApi> {
         const { ipAddress, username, password } = this.storageSettings.values;
-        if (!ipAddress || !username || !password) {
-            throw new Error('Missing camera credentials');
-        }
 
         const debugOptions = this.getBaichuanDebugOptions();
         const api = await createBaichuanApi(
             {
                 inputs: {
                     host: ipAddress,
-                    username,
-                    password,
+                    username: username,
+                    password: password,
                     logger: this.console,
                     debugOptions
                 },

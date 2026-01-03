@@ -97,14 +97,18 @@ export async function fetchVideoStreamOptionsFromApi(
 }
 
 export async function buildVideoStreamOptionsFromRtspRtmp(
-    client: ReolinkBaichuanApi,
-    channel: number,
-    ipAddress: string,
-    username: string,
-    password: string,
-    cachedNetPort?: { rtsp?: { port?: number; enable?: number }; rtmp?: { port?: number; enable?: number } },
+    props: {
+        client: ReolinkBaichuanApi,
+        ipAddress: string,
+        cachedNetPort: { rtsp?: { port?: number; enable?: number }; rtmp?: { port?: number; enable?: number } },
+        isFromNvr: boolean,
+        rtspChannel: number,
+        logger: Console
+    },
 ): Promise<UrlMediaStreamOptions[]> {
-    const streams: UrlMediaStreamOptions[] = [];
+    const { client, ipAddress, cachedNetPort, rtspChannel, logger } = props;
+    const rtspStreams: UrlMediaStreamOptions[] = [];
+    const rtmpStreams: UrlMediaStreamOptions[] = [];
 
     // Use cached net port if provided, otherwise fetch it
     const netPort = cachedNetPort || await client.getNetPort();
@@ -113,13 +117,8 @@ export async function buildVideoStreamOptionsFromRtspRtmp(
     const rtspPort = netPort.rtsp?.port ?? 554;
     const rtmpPort = netPort.rtmp?.port ?? 1935;
 
-    if (!rtspEnabled && !rtmpEnabled) {
-        // If neither RTSP nor RTMP are enabled, return empty array
-        return streams;
-    }
-
     // Get stream metadata to build options
-    const streamMetadata = await client.getStreamMetadata(channel);
+    const streamMetadata = await client.getStreamMetadata(rtspChannel);
     const list = streamMetadata?.streams || [];
 
     for (const stream of list) {
@@ -134,12 +133,12 @@ export async function buildVideoStreamOptionsFromRtspRtmp(
         if (rtspEnabled && profile !== 'ext') {
             // RTSP format: rtsp://ip:port/h264Preview_XX_profile
             // XX is 1-based channel with 2-digit padding
-            const channelStr = String(channel + 1).padStart(2, '0');
+            const channelStr = String(rtspChannel + 1).padStart(2, '0');
             const profileStr = profile === 'main' ? 'main' : 'sub';
             const rtspPath = `/h264Preview_${channelStr}_${profileStr}`;
             const rtspId = `h264Preview_${channelStr}_${profileStr}`;
 
-            streams.push({
+            rtspStreams.push({
                 name: `RTSP ${rtspId}`,
                 id: rtspId,
                 container: 'rtsp',
@@ -160,14 +159,14 @@ export async function buildVideoStreamOptionsFromRtspRtmp(
             const rtmpId = `${streamName}.bcs`; // ID for Scrypted (main.bcs, sub.bcs, ext.bcs)
 
             // Use channel directly (0-based) in path, matching reolink_aio behavior
-            const rtmpPath = `/bcs/channel${channel}_${streamName}.bcs`;
+            const rtmpPath = `/bcs/channel${rtspChannel}_${streamName}.bcs`;
             const rtmpUrl = new URL(`rtmp://${ipAddress}:${rtmpPort}${rtmpPath}`);
             const params = rtmpUrl.searchParams;
-            params.set('channel', channel.toString());
+            params.set('channel', rtspChannel.toString());
             params.set('stream', streamType.toString());
             // Credentials will be added by addRtspCredentials as user/password query params
 
-            streams.push({
+            rtmpStreams.push({
                 name: `RTMP ${rtmpId}`,
                 id: rtmpId,
                 container: 'rtmp',
@@ -177,12 +176,14 @@ export async function buildVideoStreamOptionsFromRtspRtmp(
         }
     }
 
-    // Sort streams: RTMP first, then RTSP
-    streams.sort((a, b) => {
-        if (a.container === 'rtmp' && b.container !== 'rtmp') return -1;
-        if (a.container !== 'rtmp' && b.container === 'rtmp') return 1;
-        return 0;
-    });
+
+    const nativeStreams = await fetchVideoStreamOptionsFromApi(client, rtspChannel, logger);
+
+    const streams: UrlMediaStreamOptions[] = [
+        ...rtspStreams,
+        ...rtmpStreams,
+        ...nativeStreams,
+    ];
 
     return streams;
 }
@@ -378,7 +379,7 @@ export class StreamManager {
     async closeAllStreams(reason?: string): Promise<void> {
         const servers = Array.from(this.nativeRfcServers.values());
         this.nativeRfcServers.clear();
-        
+
         await Promise.allSettled(
             servers.map(async (server) => {
                 try {

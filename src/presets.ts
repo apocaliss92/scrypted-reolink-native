@@ -90,7 +90,7 @@ export class ReolinkPtzPresets {
 
     async refreshPtzPresets(): Promise<PtzPreset[]> {
         const client = await this.camera.ensureClient();
-        const channel = this.camera.getRtspChannel();
+        const channel = this.camera.storageSettings.values.rtspChannel;
         const presets = await client.getPtzPresets(channel);
         this.setCachedPtzPresets(presets);
         this.syncEnabledPresetsSettingAndCaps(presets);
@@ -99,14 +99,14 @@ export class ReolinkPtzPresets {
 
     async moveToPreset(presetId: number): Promise<void> {
         const client = await this.camera.ensureClient();
-        const channel = this.camera.getRtspChannel();
+        const channel = this.camera.storageSettings.values.rtspChannel;
         await client.moveToPtzPreset(channel, presetId);
     }
 
     /** Create a new PTZ preset at current position. */
     async createPtzPreset(name: string, presetId?: number): Promise<PtzPreset> {
         const client = await this.camera.ensureClient();
-        const channel = this.camera.getRtspChannel();
+        const channel = this.camera.storageSettings.values.rtspChannel;
         const trimmed = String(name ?? '').trim();
         if (!trimmed) throw new Error('Preset name is required');
         const existing = await client.getPtzPresets(channel);
@@ -150,7 +150,7 @@ export class ReolinkPtzPresets {
     /** Overwrite an existing preset with the current PTZ position (and keep its current name). */
     async updatePtzPresetToCurrentPosition(presetId: number): Promise<void> {
         const client = await this.camera.ensureClient();
-        const channel = this.camera.getRtspChannel();
+        const channel = this.camera.storageSettings.values.rtspChannel;
 
         const current = this.getCachedPtzPresets();
         const found = current.find((p) => p.id === presetId);
@@ -163,7 +163,7 @@ export class ReolinkPtzPresets {
     /** Best-effort delete/disable a preset (firmware dependent). */
     async deletePtzPreset(presetId: number): Promise<void> {
         const client = await this.camera.ensureClient();
-        const channel = this.camera.getRtspChannel();
+        const channel = this.camera.storageSettings.values.rtspChannel;
         await client.deletePtzPreset(channel, presetId);
 
         // Keep enabled preset list clean (remove deleted id), but do not rewrite names for others.
@@ -181,7 +181,7 @@ export class ReolinkPtzPresets {
     /** Rename a preset while trying to preserve its position (will move camera to that preset first). */
     async renamePtzPreset(presetId: number, newName: string): Promise<void> {
         const client = await this.camera.ensureClient();
-        const channel = this.camera.getRtspChannel();
+        const channel = this.camera.storageSettings.values.rtspChannel;
         const trimmed = String(newName ?? '').trim();
         if (!trimmed) throw new Error('Preset name is required');
 

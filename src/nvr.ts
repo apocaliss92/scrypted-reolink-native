@@ -1,0 +1,364 @@
+import type { DeviceInfoResponse, DeviceInputData, ReolinkCgiApi } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import sdk, { AdoptDevice, Device, DeviceDiscovery, DeviceProvider, DiscoveredDevice, Reboot, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, SettingValue } from "@scrypted/sdk";
+import { StorageSettings } from "@scrypted/sdk/storage-settings";
+import { ReolinkNativeCamera } from "./camera";
+import { ReolinkNativeBatteryCamera } from "./camera-battery";
+import { normalizeUid } from "./connect";
+import ReolinkNativePlugin from "./main";
+import { getDeviceInterfaces } from "./utils";
+
+export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settings, DeviceDiscovery, DeviceProvider, Reboot {
+    storageSettings = new StorageSettings(this, {
+        debugEvents: {
+            title: 'Debug Events',
+            type: 'boolean',
+            immediate: true,
+        },
+        ipAddress: {
+            title: 'IP address',
+            type: 'string',
+            onPut: async () => await this.reinit()
+        },
+        username: {
+            title: 'Username',
+            placeholder: 'admin',
+            defaultValue: 'admin',
+            type: 'string',
+            onPut: async () => await this.reinit()
+        },
+        password: {
+            title: 'Password',
+            type: 'password',
+            onPut: async () => await this.reinit()
+        },
+    });
+    plugin: ReolinkNativePlugin;
+    nvrApi: ReolinkCgiApi | undefined;
+    discoveredDevices = new Map<string, {
+        device: Device;
+        description: string;
+        rtspChannel: number;
+        deviceData: DeviceInfoResponse;
+    }>();
+    lastHubInfoCheck: number | undefined;
+    lastErrorsCheck: number | undefined;
+    lastDevicesStatusCheck: number | undefined;
+    cameraNativeMap = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera>();
+    processing = false;
+
+    constructor(nativeId: string, plugin: ReolinkNativePlugin) {
+        super(nativeId);
+        this.plugin = plugin;
+
+        setTimeout(async () => {
+            await this.init();
+        }, 5000);
+    }
+
+    async reboot(): Promise<void> {
+        const api = await this.ensureClient();
+        await api.Reboot();
+    }
+
+    getLogger() {
+        return this.console;
+    }
+
+    async reinit() {
+        if (this.nvrApi) {
+            try {
+                await this.nvrApi.logout();
+            } catch {
+                // ignore
+            }
+        }
+        this.nvrApi = undefined;
+    }
+
+    async ensureClient(): Promise<ReolinkCgiApi> {
+        if (this.nvrApi) {
+            return this.nvrApi;
+        }
+
+        const { ipAddress, username, password } = this.storageSettings.values;
+        if (!ipAddress || !username || !password) {
+            throw new Error('Missing NVR credentials');
+        }
+
+        const { ReolinkCgiApi } = await import("@apocaliss92/reolink-baichuan-js");
+        this.nvrApi = new ReolinkCgiApi({
+            host: ipAddress,
+            username,
+            password,
+        });
+
+        await this.nvrApi.login();
+        return this.nvrApi;
+    }
+
+    async init() {
+        const api = await this.ensureClient();
+        const logger = this.getLogger();
+
+        setInterval(async () => {
+            if (this.processing || !api) {
+                return;
+            }
+            this.processing = true;
+            try {
+                const now = Date.now();
+
+                if (!this.lastErrorsCheck || (now - this.lastErrorsCheck > 60 * 1000)) {
+                    this.lastErrorsCheck = now;
+                    // Note: ReolinkCgiApi doesn't have checkErrors, skip for now
+                }
+
+                if (!this.lastHubInfoCheck || now - this.lastHubInfoCheck > 1000 * 60 * 5) {
+                    logger.log('Starting Hub info data fetch');
+                    this.lastHubInfoCheck = now;
+                    const { hubData } = await api.getHubInfo();
+                    const { devicesData, channelsResponse, response } = await api.getDevicesInfo();
+                    logger.log('Hub info data fetched');
+                    if (this.storageSettings.values.debugEvents) {
+                        logger.log(`${JSON.stringify({ hubData, devicesData, channelsResponse, response })}`);
+                    }
+
+                    await this.discoverDevices(true);
+                }
+
+                const eventsRes = await api.getAllChannelsEvents();
+
+                if (this.storageSettings.values.debugEvents) {
+                    logger.debug(`Events call result: ${JSON.stringify(eventsRes)}`);
+                }
+                this.cameraNativeMap.forEach((camera) => {
+                    if (camera) {
+                        const channel = camera.storageSettings.values.rtspChannel;
+                        const cameraEventsData = eventsRes?.parsed[channel];
+                        if (cameraEventsData) {
+                            camera.processEvents(cameraEventsData);
+                        }
+                    }
+                });
+
+                const { batteryInfoData, response } = await api.getAllChannelsBatteryInfo();
+
+                if (this.storageSettings.values.debugEvents) {
+                    logger.debug(`Battery info call result: ${JSON.stringify({ batteryInfoData, response })}`);
+                }
+
+                this.cameraNativeMap.forEach((camera) => {
+                    if (camera) {
+                        const channel = camera.storageSettings.values.rtspChannel;
+                        const cameraBatteryData = batteryInfoData[channel];
+                        if (cameraBatteryData) {
+                            (camera as ReolinkNativeBatteryCamera).updateSleepingState({
+                                reason: 'NVR',
+                                state: cameraBatteryData.sleeping ? 'sleeping' : 'awake',
+                                idleMs: 0,
+                                lastRxAtMs: 0,
+                            }).catch(() => { });
+                        }
+                    }
+                });
+            } catch (e) {
+                this.console.error('Error on events flow', e);
+            } finally {
+                this.processing = false;
+            }
+        }, 1000);
+    }
+
+    updateDeviceInfo(deviceInfo: Record<string, string>) {
+        const info = this.info || {};
+        info.ip = this.storageSettings.values.ipAddress;
+        info.serialNumber = deviceInfo?.serialNumber || deviceInfo?.itemNo;
+        info.firmware = deviceInfo?.firmwareVersion || deviceInfo?.firmVer;
+        info.version = deviceInfo?.hardwareVersion || deviceInfo?.boardInfo;
+        info.model = deviceInfo?.type || deviceInfo?.typeInfo;
+        info.manufacturer = 'Reolink native';
+        info.managementUrl = `http://${info.ip}`;
+        this.info = info;
+    }
+
+    async getSettings(): Promise<Setting[]> {
+        const settings = await this.storageSettings.getSettings();
+        return settings;
+    }
+
+    async putSetting(key: string, value: SettingValue): Promise<void> {
+        return this.storageSettings.putSetting(key, value);
+    }
+
+    async releaseDevice(id: string, nativeId: string) {
+        this.cameraNativeMap.delete(nativeId);
+    }
+
+    async getDevice(nativeId: string): Promise<ReolinkNativeCamera | ReolinkNativeBatteryCamera> {
+        let device = this.cameraNativeMap.get(nativeId);
+
+        if (!device) {
+            if (nativeId.endsWith('-battery-cam')) {
+                device = new ReolinkNativeBatteryCamera(nativeId, this.plugin, this);
+            } else {
+                device = new ReolinkNativeCamera(nativeId, this.plugin, this);
+            }
+            this.cameraNativeMap.set(nativeId, device);
+        }
+
+        return device;
+    }
+
+    buildNativeId(channel: number, serialNumber?: string, isBattery?: boolean): string {
+        const suffix = isBattery ? '-battery-cam' : '-cam';
+        if (serialNumber) {
+            return `${this.nativeId}-ch${channel}-${serialNumber}${suffix}`;
+        }
+        return `${this.nativeId}-ch${channel}${suffix}`;
+    }
+
+    getCameraInterfaces() {
+        return [
+            ScryptedInterface.VideoCameraConfiguration,
+            ScryptedInterface.Camera,
+            ScryptedInterface.MotionSensor,
+            ScryptedInterface.VideoTextOverlays,
+            ScryptedInterface.VideoCamera,
+            ScryptedInterface.Settings,
+            ScryptedInterface.ObjectDetector,
+        ];
+    }
+
+    async syncEntitiesFromRemote() {
+        const api = await this.ensureClient();
+        const logger = this.getLogger();
+
+        logger.log('Starting channels discovery using getDevicesInfo...');
+
+        const { devicesData, channels } = await api.getDevicesInfo();
+
+        logger.log(`getDevicesInfo completed. Found ${channels.length} channels.`);
+
+        // Process each channel that was successfully discovered
+        for (const channel of channels) {
+            try {
+                const { channelStatus, channelInfo, abilities } = devicesData[channel];
+                const name = channelStatus?.name;
+                const uid = channelStatus?.uid;
+                const isBattery = !!(abilities?.battery?.ver ?? 0);
+
+                const nativeId = this.buildNativeId(channel, uid, isBattery);
+                const interfaces = [ScryptedInterface.VideoCamera];
+                if (isBattery) {
+                    interfaces.push(ScryptedInterface.Battery);
+                }
+                const type = abilities.supportDoorbellLight ? ScryptedDeviceType.Doorbell : ScryptedDeviceType.Camera;
+
+                const device: Device = {
+                    nativeId,
+                    name,
+                    providerNativeId: this.nativeId,
+                    interfaces,
+                    type,
+                    info: {
+                        manufacturer: 'Reolink',
+                        model: channelInfo?.typeInfo,
+                        serialNumber: uid,
+                    }
+                };
+
+                if (sdk.deviceManager.getNativeIds().includes(nativeId)) {
+                    continue;
+                }
+
+                if (this.discoveredDevices.has(nativeId)) {
+                    continue;
+                }
+
+                this.discoveredDevices.set(nativeId, {
+                    device,
+                    description: `${name} (Channel ${channel})`,
+                    rtspChannel: channel,
+                    deviceData: devicesData[channel],
+                });
+
+                logger.debug(`Discovered channel ${channel}: ${name}`);
+            } catch (e: any) {
+                logger.debug(`Error processing channel ${channel}: ${e?.message || String(e)}`);
+            }
+        }
+
+        logger.log(`Channel discovery completed. Found ${this.discoveredDevices.size} devices.`);
+    }
+
+    async discoverDevices(scan?: boolean): Promise<DiscoveredDevice[]> {
+        if (scan) {
+            await this.syncEntitiesFromRemote();
+        }
+
+        return [...this.discoveredDevices.values()].map(d => ({
+            ...d.device,
+            description: d.description,
+        }));
+    }
+
+    async adoptDevice(adopt: AdoptDevice): Promise<string> {
+        const entry = this.discoveredDevices.get(adopt.nativeId);
+
+        if (!entry)
+            throw new Error('device not found');
+
+        await this.onDeviceEvent(ScryptedInterface.DeviceDiscovery, await this.discoverDevices());
+
+        const isBattery = entry.device.interfaces.includes(ScryptedInterface.Battery);
+        const { channelStatus } = entry.deviceData;
+
+        const { ReolinkBaichuanApi } = await import("@apocaliss92/reolink-baichuan-js");
+        const transport = 'tcp';
+        const uid = channelStatus?.uid;
+        const normalizedUid = isBattery && uid ? normalizeUid(uid) : undefined;
+        const baichuanApi = new ReolinkBaichuanApi({
+            host: this.storageSettings.values.ipAddress,
+            username: this.storageSettings.values.username,
+            password: this.storageSettings.values.password,
+            transport,
+            channel: entry.rtspChannel,
+            ...(normalizedUid ? { uid: normalizedUid } : {}),
+        });
+        await baichuanApi.login();
+        const { capabilities, objects, presets } = await baichuanApi.getDeviceCapabilities(entry.rtspChannel);
+        const { interfaces, type } = getDeviceInterfaces({
+            capabilities,
+            logger: this.console,
+        });
+
+        const actualDevice: Device = {
+            ...entry.device,
+            interfaces,
+            type
+        };
+
+        await sdk.deviceManager.onDeviceDiscovered(actualDevice);
+
+        const device = await this.getDevice(adopt.nativeId);
+        this.console.log('Adopted device', entry, device?.name);
+        const { username, password, ipAddress } = this.storageSettings.values;
+
+        device.storageSettings.values.rtspChannel = entry.rtspChannel;
+        device.classes = objects;
+        device.presets = presets;
+        device.storageSettings.values.username = username;
+        device.storageSettings.values.password = password;
+        device.storageSettings.values.rtspChannel = entry.rtspChannel;
+        device.storageSettings.values.ipAddress = ipAddress;
+        device.storageSettings.values.capabilities = capabilities;
+        device.storageSettings.values.uid = entry.deviceData.channelStatus.uid;
+        device.storageSettings.values.isFromNvr = true;
+
+        device.updateDeviceInfo();
+
+        this.discoveredDevices.delete(adopt.nativeId);
+        return device?.id;
+    }
+}
+
