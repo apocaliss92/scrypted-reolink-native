@@ -208,18 +208,18 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
     }
 
     async takePicture(options?: RequestPictureOptions) {
-        return this.withBaichuanRetry(async () => {
-            try {
+        try {
+            return this.withBaichuanRetry(async () => {
                 const client = await this.ensureClient();
                 const snapshotBuffer = await client.getSnapshot();
                 const mo = await this.createMediaObject(snapshotBuffer, 'image/jpeg');
 
                 return mo;
-            } catch (e) {
-                this.getLogger().error('Error taking snapshot', e);
-                throw e;
-            }
-        });
+            });
+        } catch (e) {
+            this.getLogger().error('Error taking snapshot', e);
+            throw e;
+        }
     }
 
     async getPictureOptions(): Promise<ResponsePictureOptions[]> {
