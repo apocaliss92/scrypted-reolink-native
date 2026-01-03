@@ -6,19 +6,18 @@ import { createBaichuanApi, normalizeUid, type BaichuanTransport } from "./conne
 import { convertDebugLogsToApiOptions, DebugLogOption, getApiRelevantDebugLogs, getDebugLogChoices } from "./debug-options";
 import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
+import { ReolinkNativeNvrDevice } from "./nvr";
 import { ReolinkPtzPresets } from "./presets";
 import {
     buildVideoStreamOptionsFromRtspRtmp,
     createRfc4571MediaObjectFromStreamManager,
     expectedVideoTypeFromUrlMediaStreamOptions,
-    fetchVideoStreamOptionsFromApi,
     isNativeStreamId,
     parseStreamProfileFromId,
     selectStreamOption,
-    StreamManager,
+    StreamManager
 } from "./stream-utils";
-import { getDeviceInterfaces } from "./utils";
-import { ReolinkNativeNvrDevice } from "./nvr";
+import { getDeviceInterfaces, updateDeviceInfo } from "./utils";
 
 export type CameraType = 'battery' | 'regular';
 
@@ -989,29 +988,18 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         }
     }
 
-    // Device info update
     async updateDeviceInfo(): Promise<void> {
-        const ip = this.storageSettings.values.ipAddress;
+        const { ipAddress, rtspChannel } = this.storageSettings.values;
         try {
             const api = await this.ensureClient();
-            const deviceData = await api.getInfo(this.storageSettings.values.rtspChannel);
-            const info = this.info || {};
-            info.ip = ip;
+            const deviceData = await api.getInfo(this.nvrDevice ? rtspChannel : undefined);
 
-            info.serialNumber = deviceData?.serialNumber || deviceData?.itemNo;
-            info.firmware = deviceData?.firmwareVersion || deviceData?.firmVer;
-            info.version = deviceData?.hardwareVersion || deviceData?.boardInfo;
-            info.model = deviceData?.type || deviceData?.typeInfo;
-            info.manufacturer = 'Reolink';
-            info.managementUrl = `http://${ip}`;
-            this.info = info;
+            await updateDeviceInfo({
+                device: this,
+                ipAddress,
+                deviceData,
+            });
         } catch (e) {
-            // If API call fails, at least set basic info
-            const info = this.info || {};
-            info.ip = ip;
-            info.manufacturer = 'Reolink native';
-            info.managementUrl = `http://${ip}`;
-            this.info = info;
             this.getLogger().warn('Failed to fetch device info', e);
         }
     }

@@ -5,7 +5,7 @@ import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
 import { normalizeUid } from "./connect";
 import ReolinkNativePlugin from "./main";
-import { getDeviceInterfaces } from "./utils";
+import { getDeviceInterfaces, updateDeviceInfo } from "./utils";
 
 export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settings, DeviceDiscovery, DeviceProvider, Reboot {
     storageSettings = new StorageSettings(this, {
@@ -99,6 +99,7 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
     async init() {
         const api = await this.ensureClient();
         const logger = this.getLogger();
+        await this.updateDeviceInfo();
 
         setInterval(async () => {
             if (this.processing || !api) {
@@ -169,16 +170,20 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
         }, 1000);
     }
 
-    updateDeviceInfo(deviceInfo: Record<string, string>) {
-        const info = this.info || {};
-        info.ip = this.storageSettings.values.ipAddress;
-        info.serialNumber = deviceInfo?.serialNumber || deviceInfo?.itemNo;
-        info.firmware = deviceInfo?.firmwareVersion || deviceInfo?.firmVer;
-        info.version = deviceInfo?.hardwareVersion || deviceInfo?.boardInfo;
-        info.model = deviceInfo?.type || deviceInfo?.typeInfo;
-        info.manufacturer = 'Reolink native';
-        info.managementUrl = `http://${info.ip}`;
-        this.info = info;
+    async updateDeviceInfo(): Promise<void> {
+        const { ipAddress } = this.storageSettings.values;
+        try {
+            const api = await this.ensureClient();
+            const deviceData = await api.getInfo();
+
+            await updateDeviceInfo({
+                device: this,
+                ipAddress,
+                deviceData,
+            });
+        } catch (e) {
+            this.getLogger().warn('Failed to fetch device info', e);
+        }
     }
 
     async getSettings(): Promise<Setting[]> {
@@ -354,8 +359,6 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
         device.storageSettings.values.capabilities = capabilities;
         device.storageSettings.values.uid = entry.deviceData.channelStatus.uid;
         device.storageSettings.values.isFromNvr = true;
-
-        device.updateDeviceInfo();
 
         this.discoveredDevices.delete(adopt.nativeId);
         return device?.id;

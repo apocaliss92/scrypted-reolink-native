@@ -1,5 +1,5 @@
-import type { DeviceCapabilities } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import { ScryptedDeviceType, ScryptedInterface } from "@scrypted/sdk";
+import type { DeviceCapabilities, ReolinkDeviceInfo } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import { DeviceBase, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface } from "@scrypted/sdk";
 
 export const getDeviceInterfaces = (props: {
     capabilities: DeviceCapabilities,
@@ -49,4 +49,33 @@ export const getDeviceInterfaces = (props: {
     }
 
     return { interfaces, type: capabilities.isDoorbell ? ScryptedDeviceType.Doorbell : ScryptedDeviceType.Camera };
+}
+
+export const updateDeviceInfo = async (props: {
+    device: DeviceBase,
+    ipAddress: string,
+    deviceData: ReolinkDeviceInfo
+}) => {
+    const { device, ipAddress, deviceData } = props;
+    try {
+        const info = device.info || {};
+
+        info.ip = ipAddress;
+        info.serialNumber = deviceData?.serialNumber || deviceData?.itemNo;
+        info.firmware = deviceData?.firmwareVersion;
+        info.version = deviceData?.hardwareVersion;
+        info.model = deviceData?.type;
+        info.manufacturer = 'Reolink';
+        info.managementUrl = `http://${ipAddress}`;
+        device.info = info;
+    } catch (e) {
+        // If API call fails, at least set basic info
+        const info = device.info || {};
+        info.ip = ipAddress;
+        info.manufacturer = 'Reolink native';
+        info.managementUrl = `http://${ipAddress}`;
+        device.info = info;
+
+        throw e;
+    }
 }
