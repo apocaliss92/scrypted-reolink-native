@@ -65,7 +65,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                     ScryptedInterface.DeviceProvider,
                     ScryptedInterface.Reboot,
                 ],
-                type: ScryptedDeviceType.Builtin,
+                type: ScryptedDeviceType.DeviceProvider,
                 providerNativeId: this.nativeId,
             });
 
