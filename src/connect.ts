@@ -86,8 +86,6 @@ export async function createBaichuanApi(props: {
         }
     };
 
-    logger.log('Connecting with options:', JSON.stringify(base, null, 2));
-
     if (transport === "tcp") {
         const api = new ReolinkBaichuanApi({
             ...base,
