@@ -1,8 +1,9 @@
 import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, SettingValue, Settings, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
-import { StorageSettings, StorageSettingsDict } from "@scrypted/sdk/storage-settings";
+import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
+import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { createBaichuanApi, normalizeUid, type BaichuanTransport } from "./connect";
+import { convertDebugLogsToApiOptions, DebugLogOption, getApiRelevantDebugLogs, getDebugLogChoices } from "./debug-options";
 import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
 import { ReolinkPtzPresets } from "./presets";
@@ -268,17 +269,36 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             combobox: true,
             immediate: true,
             defaultValue: [],
-            choices: ['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'traceEvents', 'debugH264', 'debugParamSets', 'eventLogs', 'batteryInfo'],
+            choices: getDebugLogChoices(),
             onPut: async (ov, value) => {
-                // Only reconnect if Baichuan-client flags changed; toggling event logs should be immediate.
-                const oldSel = new Set(ov);
-                const newSel = new Set(value);
-                oldSel.delete('eventLogs');
-                newSel.delete('eventLogs');
+                const oldApiOptions = getApiRelevantDebugLogs(ov || []);
+                const newApiOptions = getApiRelevantDebugLogs(value || []);
+
+                const oldSel = new Set(oldApiOptions);
+                const newSel = new Set(newApiOptions);
 
                 const changed = oldSel.size !== newSel.size || Array.from(oldSel).some((k) => !newSel.has(k));
                 if (changed && this.resetBaichuanClient) {
-                    await this.resetBaichuanClient('debugLogs changed');
+                    // Clear any existing timeout
+                    if (this.debugLogsResetTimeout) {
+                        clearTimeout(this.debugLogsResetTimeout);
+                        this.debugLogsResetTimeout = undefined;
+                    }
+
+                    // Defer reset by 2 seconds to allow settings to settle
+                    this.debugLogsResetTimeout = setTimeout(async () => {
+                        this.debugLogsResetTimeout = undefined;
+                        try {
+                            await this.resetBaichuanClient('debugLogs changed');
+                            // Force reconnection with new debug options
+                            this.baichuanApi = undefined;
+                            this.ensureClientPromise = undefined;
+                            // Trigger reconnection
+                            await this.ensureClient();
+                        } catch (e) {
+                            this.getLogger().warn('Failed to reset client after debug logs change', e);
+                        }
+                    }, 2000);
                 }
             },
         },
@@ -461,6 +481,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     protected ensureClientPromise: Promise<ReolinkBaichuanApi> | undefined;
     protected connectionTime: number | undefined;
     protected readonly protocol: BaichuanTransport;
+    private debugLogsResetTimeout: NodeJS.Timeout | undefined;
 
     // Abstract init method that subclasses must implement
     abstract init(): Promise<void>;
@@ -484,6 +505,8 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                 username: this.storageSettings.values.username || '',
                 password: this.storageSettings.values.password || '',
             },
+            // For battery cameras, we use a shared connection
+            sharedConnection: options.type === 'battery',
         });
 
         setTimeout(async () => {
@@ -509,17 +532,8 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     }
 
     getBaichuanDebugOptions(): any | undefined {
-        const sel = new Set<string>(this.storageSettings.values.debugLogs);
-        if (!sel.size) return undefined;
-
-        const debugOptions: any = {};
-        // Only pass through Baichuan client debug flags.
-        const clientKeys = new Set(['enabled', 'debugRtsp', 'traceStream', 'traceTalk', 'traceEvents', 'debugH264', 'debugParamSets']);
-        for (const k of sel) {
-            if (!clientKeys.has(k)) continue;
-            debugOptions[k] = true;
-        }
-        return Object.keys(debugOptions).length ? debugOptions : undefined;
+        const debugLogs = this.storageSettings.values.debugLogs || [];
+        return convertDebugLogsToApiOptions(debugLogs);
     }
 
     isRecoverableBaichuanError(e: any): boolean {
@@ -564,12 +578,12 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         try {
             const logger = this.getLogger();
 
-            if (this.storageSettings.values.dispatchEvents.includes('eventLogs')) {
+            if (this.isEventLogsEnabled()) {
                 logger.log(`Baichuan event: ${JSON.stringify(ev)}`);
             }
 
             if (!this.isEventDispatchEnabled()) {
-                if (this.storageSettings.values.dispatchEvents.includes('eventLogs')) {
+                if (this.isEventLogsEnabled()) {
                     logger.debug('Event dispatch is disabled, ignoring event');
                 }
                 return;
@@ -577,7 +591,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
             const channel = this.getRtspChannel();
             if (ev?.channel !== undefined && ev.channel !== channel) {
-                if (this.storageSettings.values.dispatchEvents.includes('eventLogs')) {
+                if (this.isEventLogsEnabled()) {
                     logger.debug(`Event channel ${ev.channel} does not match camera channel ${channel}, ignoring`);
                 }
                 return;
@@ -589,7 +603,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             switch (ev?.type) {
                 case 'motion':
                     motion = true;
-                    if (this.storageSettings.values.dispatchEvents.includes('eventLogs')) {
+                    if (this.isEventLogsEnabled()) {
                         logger.log(`Motion event received (may be PIR or MD)`);
                     }
                     break;
@@ -607,7 +621,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                     motion = true;
                     break;
                 default:
-                    if (this.storageSettings.values.dispatchEvents.includes('eventLogs')) {
+                    if (this.isEventLogsEnabled()) {
                         logger.debug(`Unknown event type: ${ev?.type}`);
                     }
                     return;
@@ -861,6 +875,11 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                 sdk.deviceManager.onDeviceEvent(this.nativeId, ScryptedInterface.ObjectDetector, od);
             }
         }
+    }
+
+    isEventLogsEnabled(): boolean {
+        const debugLogs = this.storageSettings.values.debugLogs || [];
+        return debugLogs.includes(DebugLogOption.EventLogs);
     }
 
     // BinarySensor interface implementation (for doorbell)
@@ -1394,7 +1413,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
                         password,
                         uid: normalizedUid,
                         logger: this.console,
-                        ...(debugOptions ? { debugOptions } : {}),
+                        debugOptions,
                     },
                     transport: this.protocol,
                     logger: this.console,

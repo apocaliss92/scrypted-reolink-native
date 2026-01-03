@@ -8,7 +8,7 @@ export type BaichuanConnectInputs = {
     password: string;
     uid?: string;
     logger?: Console;
-    debugOptions?: unknown;
+    debugOptions?: BaichuanClientOptions['debugOptions'];
 };
 
 export function normalizeUid(uid?: string): string | undefined {
@@ -52,7 +52,7 @@ export async function createBaichuanApi(props: {
         username: inputs.username,
         password: inputs.password,
         logger: inputs.logger,
-        ...(inputs.debugOptions ? { debugOptions: inputs.debugOptions } : {}),
+        debugOptions: inputs.debugOptions ?? {}
     };
 
     const attachErrorHandler = (api: ReolinkBaichuanApi) => {
@@ -86,6 +86,8 @@ export async function createBaichuanApi(props: {
         }
     };
 
+    logger.log('Connecting with options:', JSON.stringify(base, null, 2));
+
     if (transport === "tcp") {
         const api = new ReolinkBaichuanApi({
             ...base,
@@ -104,6 +106,7 @@ export async function createBaichuanApi(props: {
         ...base,
         transport: "udp",
         uid,
+        idleDisconnect: true,
     });
     attachErrorHandler(api);
     return api;

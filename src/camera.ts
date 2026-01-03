@@ -95,7 +95,6 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
 
     async init() {
         this.startPeriodicTasks();
-        // Align auxiliary devices state on init
         await this.alignAuxDevicesState();
     }
 
@@ -114,7 +113,7 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
                     username,
                     password,
                     logger: this.console,
-                    ...(debugOptions ? { debugOptions } : {}),
+                    debugOptions
                 },
                 transport: 'tcp',
                 logger: this.console,

@@ -28,6 +28,8 @@ export interface StreamManagerOptions {
         username: string;
         password: string;
     };
+    /** If true, the stream client is shared with the main connection. Default: false. */
+    sharedConnection?: boolean;
 }
 
 export function parseStreamProfileFromId(id: string | undefined): StreamProfile | undefined {
@@ -321,13 +323,16 @@ export class StreamManager {
             // Use the same credentials as the main connection
             const { username, password } = this.opts.credentials;
 
+            // If connection is shared, don't close it when stream teardown happens
+            const closeApiOnTeardown = !(this.opts.sharedConnection ?? false);
+
             const created = await createScryptedRfc4571TcpServer({
                 api,
                 channel,
                 profile,
                 logger: this.getLogger(),
                 expectedVideoType: expectedVideoType as VideoType | undefined,
-                closeApiOnTeardown: true,
+                closeApiOnTeardown,
                 username,
                 password,
             });
@@ -364,5 +369,24 @@ export class StreamManager {
         expectedVideoType?: 'H264' | 'H265',
     ): Promise<RfcServerInfo> {
         return await this.ensureNativeRfcServer(streamKey, channel, profile, expectedVideoType);
+    }
+
+    /**
+     * Close all active stream servers.
+     * Useful when the main connection is reset and streams need to be recreated.
+     */
+    async closeAllStreams(reason?: string): Promise<void> {
+        const servers = Array.from(this.nativeRfcServers.values());
+        this.nativeRfcServers.clear();
+        
+        await Promise.allSettled(
+            servers.map(async (server) => {
+                try {
+                    await server.close(reason || 'connection reset');
+                } catch (e) {
+                    this.getLogger().debug('Error closing stream server', e);
+                }
+            })
+        );
     }
 }

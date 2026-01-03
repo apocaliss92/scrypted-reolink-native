@@ -7,7 +7,7 @@ import sdk, {
 import {
     CommonCameraMixin,
 } from "./common";
-import { createBaichuanApi, normalizeUid } from "./connect";
+import { DebugLogOption } from "./debug-options";
 import type ReolinkNativePlugin from "./main";
 
 export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
@@ -25,7 +25,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
 
     private isBatteryInfoLoggingEnabled(): boolean {
         const debugLogs = this.storageSettings.values.debugLogs || [];
-        return debugLogs.includes('batteryInfo');
+        return debugLogs.includes(DebugLogOption.BatteryInfo);
     }
 
     constructor(nativeId: string, public plugin: ReolinkNativePlugin) {
@@ -289,6 +289,14 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
     async resetBaichuanClient(reason?: any): Promise<void> {
         try {
             this.unsubscribedToEvents?.();
+            
+            // Close all stream servers before closing the main connection
+            // This ensures streams are properly cleaned up when using shared connection
+            if (this.streamManager) {
+                const reasonStr = reason?.message || reason?.toString?.() || 'connection reset';
+                await this.streamManager.closeAllStreams(reasonStr);
+            }
+            
             await this.baichuanApi?.close();
         }
         catch (e) {
@@ -324,30 +332,8 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
     }
 
     async createStreamClient(): Promise<ReolinkBaichuanApi> {
-        const { ipAddress, username, password, uid } = this.storageSettings.values;
-        if (!ipAddress || !username || !password) {
-            throw new Error('Missing camera credentials');
-        }
-        const normalizedUid = normalizeUid(uid);
-        if (!normalizedUid) throw new Error("UID is required for battery cameras (BCUDP)");
-
-        const debugOptions = this.getBaichuanDebugOptions();
-        const api = await createBaichuanApi(
-            {
-                inputs: {
-                    host: ipAddress,
-                    username,
-                    password,
-                    uid: normalizedUid,
-                    logger: this.console,
-                    ...(debugOptions ? { debugOptions } : {}),
-                },
-                transport: 'udp',
-                logger: this.console,
-            }
-        );
-        await api.login();
-
-        return api;
+        // Reuse the main Baichuan client connection instead of creating a new one
+        // This ensures we use a single session for everything (general + streams)
+        return await this.ensureClient();
     }
 }
