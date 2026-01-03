@@ -238,20 +238,20 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             type: 'boolean',
             hide: true,
         },
-        snapshotCacheMinutes: {
-            title: "Snapshot Cache Minutes",
-            subgroup: 'Advanced',
-            description: "Return a cached snapshot if taken within the last N minutes.",
-            type: "number",
-            defaultValue: 5,
-            hide: true,
-        },
+        // snapshotCacheMinutes: {
+        //     title: "Snapshot Cache Minutes",
+        //     subgroup: 'Advanced',
+        //     description: "Return a cached snapshot if taken within the last N minutes.",
+        //     type: "number",
+        //     defaultValue: 60,
+        //     hide: true,
+        // },
         batteryUpdateIntervalMinutes: {
             title: "Battery Update Interval (minutes)",
             subgroup: 'Advanced',
-            description: "How often to wake up the camera and update battery status and snapshot (default: 10 minutes).",
+            description: "How often to wake up the camera and update battery status and snapshot (default: 60 minutes).",
             type: "number",
-            defaultValue: 10,
+            defaultValue: 60,
             hide: true,
         },
         // Regular camera specific
@@ -1349,7 +1349,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         if (this.ensureClientPromise) return await this.ensureClientPromise;
 
         this.ensureClientPromise = (async () => {
-            const { ipAddress, username, password, uid, isFromNvr } = this.storageSettings.values;
+            const { ipAddress, username, password, uid } = this.storageSettings.values;
 
             // Only tear down previous session if it exists and is not connected
             if (this.baichuanApi) {
@@ -1569,7 +1569,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
         });
 
 
-        this.storageSettings.settings.snapshotCacheMinutes.hide = !isBattery;
+        // this.storageSettings.settings.snapshotCacheMinutes.hide = !isBattery;
         this.storageSettings.settings.uid.hide = !isBattery;
         this.storageSettings.settings.batteryUpdateIntervalMinutes.hide = !isBattery;
 
@@ -1601,6 +1601,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             this.storageSettings.settings.username.hide = true;
             this.storageSettings.settings.password.hide = true;
             this.storageSettings.settings.ipAddress.hide = true;
+            this.storageSettings.settings.uid.hide = true;
 
             this.storageSettings.settings.username.defaultValue = this.nvrDevice.storageSettings.values.username;
             this.storageSettings.settings.password.defaultValue = this.nvrDevice.storageSettings.values.password;
