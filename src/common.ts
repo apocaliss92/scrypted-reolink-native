@@ -1,4 +1,4 @@
-import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent, StreamSamplingSelection } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
@@ -19,6 +19,7 @@ import {
     StreamManager
 } from "./stream-utils";
 import { getDeviceInterfaces, updateDeviceInfo } from "./utils";
+import path from 'path';
 
 export type CameraType = 'battery' | 'regular';
 
@@ -238,38 +239,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             type: 'boolean',
             hide: true,
         },
-        // snapshotCacheMinutes: {
-        //     title: "Snapshot Cache Minutes",
-        //     subgroup: 'Advanced',
-        //     description: "Return a cached snapshot if taken within the last N minutes.",
-        //     type: "number",
-        //     defaultValue: 60,
-        //     hide: true,
-        // },
-        batteryUpdateIntervalMinutes: {
-            title: "Battery Update Interval (minutes)",
-            subgroup: 'Advanced',
-            description: "How often to wake up the camera and update battery status and snapshot (default: 60 minutes).",
-            type: "number",
-            defaultValue: 60,
-            hide: true,
-        },
-        lowThresholdBatteryRecording: {
-            title: "Low Threshold Battery Recording (%)",
-            subgroup: 'Recording',
-            description: "Battery level threshold below which recording is disabled (default: 15%).",
-            type: "number",
-            defaultValue: 15,
-            hide: true,
-        },
-        highThresholdBatteryRecording: {
-            title: "High Threshold Battery Recording (%)",
-            subgroup: 'Recording',
-            description: "Battery level threshold above which recording is enabled (default: 35%).",
-            type: "number",
-            defaultValue: 35,
-            hide: true,
-        },
         // Regular camera specific
         dispatchEvents: {
             subgroup: 'Advanced',
@@ -479,6 +448,47 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 logger.log(`PTZ presets: delete ok (presetId=${presetId})`);
             },
         },
+        batteryUpdateIntervalMinutes: {
+            title: "Battery Update Interval (minutes)",
+            subgroup: 'Advanced',
+            description: "How often to wake up the camera and update battery status and snapshot (default: 60 minutes).",
+            type: "number",
+            defaultValue: 60,
+            hide: true,
+        },
+        lowThresholdBatteryRecording: {
+            title: "Low Threshold Battery Recording (%)",
+            subgroup: 'Recording',
+            description: "Battery level threshold below which recording is disabled (default: 15%).",
+            type: "number",
+            defaultValue: 15,
+            hide: true,
+        },
+        highThresholdBatteryRecording: {
+            title: "High Threshold Battery Recording (%)",
+            subgroup: 'Recording',
+            description: "Battery level threshold above which recording is enabled (default: 35%).",
+            type: "number",
+            defaultValue: 35,
+            hide: true,
+        },
+        diagnosticsOutputPath: {
+            title: "Diagnostics Output Path",
+            subgroup: 'Diagnostics',
+            description: "Directory where diagnostics files will be saved (default: plugin volume).",
+            type: "string",
+            defaultValue: path.join(process.env.SCRYPTED_PLUGIN_VOLUME, 'diagnostics', this.name),
+        },
+        diagnosticsRun: {
+            subgroup: 'Diagnostics',
+            title: 'Run Diagnostics',
+            description: 'Run all diagnostics and save results to the output path.',
+            type: 'button',
+            immediate: true,
+            onPut: async () => {
+                await this.runDiagnostics();
+            },
+        },
     });
 
     ptzPresets = new ReolinkPtzPresets(this);
@@ -569,6 +579,42 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
     protected getDeviceName(): string {
         return this.name || 'Camera';
+    }
+
+    private async runDiagnostics(): Promise<void> {
+        const logger = this.getBaichuanLogger();
+        const outputPath = this.storageSettings.values.diagnosticsOutputPath || process.env.SCRYPTED_PLUGIN_VOLUME || "";
+
+        if (!outputPath) {
+            throw new Error('Diagnostics output path is required');
+        }
+
+        const channel = this.storageSettings.values.rtspChannel || 0;
+        const durationSeconds = 15;
+        const selection: StreamSamplingSelection = {
+            kinds: ['native'],
+            profiles: ['main', 'ext', 'sub'],
+        };
+
+        logger.log(`Starting diagnostics with parameters: outDir=${outputPath}, channel=${channel}, durationSeconds=${durationSeconds}, selection=${JSON.stringify(selection)}`);
+
+        try {
+            const api = await this.ensureClient();
+
+            const result = await api.runAllDiagnosticsConsecutively({
+                outDir: outputPath,
+                channel,
+                durationSeconds,
+                selection,
+            });
+
+            logger.log(`Diagnostics completed successfully. Output directory: ${result.runDir}`);
+            logger.log(`Diagnostics file: ${result.diagnosticsPath}`);
+            logger.log(`Streams directory: ${result.streamsDir}`);
+        } catch (e) {
+            logger.error('Failed to run diagnostics', e);
+            throw e;
+        }
     }
 
     protected async onBeforeCleanup(): Promise<void> {
