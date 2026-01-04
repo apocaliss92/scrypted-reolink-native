@@ -566,6 +566,16 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             onClose: async () => {
                 // Reset client state on close
                 // The base class already handles cleanup
+                // Resubscribe to events after reconnection
+                // Use setTimeout to allow the connection to be re-established first
+                setTimeout(async () => {
+                    try {
+                        await this.subscribeToEvents();
+                    } catch (e) {
+                        const logger = this.getBaichuanLogger();
+                        logger.warn('Failed to resubscribe to events after reconnection', e);
+                    }
+                }, 1000);
             },
             onSimpleEvent: this.onSimpleEvent,
             getEventSubscriptionEnabled: () => this.isEventDispatchEnabled?.() ?? false,
