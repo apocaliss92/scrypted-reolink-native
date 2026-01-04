@@ -1333,7 +1333,6 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     async ensureClient(): Promise<ReolinkBaichuanApi> {
         // If camera is connected to NVR, use NVR's shared Baichuan connection
         if (this.nvrDevice) {
-            const logger = this.getLogger();
             return await this.nvrDevice.ensureBaichuanClient();
         }
 

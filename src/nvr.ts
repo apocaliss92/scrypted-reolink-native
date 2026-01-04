@@ -1,4 +1,4 @@
-import type { DeviceInfoResponse, DeviceInputData, ReolinkBaichuanApi, ReolinkCgiApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { DeviceInfoResponse, DeviceInputData, EventsResponse, ReolinkBaichuanApi, ReolinkCgiApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { AdoptDevice, Device, DeviceDiscovery, DeviceProvider, DiscoveredDevice, Reboot, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, SettingValue } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import { ReolinkNativeCamera } from "./camera";
@@ -13,6 +13,17 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
             title: 'Debug Events',
             type: 'boolean',
             immediate: true,
+        },
+        eventSource: {
+            title: 'Event Source',
+            description: 'Select the source for camera events: Native (Baichuan) or CGI (HTTP polling)',
+            type: 'string',
+            choices: ['Native', 'CGI'],
+            defaultValue: 'Native',
+            immediate: true,
+            onPut: async () => {
+                await this.reinitEventSubscriptions();
+            }
         },
         ipAddress: {
             title: 'IP address',
@@ -46,6 +57,7 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
     lastErrorsCheck: number | undefined;
     lastDevicesStatusCheck: number | undefined;
     cameraNativeMap = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera>();
+    private channelToNativeIdMap = new Map<number, string>();
     processing = false;
     private eventSubscriptionActive = false;
     private errorListener?: (err: unknown) => void;
@@ -195,8 +207,14 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
         return this.nvrApi;
     }
 
-    async onSimpleEventHandler(ev: ReolinkSimpleEvent) {
+    private forwardNativeEvent(ev: ReolinkSimpleEvent): void {
         const logger = this.getLogger();
+
+        const eventSource = this.storageSettings.values.eventSource || 'Native';
+        if (eventSource !== 'Native') {
+            return;
+        }
+
         try {
             if (this.storageSettings.values.debugEvents) {
                 logger.log(`NVR Baichuan event: ${JSON.stringify(ev)}`);
@@ -211,14 +229,8 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
                 return;
             }
 
-            // Find camera with matching channel
-            let targetCamera: ReolinkNativeCamera | ReolinkNativeBatteryCamera | undefined;
-            for (const camera of this.cameraNativeMap.values()) {
-                if (camera && camera.storageSettings.values.rtspChannel === channel) {
-                    targetCamera = camera;
-                    break;
-                }
-            }
+            const nativeId = this.channelToNativeIdMap.get(channel);
+            const targetCamera = nativeId ? this.cameraNativeMap.get(nativeId) : undefined;
 
             if (!targetCamera) {
                 if (this.storageSettings.values.debugEvents) {
@@ -269,8 +281,12 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
             });
         }
         catch (e) {
-            logger.warn('Error in NVR onSimpleEvent handler', e);
+            logger.warn('Error in NVR Native event forwarder', e);
         }
+    }
+
+    async onSimpleEventHandler(ev: ReolinkSimpleEvent) {
+        this.forwardNativeEvent(ev);
     }
 
     async ensureBaichuanClient(): Promise<ReolinkBaichuanApi> {
@@ -379,15 +395,53 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
         this.eventSubscriptionActive = false;
     }
 
+    /**
+     * Reinitialize event subscriptions based on selected event source
+     */
+    private async reinitEventSubscriptions(): Promise<void> {
+        const logger = this.getLogger();
+        const { eventSource } = this.storageSettings.values;
+
+        // Unsubscribe from Native events if switching away
+        if (eventSource !== 'Native') {
+            await this.unsubscribeFromAllEvents();
+        } else {
+
+            this.subscribeToAllEvents().catch((e) => {
+                logger.warn('Failed to subscribe to Native events', e);
+            });
+        }
+
+        logger.log(`Event source set to: ${eventSource}`);
+    }
+
+    /**
+     * Forward events from CGI source to cameras
+     */
+    private forwardCgiEvents(eventsRes: Record<number, EventsResponse>): void {
+        const logger = this.getLogger();
+
+        if (this.storageSettings.values.debugEvents) {
+            logger.debug(`CGI Events call result: ${JSON.stringify(eventsRes)}`);
+        }
+
+        // Use channel map for efficient lookup
+        for (const [channel, nativeId] of this.channelToNativeIdMap.entries()) {
+            const targetCamera = nativeId ? this.cameraNativeMap.get(nativeId) : undefined;
+            const cameraEventsData = eventsRes[channel];
+            if (cameraEventsData && targetCamera) {
+                targetCamera.processEvents(cameraEventsData);
+            }
+        }
+    }
+
     async init() {
         const api = await this.ensureClient();
         const logger = this.getLogger();
         await this.updateDeviceInfo();
 
-        // Subscribe to events for all cameras
-        this.subscribeToAllEvents().catch((e) => {
-            logger.warn('Failed to subscribe to events during init', e);
-        });
+        // Initialize event subscriptions based on selected source
+        await this.reinitEventSubscriptions();
 
         setInterval(async () => {
             if (this.processing || !api) {
@@ -415,21 +469,14 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
                     await this.discoverDevices(true);
                 }
 
-                const eventsRes = await api.getAllChannelsEvents();
-
-                if (this.storageSettings.values.debugEvents) {
-                    logger.debug(`Events call result: ${JSON.stringify(eventsRes)}`);
+                // Only fetch and forward CGI events if CGI is selected as event source
+                const { eventSource } = this.storageSettings.values;
+                if (eventSource === 'CGI') {
+                    const eventsRes = await api.getAllChannelsEvents();
+                    this.forwardCgiEvents(eventsRes.parsed);
                 }
-                this.cameraNativeMap.forEach((camera) => {
-                    if (camera) {
-                        const channel = camera.storageSettings.values.rtspChannel;
-                        const cameraEventsData = eventsRes?.parsed[channel];
-                        if (cameraEventsData) {
-                            camera.processEvents(cameraEventsData);
-                        }
-                    }
-                });
 
+                // Always fetch battery info (not event-related)
                 const { batteryInfoData, response } = await api.getAllChannelsBatteryInfo();
 
                 if (this.storageSettings.values.debugEvents) {
@@ -559,6 +606,8 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
                         serialNumber: uid,
                     }
                 };
+
+                this.channelToNativeIdMap.set(channel, nativeId);
 
                 if (sdk.deviceManager.getNativeIds().includes(nativeId)) {
                     continue;
