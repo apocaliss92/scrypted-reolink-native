@@ -36,10 +36,15 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
     }
 
     async takePicture(options?: RequestPictureOptions): Promise<MediaObject> {
-        // const { snapshotCacheMinutes = 5 } = this.storageSettings.values;
-        // const cacheMs = snapshotCacheMinutes * 60_000;
-        // if (!this.forceNewSnapshot && cacheMs > 0 && this.lastPicture && Date.now() - this.lastPicture.atMs < cacheMs) {
-        if (!this.forceNewSnapshot && this.lastPicture) {
+        // Allow new snapshot if:
+        // 1. forceNewSnapshot is true, OR
+        // 2. Camera is awake AND last snapshot was taken at least 10 seconds ago
+        const minSnapshotIntervalMs = 10_000; // 10 seconds
+        const now = Date.now();
+        const shouldTakeNewSnapshot = this.forceNewSnapshot || 
+            (!this.sleeping && this.lastPicture && (now - this.lastPicture.atMs >= minSnapshotIntervalMs));
+
+        if (!shouldTakeNewSnapshot && this.lastPicture) {
             this.console.log(`Returning cached snapshot, taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
             return this.lastPicture.mo;
         }

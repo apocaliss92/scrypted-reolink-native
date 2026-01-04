@@ -209,7 +209,7 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
         try {
             return this.withBaichuanRetry(async () => {
                 const client = await this.ensureClient();
-                const snapshotBuffer = await client.getSnapshot();
+                const snapshotBuffer = await client.getSnapshot(this.storageSettings.values.rtspChannel);
                 const mo = await this.createMediaObject(snapshotBuffer, 'image/jpeg');
 
                 return mo;

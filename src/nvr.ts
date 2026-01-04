@@ -1,4 +1,4 @@
-import type { DeviceInfoResponse, DeviceInputData, ReolinkCgiApi } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { DeviceInfoResponse, DeviceInputData, ReolinkBaichuanApi, ReolinkCgiApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { AdoptDevice, Device, DeviceDiscovery, DeviceProvider, DiscoveredDevice, Reboot, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, SettingValue } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import { ReolinkNativeCamera } from "./camera";
@@ -34,6 +34,8 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
     });
     plugin: ReolinkNativePlugin;
     nvrApi: ReolinkCgiApi | undefined;
+    baichuanApi: ReolinkBaichuanApi | undefined;
+    baichuanApiPromise: Promise<ReolinkBaichuanApi> | undefined;
     discoveredDevices = new Map<string, {
         device: Device;
         description: string;
@@ -45,6 +47,14 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
     lastDevicesStatusCheck: number | undefined;
     cameraNativeMap = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera>();
     processing = false;
+    private eventSubscriptionActive = false;
+    private onSimpleEventHandler?: (ev: ReolinkSimpleEvent) => void;
+    private closeListener?: () => void;
+    private errorListener?: (err: unknown) => void;
+    private lastDisconnectTime: number = 0;
+    private lastErrorBeforeClose: { error: string; timestamp: number } | undefined;
+    private readonly reconnectBackoffMs: number = 2000; // 2 seconds minimum between reconnects
+    private resubscribeTimeout?: NodeJS.Timeout;
 
     constructor(nativeId: string, plugin: ReolinkNativePlugin) {
         super(nativeId);
@@ -73,6 +83,49 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
             }
         }
         this.nvrApi = undefined;
+
+        // Clear any pending resubscribe timeout
+        if (this.resubscribeTimeout) {
+            clearTimeout(this.resubscribeTimeout);
+            this.resubscribeTimeout = undefined;
+        }
+
+        // Unsubscribe from events first
+        await this.unsubscribeFromAllEvents();
+
+        if (this.baichuanApi) {
+            // Remove close listener
+            if (this.closeListener) {
+                try {
+                    this.baichuanApi.client.off("close", this.closeListener);
+                }
+                catch {
+                    // ignore
+                }
+                this.closeListener = undefined;
+            }
+            
+            // Remove error listener
+            if (this.errorListener) {
+                try {
+                    this.baichuanApi.client.off("error", this.errorListener);
+                }
+                catch {
+                    // ignore
+                }
+                this.errorListener = undefined;
+            }
+
+            try {
+                if (this.baichuanApi.client.isSocketConnected()) {
+                    await this.baichuanApi.close();
+                }
+            } catch {
+                // ignore
+            }
+        }
+        this.baichuanApi = undefined;
+        this.baichuanApiPromise = undefined;
     }
 
     async ensureClient(): Promise<ReolinkCgiApi> {
@@ -96,10 +149,372 @@ export class ReolinkNativeNvrDevice extends ScryptedDeviceBase implements Settin
         return this.nvrApi;
     }
 
+    async ensureBaichuanClient(): Promise<ReolinkBaichuanApi> {
+        // Reuse existing client if socket is still connected and logged in
+        if (this.baichuanApi && this.baichuanApi.client.isSocketConnected() && this.baichuanApi.client.loggedIn) {
+            return this.baichuanApi;
+        }
+
+        // Prevent concurrent login storms
+        if (this.baichuanApiPromise) return await this.baichuanApiPromise;
+
+        this.baichuanApiPromise = (async () => {
+            const { ipAddress, username, password } = this.storageSettings.values;
+            if (!ipAddress || !username || !password) {
+                throw new Error('Missing NVR credentials');
+            }
+
+            // Clean up old client if exists
+            if (this.baichuanApi) {
+                // Remove close listener from old client
+                if (this.closeListener) {
+                    try {
+                        this.baichuanApi.client.off("close", this.closeListener);
+                    }
+                    catch {
+                        // ignore
+                    }
+                    this.closeListener = undefined;
+                }
+                
+                // Remove error listener from old client
+                if (this.errorListener) {
+                    try {
+                        this.baichuanApi.client.off("error", this.errorListener);
+                    }
+                    catch {
+                        // ignore
+                    }
+                    this.errorListener = undefined;
+                }
+
+                try {
+                    if (this.baichuanApi.client.isSocketConnected()) {
+                        await this.baichuanApi.close();
+                    }
+                }
+                catch {
+                    // ignore
+                }
+            }
+
+            // Create new Baichuan client
+            const { ReolinkBaichuanApi } = await import("@apocaliss92/reolink-baichuan-js");
+            this.baichuanApi = new ReolinkBaichuanApi({
+                host: ipAddress,
+                username,
+                password,
+                transport: 'tcp',
+                logger: this.getLogger(),
+                // rebootAfterDisconnectionsPerMinute: 5,
+            });
+
+            await this.baichuanApi.login();
+
+            // Verify socket is connected before returning
+            if (!this.baichuanApi.client.isSocketConnected()) {
+                throw new Error('Socket not connected after login');
+            }
+
+            // Listen for errors to understand why socket might close
+            this.errorListener = (err: unknown) => {
+                const logger = this.getLogger();
+                const msg = (err as any)?.message || (err as any)?.toString?.() || String(err);
+                
+                // Store last error before close
+                this.lastErrorBeforeClose = {
+                    error: msg,
+                    timestamp: Date.now()
+                };
+
+                // Only log if it's not a recoverable error to avoid spam
+                if (typeof msg === 'string' && (
+                    msg.includes('Baichuan socket closed') ||
+                    msg.includes('Baichuan UDP stream closed') ||
+                    msg.includes('Not running')
+                )) {
+                    // Log even recoverable errors for debugging
+                    logger.debug(`[NVR BaichuanClient] error (recoverable): ${msg}`);
+                    return;
+                }
+                logger.error(`[NVR BaichuanClient] error: ${msg}`);
+            };
+            this.baichuanApi.client.on("error", this.errorListener);
+
+            // Listen for socket disconnection to reset client state
+            this.closeListener = () => {
+                const logger = this.getLogger();
+                const now = Date.now();
+                const timeSinceLastDisconnect = now - this.lastDisconnectTime;
+                this.lastDisconnectTime = now;
+
+                // Log detailed information about the close
+                const errorInfo = this.lastErrorBeforeClose 
+                    ? ` (last error: ${this.lastErrorBeforeClose.error} at ${new Date(this.lastErrorBeforeClose.timestamp).toISOString()}, ${now - this.lastErrorBeforeClose.timestamp}ms before close)`
+                    : '';
+                
+                logger.log(`[NVR BaichuanClient] Socket closed, resetting client state (last disconnect ${timeSinceLastDisconnect}ms ago)${errorInfo}`);
+                
+                // Log connection state before close
+                try {
+                    const wasConnected = this.baichuanApi?.client.isSocketConnected();
+                    const wasLoggedIn = this.baichuanApi?.client.loggedIn;
+                    logger.log(`[NVR BaichuanClient] Connection state before close: connected=${wasConnected}, loggedIn=${wasLoggedIn}`);
+                    
+                    // Try to get last message info if available
+                    const client = this.baichuanApi?.client as any;
+                    if (client?.lastRx || client?.lastTx) {
+                        logger.log(`[NVR BaichuanClient] Last message info: lastRx=${JSON.stringify(client.lastRx)}, lastTx=${JSON.stringify(client.lastTx)}`);
+                    }
+                }
+                catch (e) {
+                    logger.debug(`[NVR BaichuanClient] Could not get connection state: ${e}`);
+                }
+                
+                // Clear any pending resubscribe timeout
+                if (this.resubscribeTimeout) {
+                    clearTimeout(this.resubscribeTimeout);
+                    this.resubscribeTimeout = undefined;
+                }
+
+                const wasSubscribed = this.eventSubscriptionActive;
+                const api = this.baichuanApi; // Save reference before clearing
+                
+                // Reset state
+                this.baichuanApi = undefined;
+                this.baichuanApiPromise = undefined;
+                this.eventSubscriptionActive = false;
+                this.onSimpleEventHandler = undefined;
+                
+                // Remove event handler from closed client
+                if (api && this.onSimpleEventHandler) {
+                    try {
+                        api.offSimpleEvent(this.onSimpleEventHandler);
+                    }
+                    catch {
+                        // ignore
+                    }
+                }
+                
+                // Remove close listener (it will be re-added on next connection)
+                if (api && this.closeListener) {
+                    try {
+                        api.client.off("close", this.closeListener);
+                    }
+                    catch {
+                        // ignore
+                    }
+                }
+                
+                // Remove error listener
+                if (api && this.errorListener) {
+                    try {
+                        api.client.off("error", this.errorListener);
+                    }
+                    catch {
+                        // ignore
+                    }
+                }
+                
+                this.closeListener = undefined;
+                this.errorListener = undefined;
+                this.lastErrorBeforeClose = undefined;
+                
+                // Try to resubscribe when connection is restored (async, don't block)
+                // Only if we had an active subscription and enough time has passed
+                if (wasSubscribed && timeSinceLastDisconnect >= this.reconnectBackoffMs) {
+                    this.resubscribeTimeout = setTimeout(async () => {
+                        this.resubscribeTimeout = undefined;
+                        try {
+                            await this.subscribeToAllEvents();
+                        }
+                        catch (e) {
+                            logger.warn('Failed to resubscribe to events after reconnection', e);
+                        }
+                    }, this.reconnectBackoffMs); // Wait for backoff period before resubscribing
+                }
+            };
+            this.baichuanApi.client.on("close", this.closeListener);
+
+            return this.baichuanApi;
+        })();
+
+        try {
+            return await this.baichuanApiPromise;
+        }
+        finally {
+            // Allow future reconnects and avoid pinning rejected promises
+            this.baichuanApiPromise = undefined;
+        }
+    }
+
+    async subscribeToAllEvents(): Promise<void> {
+        const logger = this.getLogger();
+        
+        // Apply backoff to avoid aggressive reconnection after disconnection
+        // if (this.lastDisconnectTime > 0) {
+        //     const timeSinceDisconnect = Date.now() - this.lastDisconnectTime;
+        //     if (timeSinceDisconnect < this.reconnectBackoffMs) {
+        //         const waitTime = this.reconnectBackoffMs - timeSinceDisconnect;
+        //         logger.log(`[NVR] Waiting ${waitTime}ms before subscribing to events (backoff)`);
+        //         await new Promise(resolve => setTimeout(resolve, waitTime));
+        //     }
+        // }
+
+        // If already subscribed, return
+        if (this.eventSubscriptionActive && this.onSimpleEventHandler && this.baichuanApi) {
+            // Verify connection is still valid
+            if (this.baichuanApi.client.isSocketConnected() && this.baichuanApi.client.loggedIn) {
+                logger.log('Event subscription already active');
+                return;
+            }
+            // Connection is invalid, unsubscribe first
+            try {
+                this.baichuanApi.offSimpleEvent(this.onSimpleEventHandler);
+            }
+            catch {
+                // ignore
+            }
+            this.eventSubscriptionActive = false;
+            this.onSimpleEventHandler = undefined;
+        }
+
+        // Unsubscribe first if handler exists
+        if (this.onSimpleEventHandler && this.baichuanApi) {
+            try {
+                this.baichuanApi.offSimpleEvent(this.onSimpleEventHandler);
+            }
+            catch {
+                // ignore
+            }
+        }
+
+        // Get Baichuan client connection
+        const api = await this.ensureBaichuanClient();
+        
+        // Verify connection is ready
+        if (!api.client.isSocketConnected() || !api.client.loggedIn) {
+            logger.warn('Cannot subscribe to events: connection not ready');
+            return;
+        }
+
+        // Create event handler that distributes events to cameras
+        this.onSimpleEventHandler = (ev: ReolinkSimpleEvent) => {
+            try {
+                if (this.storageSettings.values.debugEvents) {
+                    logger.log(`NVR Baichuan event: ${JSON.stringify(ev)}`);
+                }
+
+                // Find camera for this channel
+                const channel = ev?.channel;
+                if (channel === undefined) {
+                    if (this.storageSettings.values.debugEvents) {
+                        logger.debug('Event has no channel, ignoring');
+                    }
+                    return;
+                }
+
+                // Find camera with matching channel
+                let targetCamera: ReolinkNativeCamera | ReolinkNativeBatteryCamera | undefined;
+                for (const camera of this.cameraNativeMap.values()) {
+                    if (camera && camera.storageSettings.values.rtspChannel === channel) {
+                        targetCamera = camera;
+                        break;
+                    }
+                }
+
+                if (!targetCamera) {
+                    if (this.storageSettings.values.debugEvents) {
+                        logger.debug(`No camera found for channel ${channel}, ignoring event`);
+                    }
+                    return;
+                }
+
+                // Convert event to camera's processEvents format
+                const objects: string[] = [];
+                let motion = false;
+
+                switch (ev?.type) {
+                    case 'motion':
+                        motion = true;
+                        break;
+                    case 'doorbell':
+                        // Handle doorbell if camera supports it
+                        try {
+                            if (typeof (targetCamera as any).handleDoorbellEvent === 'function') {
+                                (targetCamera as any).handleDoorbellEvent();
+                            }
+                        }
+                        catch (e) {
+                            logger.warn(`Error handling doorbell event for camera channel ${channel}`, e);
+                        }
+                        motion = true;
+                        break;
+                    case 'people':
+                    case 'vehicle':
+                    case 'animal':
+                    case 'face':
+                    case 'package':
+                    case 'other':
+                        objects.push(ev.type);
+                        motion = true;
+                        break;
+                    default:
+                        if (this.storageSettings.values.debugEvents) {
+                            logger.debug(`Unknown event type: ${ev?.type}`);
+                        }
+                        return;
+                }
+
+                // Process events on the target camera
+                targetCamera.processEvents({ motion, objects }).catch((e) => {
+                    logger.warn(`Error processing events for camera channel ${channel}`, e);
+                });
+            }
+            catch (e) {
+                logger.warn('Error in NVR onSimpleEvent handler', e);
+            }
+        };
+
+        // Subscribe to events
+        try {
+            await api.onSimpleEvent(this.onSimpleEventHandler);
+            this.eventSubscriptionActive = true;
+            logger.log('Subscribed to all events for NVR cameras');
+        }
+        catch (e) {
+            logger.warn('Failed to subscribe to events', e);
+            this.eventSubscriptionActive = false;
+            this.onSimpleEventHandler = undefined;
+        }
+    }
+
+    async unsubscribeFromAllEvents(): Promise<void> {
+        const logger = this.getLogger();
+        
+        if (this.onSimpleEventHandler && this.baichuanApi) {
+            try {
+                this.baichuanApi.offSimpleEvent(this.onSimpleEventHandler);
+                logger.log('Unsubscribed from all events');
+            }
+            catch (e) {
+                logger.warn('Error unsubscribing from events', e);
+            }
+        }
+        
+        this.eventSubscriptionActive = false;
+        this.onSimpleEventHandler = undefined;
+    }
+
     async init() {
         const api = await this.ensureClient();
         const logger = this.getLogger();
         await this.updateDeviceInfo();
+
+        // Subscribe to events for all cameras
+        this.subscribeToAllEvents().catch((e) => {
+            logger.warn('Failed to subscribe to events during init', e);
+        });
 
         setInterval(async () => {
             if (this.processing || !api) {

@@ -487,6 +487,8 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     protected ensureClientPromise: Promise<ReolinkBaichuanApi> | undefined;
     protected connectionTime: number | undefined;
     private closeListener?: () => void;
+    private lastDisconnectTime: number = 0;
+    private readonly reconnectBackoffMs: number = 2000; // 2 seconds minimum between reconnects
     protected readonly protocol: BaichuanTransport;
     private debugLogsResetTimeout: NodeJS.Timeout | undefined;
 
@@ -1329,6 +1331,12 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
     // Client management
     async ensureClient(): Promise<ReolinkBaichuanApi> {
+        // If camera is connected to NVR, use NVR's shared Baichuan connection
+        if (this.nvrDevice) {
+            const logger = this.getLogger();
+            return await this.nvrDevice.ensureBaichuanClient();
+        }
+
         // Reuse existing client if socket is still connected and logged in
         if (this.baichuanApi && this.baichuanApi.client.isSocketConnected() && this.baichuanApi.client.loggedIn) {
             return this.baichuanApi;
@@ -1336,6 +1344,17 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
         // Prevent concurrent login storms
         if (this.ensureClientPromise) return await this.ensureClientPromise;
+
+        // Apply backoff to avoid aggressive reconnection after disconnection
+        if (this.lastDisconnectTime > 0) {
+            const timeSinceDisconnect = Date.now() - this.lastDisconnectTime;
+            if (timeSinceDisconnect < this.reconnectBackoffMs) {
+                const waitTime = this.reconnectBackoffMs - timeSinceDisconnect;
+                const logger = this.getLogger();
+                logger.log(`[BaichuanClient] Waiting ${waitTime}ms before reconnection (backoff)`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+            }
+        }
 
         this.ensureClientPromise = (async () => {
             const { ipAddress, username, password, uid } = this.storageSettings.values;
@@ -1355,11 +1374,8 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
                 const isConnected = this.baichuanApi.client.isSocketConnected();
                 if (!isConnected) {
-                    // Socket is closed, clean up
                     try {
-                        if (this.onSimpleEvent) {
-                            this.baichuanApi.offSimpleEvent(this.onSimpleEvent);
-                        }
+                        this.baichuanApi.offSimpleEvent(this.onSimpleEvent);
                     }
                     catch {
                         // ignore
@@ -1425,21 +1441,45 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             this.closeListener = () => {
                 const logger = this.getLogger();
                 if (this.baichuanApi === api) {
-                    logger.log(`[BaichuanClient] Socket closed, resetting client state for reconnection`);
+                    const now = Date.now();
+                    const timeSinceLastDisconnect = now - this.lastDisconnectTime;
+                    this.lastDisconnectTime = now;
+
+                    logger.log(`[BaichuanClient] Socket closed, resetting client state for reconnection (last disconnect ${timeSinceLastDisconnect}ms ago)`);
+
+                    // Reset client state
                     this.baichuanApi = undefined;
                     this.ensureClientPromise = undefined;
                     this.closeListener = undefined;
+
+                    // Remove event handler to prevent operations during reconnection
+                    try {
+                        if (this.onSimpleEvent) {
+                            api.offSimpleEvent(this.onSimpleEvent);
+                        }
+                    }
+                    catch {
+                        // ignore
+                    }
                 }
             };
             api.client.on("close", this.closeListener);
 
             // Re-attach event handler if enabled
+            // Note: We don't reattach here immediately to avoid operations being called
+            // during reconnection. subscribeToEvents() will be called when needed.
+            // However, if events were already subscribed, we need to reattach them.
+            // We'll let subscribeToEvents() handle this, but we can also try here if needed.
             if (this.isEventDispatchEnabled?.() && this.onSimpleEvent) {
                 try {
-                    api.onSimpleEvent(this.onSimpleEvent);
+                    // Verify connection is fully ready before subscribing
+                    if (api.client.isSocketConnected() && api.client.loggedIn) {
+                        api.onSimpleEvent(this.onSimpleEvent);
+                    }
                 }
-                catch {
-                    // ignore
+                catch (e) {
+                    const logger = this.getLogger();
+                    logger.warn(`[BaichuanClient] Failed to reattach event handler after reconnection, will retry via subscribeToEvents()`, e);
                 }
             }
             return api;
