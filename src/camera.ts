@@ -1,4 +1,4 @@
-import type { DebugOptions, ReolinkBaichuanApi } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { ReolinkBaichuanApi } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { MediaObject, ObjectsDetected, RequestPictureOptions, ResponsePictureOptions, ScryptedInterface, Setting } from "@scrypted/sdk";
 import { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import {
@@ -6,10 +6,6 @@ import {
 } from "./common";
 import { createBaichuanApi } from './connect';
 import ReolinkNativePlugin from "./main";
-import {
-    buildVideoStreamOptionsFromRtspRtmp,
-    fetchVideoStreamOptionsFromApi
-} from './stream-utils';
 
 export const moToB64 = async (mo: MediaObject) => {
     const bufferImage = await sdk.mediaManager.convertMediaObjectToBuffer(mo, 'image/jpeg');

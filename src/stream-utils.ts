@@ -1,7 +1,7 @@
 import type {
     ReolinkBaichuanApi,
-    StreamProfile,
     ScryptedRfc4571TcpServer,
+    StreamProfile,
     VideoType,
 } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 
@@ -97,7 +97,7 @@ export async function fetchVideoStreamOptionsFromApi(
     return streams;
 }
 
-export async function buildVideoStreamOptionsFromRtspRtmp(
+export async function buildVideoStreamOptions(
     props: {
         client: ReolinkBaichuanApi,
         ipAddress: string,

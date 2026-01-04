@@ -10,7 +10,7 @@ import ReolinkNativePlugin from "./main";
 import { ReolinkNativeNvrDevice } from "./nvr";
 import { ReolinkPtzPresets } from "./presets";
 import {
-    buildVideoStreamOptionsFromRtspRtmp,
+    buildVideoStreamOptions,
     createRfc4571MediaObjectFromStreamManager,
     expectedVideoTypeFromUrlMediaStreamOptions,
     isNativeStreamId,
@@ -1278,7 +1278,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         const client = await this.ensureClient();
 
-        const { ipAddress, rtspChannel, isFromNvr } = this.storageSettings.values;
+        const { ipAddress, rtspChannel } = this.storageSettings.values;
 
         try {
             await this.ensureNetPortCache();
@@ -1289,7 +1289,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
 
         try {
-            streams = await buildVideoStreamOptionsFromRtspRtmp(
+            streams = await buildVideoStreamOptions(
                 {
                     client,
                     ipAddress,
