@@ -3,7 +3,7 @@ import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { createBaichuanApi, normalizeUid, type BaichuanTransport } from "./connect";
-import { convertDebugLogsToApiOptions, DebugLogOption, getApiRelevantDebugLogs, getDebugLogChoices } from "./debug-options";
+import { convertDebugLogsToApiOptions, DebugLogDisplayNames, DebugLogOption, getApiRelevantDebugLogs, getDebugLogChoices } from "./debug-options";
 import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
 import { ReolinkNativeNvrDevice } from "./nvr";
@@ -486,6 +486,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     protected baichuanApi: ReolinkBaichuanApi | undefined;
     protected ensureClientPromise: Promise<ReolinkBaichuanApi> | undefined;
     protected connectionTime: number | undefined;
+    private closeListener?: () => void;
     protected readonly protocol: BaichuanTransport;
     private debugLogsResetTimeout: NodeJS.Timeout | undefined;
 
@@ -877,7 +878,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
     isEventLogsEnabled(): boolean {
         const debugLogs = this.storageSettings.values.debugLogs || [];
-        return debugLogs.includes(DebugLogOption.EventLogs);
+        return debugLogs.includes(DebugLogDisplayNames[DebugLogOption.EventLogs]);
     }
 
     // BinarySensor interface implementation (for doorbell)
@@ -1341,6 +1342,17 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
             // Only tear down previous session if it exists and is not connected
             if (this.baichuanApi) {
+                // Remove close listener from old client
+                if (this.closeListener) {
+                    try {
+                        this.baichuanApi.client.off("close", this.closeListener);
+                    }
+                    catch {
+                        // ignore
+                    }
+                    this.closeListener = undefined;
+                }
+
                 const isConnected = this.baichuanApi.client.isSocketConnected();
                 if (!isConnected) {
                     // Socket is closed, clean up
@@ -1407,6 +1419,19 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
             this.baichuanApi = api;
             this.connectionTime = Date.now();
+
+            // Listen for socket disconnection to reset client state
+            // This ensures ensureClient() will create a new connection on next call
+            this.closeListener = () => {
+                const logger = this.getLogger();
+                if (this.baichuanApi === api) {
+                    logger.log(`[BaichuanClient] Socket closed, resetting client state for reconnection`);
+                    this.baichuanApi = undefined;
+                    this.ensureClientPromise = undefined;
+                    this.closeListener = undefined;
+                }
+            };
+            api.client.on("close", this.closeListener);
 
             // Re-attach event handler if enabled
             if (this.isEventDispatchEnabled?.() && this.onSimpleEvent) {
