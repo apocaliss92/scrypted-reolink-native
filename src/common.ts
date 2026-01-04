@@ -2,6 +2,7 @@ import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, Reo
 import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
+import { BaseBaichuanClass, type BaichuanConnectionConfig, type BaichuanConnectionCallbacks } from "./baichuan-base";
 import { createBaichuanApi, normalizeUid, type BaichuanTransport } from "./connect";
 import { convertDebugLogsToApiOptions, DebugLogDisplayNames, DebugLogOption, getApiRelevantDebugLogs, getDebugLogChoices } from "./debug-options";
 import { ReolinkBaichuanIntercom } from "./intercom";
@@ -185,7 +186,7 @@ class ReolinkCameraPirSensor extends ScryptedDeviceBase implements OnOff, Settin
     }
 }
 
-export abstract class CommonCameraMixin extends ScryptedDeviceBase implements VideoCamera, Camera, Settings, DeviceProvider, ObjectDetector, PanTiltZoom, VideoTextOverlays, BinarySensor, Intercom {
+export abstract class CommonCameraMixin extends BaseBaichuanClass implements VideoCamera, Camera, Settings, DeviceProvider, ObjectDetector, PanTiltZoom, VideoTextOverlays, BinarySensor, Intercom {
     storageSettings = new StorageSettings(this, {
         // Basic connection settings
         ipAddress: {
@@ -482,13 +483,7 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
     protected lastNetPortCacheAttempt: number = 0;
     protected netPortCacheBackoffMs: number = 5000; // 5 seconds backoff on failure
 
-    // Client management
-    protected baichuanApi: ReolinkBaichuanApi | undefined;
-    protected ensureClientPromise: Promise<ReolinkBaichuanApi> | undefined;
-    protected connectionTime: number | undefined;
-    private closeListener?: () => void;
-    private lastDisconnectTime: number = 0;
-    private readonly reconnectBackoffMs: number = 2000; // 2 seconds minimum between reconnects
+    // Client management (inherited from BaseBaichuanClass)
     protected readonly protocol: BaichuanTransport;
     private debugLogsResetTimeout: NodeJS.Timeout | undefined;
 
@@ -516,16 +511,61 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             await this.parentInit();
         }, 2000);
     }
+
+    // BaseBaichuanClass abstract methods implementation
+    protected getConnectionConfig(): BaichuanConnectionConfig {
+        const { ipAddress, username, password, uid } = this.storageSettings.values;
+        const debugOptions = this.getBaichuanDebugOptions();
+        const normalizedUid = this.protocol === 'udp' ? normalizeUid(uid) : undefined;
+
+        if (this.protocol === 'udp' && !normalizedUid) {
+            throw new Error('UID is required for battery cameras (BCUDP)');
+        }
+
+        return {
+            host: ipAddress,
+            username,
+            password,
+            uid: normalizedUid,
+            transport: this.protocol,
+            logger: this.console,
+            debugOptions,
+        };
+    }
+
+    protected getConnectionCallbacks(): BaichuanConnectionCallbacks {
+        return {
+            onError: undefined, // Use default error handling
+            onClose: async () => {
+                // Reset client state on close
+                // The base class already handles cleanup
+            },
+            onSimpleEvent: this.onSimpleEvent,
+            getEventSubscriptionEnabled: () => this.isEventDispatchEnabled?.() ?? false,
+        };
+    }
+
+    public getLogger(): Console {
+        return this.console;
+    }
+
+    protected async onBeforeCleanup(): Promise<void> {
+        // Unsubscribe from events if needed
+        if (this.onSimpleEvent && this.baichuanApi) {
+            try {
+                this.baichuanApi.offSimpleEvent(this.onSimpleEvent);
+            }
+            catch {
+                // ignore
+            }
+        }
+    }
     createStreamClient(): Promise<ReolinkBaichuanApi> {
         throw new Error("Method not implemented.");
     }
 
     public getAbilities(): DeviceCapabilities {
         return this.storageSettings.values.capabilities;
-    }
-
-    getLogger(): Console {
-        return this.console;
     }
 
     getBaichuanDebugOptions(): any | undefined {
@@ -557,14 +597,10 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
 
     // Event subscription methods
     unsubscribedToEvents(): void {
-        const api = (this as any).baichuanApi;
-        if (!api) return;
-        try {
-            api.offSimpleEvent(this.onSimpleEvent);
-        }
-        catch {
+        // Use base class unsubscribe
+        this.unsubscribeFromEvents().catch(() => {
             // ignore
-        }
+        });
 
         if (this.motionDetected) {
             this.motionDetected = false;
@@ -1336,161 +1372,8 @@ export abstract class CommonCameraMixin extends ScryptedDeviceBase implements Vi
             return await this.nvrDevice.ensureBaichuanClient();
         }
 
-        // Reuse existing client if socket is still connected and logged in
-        if (this.baichuanApi && this.baichuanApi.client.isSocketConnected() && this.baichuanApi.client.loggedIn) {
-            return this.baichuanApi;
-        }
-
-        // Prevent concurrent login storms
-        if (this.ensureClientPromise) return await this.ensureClientPromise;
-
-        // Apply backoff to avoid aggressive reconnection after disconnection
-        if (this.lastDisconnectTime > 0) {
-            const timeSinceDisconnect = Date.now() - this.lastDisconnectTime;
-            if (timeSinceDisconnect < this.reconnectBackoffMs) {
-                const waitTime = this.reconnectBackoffMs - timeSinceDisconnect;
-                const logger = this.getLogger();
-                logger.log(`[BaichuanClient] Waiting ${waitTime}ms before reconnection (backoff)`);
-                await new Promise(resolve => setTimeout(resolve, waitTime));
-            }
-        }
-
-        this.ensureClientPromise = (async () => {
-            const { ipAddress, username, password, uid } = this.storageSettings.values;
-
-            // Only tear down previous session if it exists and is not connected
-            if (this.baichuanApi) {
-                // Remove close listener from old client
-                if (this.closeListener) {
-                    try {
-                        this.baichuanApi.client.off("close", this.closeListener);
-                    }
-                    catch {
-                        // ignore
-                    }
-                    this.closeListener = undefined;
-                }
-
-                const isConnected = this.baichuanApi.client.isSocketConnected();
-                if (!isConnected) {
-                    try {
-                        this.baichuanApi.offSimpleEvent(this.onSimpleEvent);
-                    }
-                    catch {
-                        // ignore
-                    }
-
-                    try {
-                        await this.baichuanApi.close();
-                    }
-                    catch {
-                        // ignore
-                    }
-                } else {
-                    // Socket is still connected, just re-attach event handler if needed
-                    if (this.isEventDispatchEnabled?.() && this.onSimpleEvent) {
-                        try {
-                            this.baichuanApi.offSimpleEvent(this.onSimpleEvent);
-                            this.baichuanApi.onSimpleEvent(this.onSimpleEvent);
-                        }
-                        catch {
-                            // ignore
-                        }
-                    }
-                    // Reuse existing client
-                    this.connectionTime = Date.now();
-                    return this.baichuanApi;
-                }
-            }
-
-            // Create new client
-            const debugOptions = this.getBaichuanDebugOptions();
-            const normalizedUid = this.protocol === 'udp' ? normalizeUid(uid) : undefined;
-
-            if (this.protocol === 'udp' && !normalizedUid) {
-                throw new Error('UID is required for battery cameras (BCUDP)');
-            }
-
-            const api = await createBaichuanApi(
-                {
-                    inputs: {
-                        host: ipAddress,
-                        username: username,
-                        password: password,
-                        uid: normalizedUid,
-                        logger: this.console,
-                        debugOptions,
-                    },
-                    transport: this.protocol,
-                    logger: this.console,
-                }
-            );
-            await api.login();
-
-            // Verify socket is connected before returning
-            if (!api.client.isSocketConnected()) {
-                throw new Error('Socket not connected after login');
-            }
-
-            this.baichuanApi = api;
-            this.connectionTime = Date.now();
-
-            // Listen for socket disconnection to reset client state
-            // This ensures ensureClient() will create a new connection on next call
-            this.closeListener = () => {
-                const logger = this.getLogger();
-                if (this.baichuanApi === api) {
-                    const now = Date.now();
-                    const timeSinceLastDisconnect = now - this.lastDisconnectTime;
-                    this.lastDisconnectTime = now;
-
-                    logger.log(`[BaichuanClient] Socket closed, resetting client state for reconnection (last disconnect ${timeSinceLastDisconnect}ms ago)`);
-
-                    // Reset client state
-                    this.baichuanApi = undefined;
-                    this.ensureClientPromise = undefined;
-                    this.closeListener = undefined;
-
-                    // Remove event handler to prevent operations during reconnection
-                    try {
-                        if (this.onSimpleEvent) {
-                            api.offSimpleEvent(this.onSimpleEvent);
-                        }
-                    }
-                    catch {
-                        // ignore
-                    }
-                }
-            };
-            api.client.on("close", this.closeListener);
-
-            // Re-attach event handler if enabled
-            // Note: We don't reattach here immediately to avoid operations being called
-            // during reconnection. subscribeToEvents() will be called when needed.
-            // However, if events were already subscribed, we need to reattach them.
-            // We'll let subscribeToEvents() handle this, but we can also try here if needed.
-            if (this.isEventDispatchEnabled?.() && this.onSimpleEvent) {
-                try {
-                    // Verify connection is fully ready before subscribing
-                    if (api.client.isSocketConnected() && api.client.loggedIn) {
-                        api.onSimpleEvent(this.onSimpleEvent);
-                    }
-                }
-                catch (e) {
-                    const logger = this.getLogger();
-                    logger.warn(`[BaichuanClient] Failed to reattach event handler after reconnection, will retry via subscribeToEvents()`, e);
-                }
-            }
-            return api;
-        })();
-
-        try {
-            return await this.ensureClientPromise;
-        }
-        finally {
-            // Allow future reconnects and avoid pinning rejected promises
-            this.ensureClientPromise = undefined;
-        }
+        // Use base class implementation
+        return await this.ensureBaichuanClient();
     }
 
     async credentialsChanged(): Promise<void> {
