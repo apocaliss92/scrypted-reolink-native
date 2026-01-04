@@ -45,7 +45,7 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
             await this.baichuanApi?.close();
         }
         catch (e) {
-            this.getLogger().warn('Error closing Baichuan client during reset', e);
+            this.getBaichuanLogger().warn('Error closing Baichuan client during reset', e);
         }
         finally {
             this.baichuanApi = undefined;
@@ -59,7 +59,7 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
 
         if (reason) {
             const message = reason?.message || reason?.toString?.() || reason;
-            this.getLogger().warn(`Baichuan client reset requested: ${message}`);
+            this.getBaichuanLogger().warn(`Baichuan client reset requested: ${message}`);
         }
     }
 
@@ -90,9 +90,6 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
         }
     }
 
-    public getLogger() {
-        return this.console;
-    }
 
     async init() {
         this.startPeriodicTasks();
@@ -141,13 +138,13 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
         if (this.periodicStarted) return;
         this.periodicStarted = true;
 
-        this.console.log('Starting periodic tasks for regular camera');
+        this.getBaichuanLogger().log('Starting periodic tasks for regular camera');
 
         this.statusPollTimer = setInterval(() => {
             this.periodic10sTick().catch(() => { });
         }, 10_000);
 
-        this.console.log('Periodic tasks started: status poll every 10s');
+        this.getBaichuanLogger().log('Periodic tasks started: status poll every 10s');
     }
 
     private async periodic10sTick(): Promise<void> {
@@ -160,7 +157,7 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
     }
 
     async processEvents(events: { motion?: boolean; objects?: string[] }) {
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
 
         if (!this.isEventDispatchEnabled()) return;
 
@@ -215,7 +212,7 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
                 return mo;
             });
         } catch (e) {
-            this.getLogger().error('Error taking snapshot', e);
+            this.getBaichuanLogger().error('Error taking snapshot', e);
             throw e;
         }
     }

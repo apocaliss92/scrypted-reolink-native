@@ -60,7 +60,7 @@ export function convertDebugLogsToApiOptions(debugLogs: string[]): DebugOptions 
         }
     }
 
-    console.log(debugLogs, apiOptions);
+    // Removed debug log that was causing "[] {}" output
     return Object.keys(apiOptions).length > 0 ? apiOptions : undefined;
 }
 

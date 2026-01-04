@@ -20,6 +20,145 @@ export interface BaichuanConnectionCallbacks {
 }
 
 /**
+ * Logger wrapper that adds device name, timestamp, and debug control
+ * Implements Console interface to be compatible with Baichuan API
+ */
+export class BaichuanLogger implements Console {
+    private baseLogger: Console;
+    private deviceName: string;
+    private isDebugEnabledCallback: () => boolean;
+
+    constructor(baseLogger: Console, deviceName: string, isDebugEnabledCallback: () => boolean) {
+        this.baseLogger = baseLogger;
+        this.deviceName = deviceName;
+        this.isDebugEnabledCallback = isDebugEnabledCallback;
+    }
+
+    private formatMessage(level: string, ...args: any[]): string {
+        const timestamp = new Date().toISOString();
+        const prefix = `[${this.deviceName}] [${timestamp}] [${level}]`;
+        return `${prefix} ${args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ')}`;
+    }
+
+    log(...args: any[]): void {
+        this.baseLogger.log(this.formatMessage('LOG', ...args));
+    }
+
+    error(...args: any[]): void {
+        this.baseLogger.error(this.formatMessage('ERROR', ...args));
+    }
+
+    warn(...args: any[]): void {
+        this.baseLogger.warn(this.formatMessage('WARN', ...args));
+    }
+
+    debug(...args: any[]): void {
+        if (this.isDebugEnabledCallback()) {
+            this.baseLogger.debug(this.formatMessage('DEBUG', ...args));
+        }
+    }
+
+    isDebugEnabled(): boolean {
+        return this.isDebugEnabledCallback();
+    }
+
+    // Console interface implementation - delegate to baseLogger
+    assert(condition?: boolean, ...data: any[]): void {
+        this.baseLogger.assert(condition, ...data);
+    }
+
+    clear(): void {
+        this.baseLogger.clear();
+    }
+
+    count(label?: string): void {
+        this.baseLogger.count(label);
+    }
+
+    countReset(label?: string): void {
+        this.baseLogger.countReset(label);
+    }
+
+    dir(item?: any, options?: any): void {
+        this.baseLogger.dir(item, options);
+    }
+
+    dirxml(...data: any[]): void {
+        this.baseLogger.dirxml(...data);
+    }
+
+    group(...data: any[]): void {
+        this.baseLogger.group(...data);
+    }
+
+    groupCollapsed(...data: any[]): void {
+        this.baseLogger.groupCollapsed(...data);
+    }
+
+    groupEnd(): void {
+        this.baseLogger.groupEnd();
+    }
+
+    info(...data: any[]): void {
+        this.baseLogger.info(this.formatMessage('INFO', ...data));
+    }
+
+    table(tabularData?: any, properties?: string[]): void {
+        this.baseLogger.table(tabularData, properties);
+    }
+
+    time(label?: string): void {
+        this.baseLogger.time(label);
+    }
+
+    timeEnd(label?: string): void {
+        this.baseLogger.timeEnd(label);
+    }
+
+    timeLog(label?: string, ...data: any[]): void {
+        this.baseLogger.timeLog(label, ...data);
+    }
+
+    trace(...data: any[]): void {
+        this.baseLogger.trace(...data);
+    }
+
+    // Console properties
+    get memory(): any {
+        return (this.baseLogger as any).memory;
+    }
+
+    get Console(): any {
+        return (this.baseLogger as any).Console;
+    }
+
+    // Node.js specific
+    profile(label?: string): void {
+        if (typeof (this.baseLogger as any).profile === 'function') {
+            (this.baseLogger as any).profile(label);
+        }
+    }
+
+    profileEnd(label?: string): void {
+        if (typeof (this.baseLogger as any).profileEnd === 'function') {
+            (this.baseLogger as any).profileEnd(label);
+        }
+    }
+
+    timeStamp(label?: string): void {
+        if (typeof (this.baseLogger as any).timeStamp === 'function') {
+            (this.baseLogger as any).timeStamp(label);
+        }
+    }
+
+    context(...data: any[]): void {
+        if (typeof (this.baseLogger as any).context === 'function') {
+            (this.baseLogger as any).context(...data);
+        }
+    }
+}
+
+/**
  * Base class for managing Baichuan API connections with automatic reconnection,
  * listener management, and event subscription handling.
  */
@@ -45,9 +184,22 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
     protected abstract getConnectionCallbacks(): BaichuanConnectionCallbacks;
 
     /**
-     * Get a logger instance
+     * Check if debug logging is enabled
      */
-    public abstract getLogger(): Console;
+    protected abstract isDebugEnabled(): boolean;
+
+    /**
+     * Get the device name for logging
+     */
+    protected abstract getDeviceName(): string;
+
+    /**
+     * Get a Baichuan logger instance with formatting and debug control
+     * This logger implements Console interface and can be used everywhere
+     */
+    public getBaichuanLogger(): BaichuanLogger {
+        return new BaichuanLogger(this.console, this.getDeviceName(), () => this.isDebugEnabled());
+    }
 
     /**
      * Cleanup any additional resources (called before closing connection)
@@ -73,8 +225,8 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             const timeSinceDisconnect = Date.now() - this.lastDisconnectTime;
             if (timeSinceDisconnect < this.reconnectBackoffMs) {
                 const waitTime = this.reconnectBackoffMs - timeSinceDisconnect;
-                const logger = this.getLogger();
-                logger.log(`[BaichuanClient] Waiting ${waitTime}ms before reconnection (backoff)`);
+                const logger = this.getBaichuanLogger();
+                logger.log(`Waiting ${waitTime}ms before reconnection (backoff)`);
                 await new Promise(resolve => setTimeout(resolve, waitTime));
             }
         }
@@ -88,17 +240,19 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             }
 
             // Create new Baichuan client
+            // BaichuanLogger implements Console, so it can be used directly
+            const logger = this.getBaichuanLogger();
             const api = await createBaichuanApi({
                 inputs: {
                     host: config.host,
                     username: config.username,
                     password: config.password,
                     uid: config.uid,
-                    logger: config.logger,
+                    logger: logger as Console,
                     debugOptions: config.debugOptions,
                 },
                 transport: config.transport,
-                logger: config.logger,
+                logger: logger as Console,
             });
 
             await api.login();
@@ -130,7 +284,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
      * Attach error and close listeners to Baichuan API
      */
     private attachBaichuanListeners(api: ReolinkBaichuanApi): void {
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
         const callbacks = this.getConnectionCallbacks();
 
         // Error listener
@@ -143,10 +297,10 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                 msg.includes('Baichuan UDP stream closed') ||
                 msg.includes('Not running')
             )) {
-                logger.debug(`[BaichuanClient] error (recoverable): ${msg}`);
+                logger.debug(`error (recoverable): ${msg}`);
                 return;
             }
-            logger.error(`[BaichuanClient] error: ${msg}`);
+            logger.error(`error: ${msg}`);
             
             // Call custom error handler if provided
             if (callbacks.onError) {
@@ -163,23 +317,23 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             try {
                 const wasConnected = api.client.isSocketConnected();
                 const wasLoggedIn = api.client.loggedIn;
-                logger.log(`[BaichuanClient] Connection state before close: connected=${wasConnected}, loggedIn=${wasLoggedIn}`);
+                logger.log(`Connection state before close: connected=${wasConnected}, loggedIn=${wasLoggedIn}`);
 
                 // Try to get last message info if available
                 const client = api.client as any;
                 if (client?.lastRx || client?.lastTx) {
-                    logger.log(`[BaichuanClient] Last message info: lastRx=${JSON.stringify(client.lastRx)}, lastTx=${JSON.stringify(client.lastTx)}`);
+                    logger.debug(`Last message info: lastRx=${JSON.stringify(client.lastRx)}, lastTx=${JSON.stringify(client.lastTx)}`);
                 }
             }
             catch (e) {
-                logger.debug(`[BaichuanClient] Could not get connection state: ${e}`);
+                logger.debug(`Could not get connection state: ${e}`);
             }
 
             const now = Date.now();
             const timeSinceLastDisconnect = now - this.lastDisconnectTime;
             this.lastDisconnectTime = now;
 
-            logger.log(`[BaichuanClient] Socket closed, resetting client state for reconnection (last disconnect ${timeSinceLastDisconnect}ms ago)`);
+            logger.log(`Socket closed, resetting client state for reconnection (last disconnect ${timeSinceLastDisconnect}ms ago)`);
 
             // Cleanup
             await this.cleanupBaichuanApi();
@@ -253,7 +407,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
      * Subscribe to Baichuan simple events
      */
     async subscribeToEvents(): Promise<void> {
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
         const callbacks = this.getConnectionCallbacks();
 
         if (!callbacks.onSimpleEvent) {
@@ -263,7 +417,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         // If already subscribed and connection is valid, return
         if (this.eventSubscriptionActive && this.baichuanApi) {
             if (this.baichuanApi.client.isSocketConnected() && this.baichuanApi.client.loggedIn) {
-                logger.log('Event subscription already active');
+                logger.debug('Event subscription already active');
                 return;
             }
             // Connection is invalid, reset subscription state
@@ -284,7 +438,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
 
         // Check if event subscription is enabled
         if (callbacks.getEventSubscriptionEnabled && !callbacks.getEventSubscriptionEnabled()) {
-            logger.log('Event subscription disabled');
+            logger.debug('Event subscription disabled');
             return;
         }
 
@@ -304,14 +458,14 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
      * Unsubscribe from Baichuan simple events
      */
     async unsubscribeFromEvents(): Promise<void> {
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
         const callbacks = this.getConnectionCallbacks();
 
         // Only unsubscribe if we have an active subscription
         if (this.eventSubscriptionActive && this.baichuanApi && callbacks.onSimpleEvent) {
             try {
                 this.baichuanApi.offSimpleEvent(callbacks.onSimpleEvent);
-                logger.log('Unsubscribed from Baichuan events');
+                logger.debug('Unsubscribed from Baichuan events');
             }
             catch (e) {
                 logger.warn('Error unsubscribing from events', e);

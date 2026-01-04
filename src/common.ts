@@ -33,27 +33,27 @@ class ReolinkCameraSiren extends ScryptedDeviceBase implements OnOff {
     }
 
     async turnOff(): Promise<void> {
-        this.camera.getLogger().log(`Siren toggle: turnOff (device=${this.nativeId})`);
+        this.camera.getBaichuanLogger().log(`Siren toggle: turnOff (device=${this.nativeId})`);
         this.on = false;
         try {
             await this.camera.setSirenEnabled(false);
-            this.camera.getLogger().log(`Siren toggle: turnOff ok (device=${this.nativeId})`);
+            this.camera.getBaichuanLogger().log(`Siren toggle: turnOff ok (device=${this.nativeId})`);
         }
         catch (e) {
-            this.camera.getLogger().warn(`Siren toggle: turnOff failed (device=${this.nativeId})`, e);
+            this.camera.getBaichuanLogger().warn(`Siren toggle: turnOff failed (device=${this.nativeId})`, e);
             throw e;
         }
     }
 
     async turnOn(): Promise<void> {
-        this.camera.getLogger().log(`Siren toggle: turnOn (device=${this.nativeId})`);
+        this.camera.getBaichuanLogger().log(`Siren toggle: turnOn (device=${this.nativeId})`);
         this.on = true;
         try {
             await this.camera.setSirenEnabled(true);
-            this.camera.getLogger().log(`Siren toggle: turnOn ok (device=${this.nativeId})`);
+            this.camera.getBaichuanLogger().log(`Siren toggle: turnOn ok (device=${this.nativeId})`);
         }
         catch (e) {
-            this.camera.getLogger().warn(`Siren toggle: turnOn failed (device=${this.nativeId})`, e);
+            this.camera.getBaichuanLogger().warn(`Siren toggle: turnOn failed (device=${this.nativeId})`, e);
             throw e;
         }
     }
@@ -65,40 +65,40 @@ class ReolinkCameraFloodlight extends ScryptedDeviceBase implements OnOff, Brigh
     }
 
     async setBrightness(brightness: number): Promise<void> {
-        this.camera.getLogger().log(`Floodlight toggle: setBrightness (device=${this.nativeId} brightness=${brightness})`);
+        this.camera.getBaichuanLogger().log(`Floodlight toggle: setBrightness (device=${this.nativeId} brightness=${brightness})`);
         this.brightness = brightness;
         try {
             await this.camera.setFloodlightState(undefined, brightness);
-            this.camera.getLogger().log(`Floodlight toggle: setBrightness ok (device=${this.nativeId} brightness=${brightness})`);
+            this.camera.getBaichuanLogger().log(`Floodlight toggle: setBrightness ok (device=${this.nativeId} brightness=${brightness})`);
         }
         catch (e) {
-            this.camera.getLogger().warn(`Floodlight toggle: setBrightness failed (device=${this.nativeId} brightness=${brightness})`, e);
+            this.camera.getBaichuanLogger().warn(`Floodlight toggle: setBrightness failed (device=${this.nativeId} brightness=${brightness})`, e);
             throw e;
         }
     }
 
     async turnOff(): Promise<void> {
-        this.camera.getLogger().log(`Floodlight toggle: turnOff (device=${this.nativeId})`);
+        this.camera.getBaichuanLogger().log(`Floodlight toggle: turnOff (device=${this.nativeId})`);
         this.on = false;
         try {
             await this.camera.setFloodlightState(false);
-            this.camera.getLogger().log(`Floodlight toggle: turnOff ok (device=${this.nativeId})`);
+            this.camera.getBaichuanLogger().log(`Floodlight toggle: turnOff ok (device=${this.nativeId})`);
         }
         catch (e) {
-            this.camera.getLogger().warn(`Floodlight toggle: turnOff failed (device=${this.nativeId})`, e);
+            this.camera.getBaichuanLogger().warn(`Floodlight toggle: turnOff failed (device=${this.nativeId})`, e);
             throw e;
         }
     }
 
     async turnOn(): Promise<void> {
-        this.camera.getLogger().log(`Floodlight toggle: turnOn (device=${this.nativeId})`);
+        this.camera.getBaichuanLogger().log(`Floodlight toggle: turnOn (device=${this.nativeId})`);
         this.on = true;
         try {
             await this.camera.setFloodlightState(true);
-            this.camera.getLogger().log(`Floodlight toggle: turnOn ok (device=${this.nativeId})`);
+            this.camera.getBaichuanLogger().log(`Floodlight toggle: turnOn ok (device=${this.nativeId})`);
         }
         catch (e) {
-            this.camera.getLogger().warn(`Floodlight toggle: turnOn failed (device=${this.nativeId})`, e);
+            this.camera.getBaichuanLogger().warn(`Floodlight toggle: turnOn failed (device=${this.nativeId})`, e);
             throw e;
         }
     }
@@ -303,7 +303,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                             // Trigger reconnection
                             await this.ensureClient();
                         } catch (e) {
-                            this.getLogger().warn('Failed to reset client after debug logs change', e);
+                            this.getBaichuanLogger().warn('Failed to reset client after debug logs change', e);
                         }
                     }, 2000);
                 }
@@ -387,7 +387,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     return;
                 }
 
-                const logger = this.getLogger();
+                const logger = this.getBaichuanLogger();
                 logger.log(`PTZ presets: create preset requested (name=${name})`);
 
                 const preset = await this.withBaichuanRetry(async () => {
@@ -428,7 +428,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     throw new Error('No preset selected');
                 }
 
-                const logger = this.getLogger();
+                const logger = this.getBaichuanLogger();
                 logger.log(`PTZ presets: update position requested (presetId=${presetId})`);
 
                 await this.withBaichuanRetry(async () => {
@@ -451,7 +451,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     throw new Error('No preset selected');
                 }
 
-                const logger = this.getLogger();
+                const logger = this.getBaichuanLogger();
                 logger.log(`PTZ presets: delete requested (presetId=${presetId})`);
 
                 await this.withBaichuanRetry(async () => {
@@ -545,8 +545,13 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         };
     }
 
-    public getLogger(): Console {
-        return this.console;
+
+    protected isDebugEnabled(): boolean {
+        return this.isEventLogsEnabled();
+    }
+
+    protected getDeviceName(): string {
+        return this.name || 'Camera';
     }
 
     protected async onBeforeCleanup(): Promise<void> {
@@ -609,24 +614,18 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
     onSimpleEvent = (ev: ReolinkSimpleEvent) => {
         try {
-            const logger = this.getLogger();
+            const logger = this.getBaichuanLogger();
 
-            if (this.isEventLogsEnabled()) {
-                logger.log(`Baichuan event: ${JSON.stringify(ev)}`);
-            }
+            logger.debug(`Baichuan event: ${JSON.stringify(ev)}`);
 
             if (!this.isEventDispatchEnabled()) {
-                if (this.isEventLogsEnabled()) {
-                    logger.debug('Event dispatch is disabled, ignoring event');
-                }
+                logger.debug('Event dispatch is disabled, ignoring event');
                 return;
             }
 
             const channel = this.storageSettings.values.rtspChannel;
             if (ev?.channel !== undefined && ev.channel !== channel) {
-                if (this.isEventLogsEnabled()) {
-                    logger.debug(`Event channel ${ev.channel} does not match camera channel ${channel}, ignoring`);
-                }
+                logger.error(`Event channel ${ev.channel} does not match camera channel ${channel}, ignoring`);
                 return;
             }
 
@@ -636,9 +635,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             switch (ev?.type) {
                 case 'motion':
                     motion = true;
-                    if (this.isEventLogsEnabled()) {
-                        logger.log(`Motion event received (may be PIR or MD)`);
-                    }
                     break;
                 case 'doorbell':
                     this.handleDoorbellEvent();
@@ -654,9 +650,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     motion = true;
                     break;
                 default:
-                    if (this.isEventLogsEnabled()) {
-                        logger.debug(`Unknown event type: ${ev?.type}`);
-                    }
+                    logger.error(`Unknown event type: ${ev?.type}`);
                     return;
             }
 
@@ -665,7 +659,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             });
         }
         catch (e) {
-            this.getLogger().warn('Error in onSimpleEvent handler', e);
+            this.getBaichuanLogger().warn('Error in onSimpleEvent handler', e);
         }
     }
 
@@ -674,7 +668,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             return;
         }
 
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
         const selection = Array.from(this.getDispatchEventsSelection?.() ?? new Set()).sort();
         const enabled = selection.length > 0;
 
@@ -772,13 +766,13 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         if (preset !== undefined && preset !== null) {
             const presetId = Number(preset);
             if (!Number.isFinite(presetId)) {
-                this.getLogger().warn(`Invalid PTZ preset id: ${preset}`);
+                this.getBaichuanLogger().warn(`Invalid PTZ preset id: ${preset}`);
                 return;
             }
             if (this.ptzPresets) {
                 await this.ptzPresets.moveToPreset(presetId);
             } else {
-                this.getLogger().warn('PTZ presets not available');
+                this.getBaichuanLogger().warn('PTZ presets not available');
             }
             return;
         }
@@ -813,14 +807,14 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
             const step = Number(this.storageSettings.values.ptzZoomStep);
             if (!Number.isFinite(step) || step <= 0) {
-                this.getLogger().warn('Invalid PTZ zoom step, using default 0.1');
+                this.getBaichuanLogger().warn('Invalid PTZ zoom step, using default 0.1');
                 return;
             }
 
             // Get current zoom factor and apply step
             const info = await client.getZoomFocus(channel);
             if (!info?.zoom) {
-                this.getLogger().warn('Zoom command requested but camera did not report zoom support.');
+                this.getBaichuanLogger().warn('Zoom command requested but camera did not report zoom support.');
                 return;
             }
 
@@ -1039,7 +1033,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 deviceData,
             });
         } catch (e) {
-            this.getLogger().warn('Failed to fetch device info', e);
+            this.getBaichuanLogger().warn('Failed to fetch device info', e);
         }
     }
 
@@ -1128,7 +1122,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     const sirenState = await api.getSiren(channel);
                     this.siren.on = sirenState.enabled;
                 } catch (e) {
-                    this.getLogger().debug('Failed to align siren state', e);
+                    this.getBaichuanLogger().debug('Failed to align siren state', e);
                 }
             }
 
@@ -1141,7 +1135,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                         this.floodlight.brightness = wl.brightness;
                     }
                 } catch (e) {
-                    this.getLogger().debug('Failed to align floodlight state', e);
+                    this.getBaichuanLogger().debug('Failed to align floodlight state', e);
                 }
             }
 
@@ -1165,11 +1159,11 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                         }
                     }
                 } catch (e) {
-                    this.getLogger().debug('Failed to align PIR state', e);
+                    this.getBaichuanLogger().debug('Failed to align PIR state', e);
                 }
             }
         } catch (e) {
-            this.getLogger().debug('Failed to align auxiliary devices state', e);
+            this.getBaichuanLogger().debug('Failed to align auxiliary devices state', e);
         }
     }
 
@@ -1199,7 +1193,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             return url.toString();
         } catch (e) {
             // If URL parsing fails, return original URL
-            this.getLogger().warn('Failed to parse URL for credentials', e);
+            this.getBaichuanLogger().warn('Failed to parse URL for credentials', e);
             return rtspUrl;
         }
     }
@@ -1240,7 +1234,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         } catch (e) {
             // Only log if it's not a recoverable error to avoid spam
             if (!this.isRecoverableBaichuanError?.(e)) {
-                this.getLogger().warn('Failed to get net port, using defaults', e);
+                this.getBaichuanLogger().warn('Failed to get net port, using defaults', e);
             }
             // Use defaults if we can't get the ports
             this.cachedNetPort = {
@@ -1251,7 +1245,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     async getVideoStreamOptions(): Promise<UrlMediaStreamOptions[]> {
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
 
         if (this.cachedVideoStreamOptions?.length) {
             return this.cachedVideoStreamOptions;
@@ -1296,7 +1290,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
 
         if (streams.length) {
-            logger.log('Fetched video stream options', { streams, netPort: this.cachedNetPort });
+            this.getBaichuanLogger().log('Fetched video stream options', { streams, netPort: this.cachedNetPort });
             this.cachedVideoStreamOptions = streams;
             return streams;
         }
@@ -1397,7 +1391,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
         this.refreshingState = true;
 
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
         const channel = this.storageSettings.values.rtspChannel;
 
         try {
@@ -1425,14 +1419,14 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     info: this.info,
                 };
 
-                logger.log(`Updating device interfaces: ${JSON.stringify(device)}`);
+                this.getBaichuanLogger().log(`Updating device interfaces: ${JSON.stringify(device)}`);
 
                 await sdk.deviceManager.onDeviceDiscovered(device);
             } catch (e) {
-                logger.error('Failed to update device interfaces', e);
+                this.getBaichuanLogger().error('Failed to update device interfaces', e);
             }
 
-            this.console.log(`Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets })}`);
+            this.getBaichuanLogger().log(`Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets })}`);
         }
         catch (e) {
             logger.error('Failed to refresh abilities', e);
@@ -1442,7 +1436,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     async parentInit(): Promise<void> {
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
 
         try {
             await this.ensureClient();
@@ -1494,7 +1488,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         this.streamManager = new StreamManager({
             createStreamClient: () => this.createStreamClient(),
-            getLogger: () => this.getLogger(),
+            getLogger: () => this.getBaichuanLogger() as Console,
             credentials: {
                 username,
                 password

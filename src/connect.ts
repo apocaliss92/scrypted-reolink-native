@@ -51,7 +51,7 @@ export async function createBaichuanApi(props: {
         host: inputs.host,
         username: inputs.username,
         password: inputs.password,
-        logger: inputs.logger,
+        logger: logger, // Use the logger passed to createBaichuanApi, not inputs.logger
         debugOptions: inputs.debugOptions ?? {}
     };
 
@@ -60,7 +60,6 @@ export async function createBaichuanApi(props: {
         // uncaught exception. Ensure we always have a listener.
         try {
             api.client.on("error", (err: unknown) => {
-                const logger = inputs.logger;
                 if (!logger) return;
                 const msg = (err as any)?.message || (err as any)?.toString?.() || String(err);
                 // Only log if it's not a recoverable error to avoid spam

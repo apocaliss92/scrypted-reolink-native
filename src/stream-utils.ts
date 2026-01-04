@@ -274,7 +274,7 @@ export class StreamManager {
     }
 
     private getLogger() {
-        return this.opts.getLogger();
+        return this.opts.getLogger() as Console;
     }
 
     private async ensureNativeRfcServer(

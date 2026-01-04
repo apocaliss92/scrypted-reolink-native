@@ -31,7 +31,7 @@ export class ReolinkBaichuanIntercom {
     }
 
     async start(media: MediaObject): Promise<void> {
-        const logger = this.camera.getLogger();
+        const logger = this.camera.getBaichuanLogger();
 
         const ffmpegInput = await sdk.mediaManager.convertMediaObjectToJSON<FFmpegInput>(
             media,
@@ -177,7 +177,7 @@ export class ReolinkBaichuanIntercom {
         if (this.stopping) return this.stopping;
 
         this.stopping = (async () => {
-            const logger = this.camera.getLogger();
+            const logger = this.camera.getBaichuanLogger();
 
             const ffmpeg = this.ffmpeg;
             this.ffmpeg = undefined;
@@ -243,7 +243,7 @@ export class ReolinkBaichuanIntercom {
         bytesNeeded: number,
         blockSize: number,
     ): void {
-        const logger = this.camera.getLogger();
+        const logger = this.camera.getBaichuanLogger();
 
         this.sendChain = this.sendChain
             .then(async () => {

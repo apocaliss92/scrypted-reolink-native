@@ -45,7 +45,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
             (!this.sleeping && this.lastPicture && (now - this.lastPicture.atMs >= minSnapshotIntervalMs));
 
         if (!shouldTakeNewSnapshot && this.lastPicture) {
-            this.console.log(`Returning cached snapshot, taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
+            this.getBaichuanLogger().debug(`Returning cached snapshot, taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
             return this.lastPicture.mo;
         }
 
@@ -53,7 +53,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
             return await this.takePictureInFlight;
         }
 
-        this.console.log(`Taking new snapshot from camera (forceNewSnapshot: ${this.forceNewSnapshot})`);
+        this.getBaichuanLogger().log(`Taking new snapshot from camera (forceNewSnapshot: ${this.forceNewSnapshot})`);
         this.forceNewSnapshot = false;
 
         this.takePictureInFlight = (async () => {
@@ -63,7 +63,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
             });
             const mo = await sdk.mediaManager.createMediaObject(snapshotBuffer, 'image/jpeg');
             this.lastPicture = { mo, atMs: Date.now() };
-            this.console.log(`Snapshot taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
+            this.getBaichuanLogger().log(`Snapshot taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
             return mo;
         })();
 
@@ -106,7 +106,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
         if (this.periodicStarted) return;
         this.periodicStarted = true;
 
-        this.console.log('Starting periodic tasks for battery camera');
+        this.getBaichuanLogger().log('Starting periodic tasks for battery camera');
 
         // Check sleeping state every 5 seconds (non-blocking)
         if (!this.nvrDevice) {
@@ -117,7 +117,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
 
                     if (!api) {
                         if (!this.sleeping) {
-                            this.console.log('Camera is sleeping: no active Baichuan client');
+                            this.getBaichuanLogger().log('Camera is sleeping: no active Baichuan client');
                             this.sleeping = true;
                         }
                         return;
@@ -126,7 +126,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
                     const sleepStatus = api.getSleepStatus({ channel });
                     await this.updateSleepingState(sleepStatus);
                 } catch (e) {
-                    this.console.warn('Error checking sleeping state:', e);
+                    this.getBaichuanLogger().warn('Error checking sleeping state:', e);
                 }
             }, 5_000);
         }
@@ -138,25 +138,25 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
             this.updateBatteryAndSnapshot().catch(() => { });
         }, updateIntervalMs);
 
-        this.console.log(`Periodic tasks started: sleep check every 5s, battery update every ${batteryUpdateIntervalMinutes} minutes`);
+        this.getBaichuanLogger().log(`Periodic tasks started: sleep check every 5s, battery update every ${batteryUpdateIntervalMinutes} minutes`);
     }
 
     async updateSleepingState(sleepStatus: SleepStatus): Promise<void> {
         try {
             if (this.isBatteryInfoLoggingEnabled()) {
-                this.console.log('getSleepStatus result:', JSON.stringify(sleepStatus));
+                this.getBaichuanLogger().debug('getSleepStatus result:', JSON.stringify(sleepStatus));
             }
 
             if (sleepStatus.state === 'sleeping') {
                 if (!this.sleeping) {
-                    this.console.log(`Camera is sleeping: ${sleepStatus.reason}`);
+                    this.getBaichuanLogger().log(`Camera is sleeping: ${sleepStatus.reason}`);
                     this.sleeping = true;
                 }
             } else if (sleepStatus.state === 'awake') {
                 // Camera is awake
                 const wasSleeping = this.sleeping;
                 if (wasSleeping) {
-                    this.console.log(`Camera woke up: ${sleepStatus.reason}`);
+                    this.getBaichuanLogger().log(`Camera woke up: ${sleepStatus.reason}`);
                     this.sleeping = false;
                 }
 
@@ -168,11 +168,11 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
                 }
             } else {
                 // Unknown state
-                this.console.debug(`Sleep status unknown: ${sleepStatus.reason}`);
+                this.getBaichuanLogger().debug(`Sleep status unknown: ${sleepStatus.reason}`);
             }
         } catch (e) {
             // Silently ignore errors in sleep check to avoid spam
-            this.console.debug('Error in checkSleepingState:', e);
+            this.getBaichuanLogger().debug('Error in checkSleepingState:', e);
         }
     }
 
@@ -182,7 +182,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
 
         const batteryInfo = await api.getBatteryInfo(channel);
         if (this.isBatteryInfoLoggingEnabled()) {
-            this.console.log('getBatteryInfo result:', JSON.stringify(batteryInfo));
+                this.getBaichuanLogger().debug('getBatteryInfo result:', JSON.stringify(batteryInfo));
         }
 
         if (batteryInfo.batteryPercent !== undefined) {
@@ -195,17 +195,17 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
                 if (batteryInfo.chargeStatus !== undefined) {
                     // chargeStatus: "0"=charging, "1"=discharging, "2"=full
                     const charging = batteryInfo.chargeStatus === "0" || batteryInfo.chargeStatus === "2";
-                    this.console.log(`Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}% (charging: ${charging})`);
+                    this.getBaichuanLogger().log(`Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}% (charging: ${charging})`);
                 } else {
-                    this.console.log(`Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}%`);
+                    this.getBaichuanLogger().log(`Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}%`);
                 }
             } else if (oldLevel === undefined) {
                 // First time setting battery level
                 if (batteryInfo.chargeStatus !== undefined) {
                     const charging = batteryInfo.chargeStatus === "0" || batteryInfo.chargeStatus === "2";
-                    this.console.log(`Battery level set: ${batteryInfo.batteryPercent}% (charging: ${charging})`);
+                    this.getBaichuanLogger().log(`Battery level set: ${batteryInfo.batteryPercent}% (charging: ${charging})`);
                 } else {
-                    this.console.log(`Battery level set: ${batteryInfo.batteryPercent}%`);
+                    this.getBaichuanLogger().log(`Battery level set: ${batteryInfo.batteryPercent}%`);
                 }
             }
         }
@@ -214,7 +214,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
     private async updateBatteryAndSnapshot(): Promise<void> {
         // Prevent multiple simultaneous calls
         if (this.batteryUpdateInProgress) {
-            this.console.debug('Battery update already in progress, skipping');
+            this.getBaichuanLogger().debug('Battery update already in progress, skipping');
             return;
         }
 
@@ -222,12 +222,12 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
         try {
             const channel = this.storageSettings.values.rtspChannel;
             const updateIntervalMinutes = this.storageSettings.values.batteryUpdateIntervalMinutes ?? 10;
-            this.console.log(`Force battery update interval started (every ${updateIntervalMinutes} minutes)`);
+            this.getBaichuanLogger().log(`Force battery update interval started (every ${updateIntervalMinutes} minutes)`);
 
             // Ensure we have a client connection
             const api = await this.ensureClient();
             if (!api) {
-                this.console.warn('Failed to ensure client connection for battery update');
+                this.getBaichuanLogger().warn('Failed to ensure client connection for battery update');
                 return;
             }
 
@@ -236,12 +236,12 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
 
             // If camera is sleeping, wake it up
             if (sleepStatus.state === 'sleeping') {
-                this.console.log('Camera is sleeping, waking up for periodic update...');
+                this.getBaichuanLogger().log('Camera is sleeping, waking up for periodic update...');
                 try {
                     await api.wakeUp(channel, { waitAfterWakeMs: 2000 });
-                    this.console.log('Wake command sent, waiting for camera to wake up...');
+                    this.getBaichuanLogger().log('Wake command sent, waiting for camera to wake up...');
                 } catch (wakeError) {
-                    this.console.warn('Failed to wake up camera:', wakeError);
+                    this.getBaichuanLogger().warn('Failed to wake up camera:', wakeError);
                     return;
                 }
 
@@ -255,14 +255,14 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
                     sleepStatus = api.getSleepStatus({ channel });
                     if (sleepStatus.state === 'awake') {
                         awake = true;
-                        this.console.log('Camera is now awake');
+                        this.getBaichuanLogger().log('Camera is now awake');
                         this.sleeping = false;
                         break;
                     }
                 }
 
                 if (!awake) {
-                    this.console.warn('Camera did not wake up within timeout, skipping update');
+                    this.getBaichuanLogger().warn('Camera did not wake up within timeout, skipping update');
                     return;
                 }
             } else if (sleepStatus.state === 'awake') {
@@ -274,26 +274,26 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
             try {
                 await this.updateBatteryInfo();
             } catch (e) {
-                this.console.warn('Failed to get battery info during periodic update:', e);
+                this.getBaichuanLogger().warn('Failed to get battery info during periodic update:', e);
             }
 
             // 2. Align auxiliary devices state
             try {
                 await this.alignAuxDevicesState();
             } catch (e) {
-                this.console.warn('Failed to align auxiliary devices state:', e);
+                this.getBaichuanLogger().warn('Failed to align auxiliary devices state:', e);
             }
 
             // 3. Update snapshot
             try {
                 this.forceNewSnapshot = true;
                 await this.takePicture();
-                this.console.log('Snapshot updated during periodic update');
+                this.getBaichuanLogger().log('Snapshot updated during periodic update');
             } catch (snapshotError) {
-                this.console.warn('Failed to update snapshot during periodic update:', snapshotError);
+                this.getBaichuanLogger().warn('Failed to update snapshot during periodic update:', snapshotError);
             }
         } catch (e) {
-            this.console.warn('Failed to update battery and snapshot', e);
+            this.getBaichuanLogger().warn('Failed to update battery and snapshot', e);
         } finally {
             this.batteryUpdateInProgress = false;
         }
@@ -313,7 +313,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
             await this.baichuanApi?.close();
         }
         catch (e) {
-            this.getLogger().warn('Error closing Baichuan client during reset', e);
+            this.getBaichuanLogger().warn('Error closing Baichuan client during reset', e);
         }
         finally {
             this.baichuanApi = undefined;
@@ -331,7 +331,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
 
         if (reason) {
             const message = reason?.message || reason?.toString?.() || reason;
-            this.getLogger().warn(`Baichuan client reset requested: ${message}`);
+            this.getBaichuanLogger().warn(`Baichuan client reset requested: ${message}`);
         }
     }
 

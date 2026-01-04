@@ -97,7 +97,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                 // Reinit after cleanup
                 await this.reinit();
             },
-            onSimpleEvent: this.onSimpleEventHandler,
+            onSimpleEvent: (ev) => this.forwardNativeEvent(ev),
             getEventSubscriptionEnabled: () => {
                 const eventSource = this.storageSettings.values.eventSource || 'Native';
                 return eventSource === 'Native';
@@ -105,8 +105,13 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         };
     }
 
-    public getLogger(): Console {
-        return this.console;
+
+    protected isDebugEnabled(): boolean {
+        return this.storageSettings.values.debugEvents || false;
+    }
+
+    protected getDeviceName(): string {
+        return this.name || 'NVR';
     }
 
     protected async onBeforeCleanup(): Promise<void> {
@@ -151,7 +156,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     }
 
     private forwardNativeEvent(ev: ReolinkSimpleEvent): void {
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
 
         const eventSource = this.storageSettings.values.eventSource || 'Native';
         if (eventSource !== 'Native') {
@@ -159,16 +164,12 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         }
 
         try {
-            if (this.storageSettings.values.debugEvents) {
-                logger.log(`NVR Baichuan event: ${JSON.stringify(ev)}`);
-            }
+            logger.debug(`Baichuan event: ${JSON.stringify(ev)}`);
 
             // Find camera for this channel
             const channel = ev?.channel;
             if (channel === undefined) {
-                if (this.storageSettings.values.debugEvents) {
-                    logger.debug('Event has no channel, ignoring');
-                }
+                logger.debug('Event has no channel, ignoring');
                 return;
             }
 
@@ -176,9 +177,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             const targetCamera = nativeId ? this.cameraNativeMap.get(nativeId) : undefined;
 
             if (!targetCamera) {
-                if (this.storageSettings.values.debugEvents) {
-                    logger.debug(`No camera found for channel ${channel}, ignoring event`);
-                }
+                logger.debug(`No camera found for channel ${channel}, ignoring event`);
                 return;
             }
 
@@ -212,9 +211,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                     motion = true;
                     break;
                 default:
-                    if (this.storageSettings.values.debugEvents) {
-                        logger.debug(`Unknown event type: ${ev?.type}`);
-                    }
+                    logger.debug(`Unknown event type: ${ev?.type}`);
                     return;
             }
 
@@ -228,17 +225,13 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         }
     }
 
-    async onSimpleEventHandler(ev: ReolinkSimpleEvent) {
-        this.forwardNativeEvent(ev);
-    }
-
     async ensureBaichuanClient(): Promise<ReolinkBaichuanApi> {
         // Use base class implementation
         return await super.ensureBaichuanClient();
     }
 
     async subscribeToAllEvents(): Promise<void> {
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
         const eventSource = this.storageSettings.values.eventSource || 'Native';
 
         // Only subscribe if Native is selected
@@ -261,7 +254,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
      * Reinitialize event subscriptions based on selected event source
      */
     private async reinitEventSubscriptions(): Promise<void> {
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
         const { eventSource } = this.storageSettings.values;
 
         // Unsubscribe from Native events if switching away
@@ -281,11 +274,9 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
      * Forward events from CGI source to cameras
      */
     private forwardCgiEvents(eventsRes: Record<number, EventsResponse>): void {
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
 
-        if (this.storageSettings.values.debugEvents) {
-            logger.debug(`CGI Events call result: ${JSON.stringify(eventsRes)}`);
-        }
+        logger.debug(`CGI Events call result: ${JSON.stringify(eventsRes)}`);
 
         // Use channel map for efficient lookup
         for (const [channel, nativeId] of this.channelToNativeIdMap.entries()) {
@@ -299,7 +290,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
     async init() {
         const api = await this.ensureClient();
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
         await this.updateDeviceInfo();
 
         // Initialize event subscriptions based on selected source
@@ -324,9 +315,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                     const { hubData } = await api.getHubInfo();
                     const { devicesData, channelsResponse, response } = await api.getDevicesInfo();
                     logger.log('Hub info data fetched');
-                    if (this.storageSettings.values.debugEvents) {
-                        logger.log(`${JSON.stringify({ hubData, devicesData, channelsResponse, response })}`);
-                    }
+                    logger.debug(`${JSON.stringify({ hubData, devicesData, channelsResponse, response })}`);
 
                     await this.discoverDevices(true);
                 }
@@ -341,9 +330,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                 // Always fetch battery info (not event-related)
                 const { batteryInfoData, response } = await api.getAllChannelsBatteryInfo();
 
-                if (this.storageSettings.values.debugEvents) {
-                    logger.debug(`Battery info call result: ${JSON.stringify({ batteryInfoData, response })}`);
-                }
+                logger.debug(`Battery info call result: ${JSON.stringify({ batteryInfoData, response })}`);
 
                 this.cameraNativeMap.forEach((camera) => {
                     if (camera) {
@@ -360,7 +347,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                     }
                 });
             } catch (e) {
-                this.console.error('Error on events flow', e);
+                logger.error('Error on events flow', e);
             } finally {
                 this.processing = false;
             }
@@ -379,7 +366,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                 deviceData,
             });
         } catch (e) {
-            this.getLogger().warn('Failed to fetch device info', e);
+            this.getBaichuanLogger().warn('Failed to fetch device info', e);
         }
     }
 
@@ -433,7 +420,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
     async syncEntitiesFromRemote() {
         const api = await this.ensureClient();
-        const logger = this.getLogger();
+        const logger = this.getBaichuanLogger();
 
         logger.log('Starting channels discovery using getDevicesInfo...');
 
@@ -545,7 +532,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         await sdk.deviceManager.onDeviceDiscovered(actualDevice);
 
         const device = await this.getDevice(adopt.nativeId);
-        this.console.log('Adopted device', entry, device?.name);
+        this.getBaichuanLogger().debug('Adopted device', entry, device?.name);
         const { username, password, ipAddress } = this.storageSettings.values;
 
         device.storageSettings.values.rtspChannel = entry.rtspChannel;
