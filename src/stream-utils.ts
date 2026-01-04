@@ -12,6 +12,7 @@ import sdk, {
 } from "@scrypted/sdk";
 
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
+import { ReolinkNativeNvrDevice } from "./nvr";
 
 export interface StreamManagerOptions {
     /**
@@ -101,12 +102,12 @@ export async function buildVideoStreamOptionsFromRtspRtmp(
         client: ReolinkBaichuanApi,
         ipAddress: string,
         cachedNetPort: { rtsp?: { port?: number; enable?: number }; rtmp?: { port?: number; enable?: number } },
-        isFromNvr: boolean,
+        nvrDevice?: ReolinkNativeNvrDevice,
         rtspChannel: number,
         logger: Console
     },
 ): Promise<UrlMediaStreamOptions[]> {
-    const { client, ipAddress, cachedNetPort, rtspChannel, logger } = props;
+    const { client, ipAddress, cachedNetPort, rtspChannel, logger, nvrDevice } = props;
     const rtspStreams: UrlMediaStreamOptions[] = [];
     const rtmpStreams: UrlMediaStreamOptions[] = [];
 
@@ -179,11 +180,21 @@ export async function buildVideoStreamOptionsFromRtspRtmp(
 
     const nativeStreams = await fetchVideoStreamOptionsFromApi(client, rtspChannel, logger);
 
-    const streams: UrlMediaStreamOptions[] = [
-        ...rtspStreams,
-        ...rtmpStreams,
-        ...nativeStreams,
-    ];
+    let streams: UrlMediaStreamOptions[] = [];
+
+    if (nvrDevice && nvrDevice.info.model === 'HOMEHUB') {
+        streams = [
+            ...nativeStreams,
+            ...rtspStreams,
+            ...rtmpStreams,
+        ];
+    } else {
+        streams = [
+            ...rtspStreams,
+            ...rtmpStreams,
+            ...nativeStreams,
+        ];
+    }
 
     return streams;
 }

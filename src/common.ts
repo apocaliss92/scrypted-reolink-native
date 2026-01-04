@@ -1277,7 +1277,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     client,
                     ipAddress,
                     cachedNetPort: this.cachedNetPort,
-                    isFromNvr,
+                    nvrDevice: this.nvrDevice,
                     rtspChannel,
                     logger,
                 },

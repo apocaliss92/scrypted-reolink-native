@@ -35,7 +35,7 @@ export class BaichuanLogger implements Console {
     }
 
     private formatMessage(level: string, ...args: any[]): string {
-        const timestamp = new Date().toISOString();
+        const timestamp = new Date().toLocaleString();
         const prefix = `[${this.deviceName}] [${timestamp}] [${level}]`;
         return `${prefix} ${args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ')}`;
     }
