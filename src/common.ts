@@ -2,8 +2,8 @@ import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, Reo
 import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
-import { BaseBaichuanClass, type BaichuanConnectionConfig, type BaichuanConnectionCallbacks } from "./baichuan-base";
-import { createBaichuanApi, normalizeUid, type BaichuanTransport } from "./connect";
+import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
+import { normalizeUid, type BaichuanTransport } from "./connect";
 import { convertDebugLogsToApiOptions, DebugLogDisplayNames, DebugLogOption, getApiRelevantDebugLogs, getDebugLogChoices } from "./debug-options";
 import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
@@ -254,6 +254,22 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             defaultValue: 60,
             hide: true,
         },
+        lowThresholdBatteryRecording: {
+            title: "Low Threshold Battery Recording (%)",
+            subgroup: 'Recording',
+            description: "Battery level threshold below which recording is disabled (default: 15%).",
+            type: "number",
+            defaultValue: 15,
+            hide: true,
+        },
+        highThresholdBatteryRecording: {
+            title: "High Threshold Battery Recording (%)",
+            subgroup: 'Recording',
+            description: "Battery level threshold above which recording is enabled (default: 35%).",
+            type: "number",
+            defaultValue: 35,
+            hide: true,
+        },
         // Regular camera specific
         dispatchEvents: {
             subgroup: 'Advanced',
@@ -330,7 +346,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         },
         // PTZ Presets
         presets: {
-            group: 'PTZ',
+            subgroup: 'PTZ',
             title: 'Presets to enable',
             description: 'PTZ Presets in the format "id=name". Where id is the PTZ Preset identifier and name is a friendly name.',
             multiple: true,
@@ -358,11 +374,11 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             description: 'How long a PTZ command moves before sending stop. Higher = more movement per click.',
             type: 'number',
             defaultValue: 300,
-            group: 'PTZ',
+            subgroup: 'PTZ',
             hide: true,
         },
         ptzZoomStep: {
-            group: 'PTZ',
+            subgroup: 'PTZ',
             title: 'PTZ Zoom Step',
             description: 'How much to change zoom per zoom command (in zoom factor units, where 1.0 is normal).',
             type: 'number',
@@ -370,7 +386,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             hide: true,
         },
         ptzCreatePreset: {
-            group: 'PTZ',
+            subgroup: 'PTZ',
             title: 'Create Preset',
             description: 'Enter a name and press Save to create a new PTZ preset at the current position.',
             type: 'string',
@@ -407,7 +423,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             },
         },
         ptzSelectedPreset: {
-            group: 'PTZ',
+            subgroup: 'PTZ',
             title: 'Selected Preset',
             description: 'Select the preset to update or delete. Format: "id=name".',
             type: 'string',
@@ -416,7 +432,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             hide: true,
         },
         ptzUpdateSelectedPreset: {
-            group: 'PTZ',
+            subgroup: 'PTZ',
             title: 'Update Selected Preset Position',
             description: 'Overwrite the selected preset with the current PTZ position.',
             type: 'button',
@@ -439,7 +455,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             },
         },
         ptzDeleteSelectedPreset: {
-            group: 'PTZ',
+            subgroup: 'PTZ',
             title: 'Delete Selected Preset',
             description: 'Delete the selected preset (firmware dependent).',
             type: 'button',
@@ -497,15 +513,16 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     initComplete?: boolean;
     resetBaichuanClient?(reason?: any): Promise<void>;
 
-    protected nvrDevice?: any; // Optional reference to NVR device
+    protected nvrDevice?: ReolinkNativeNvrDevice;
+    thisDevice: Settings
 
     constructor(nativeId: string, public plugin: ReolinkNativePlugin, public options: CommonCameraMixinOptions) {
         super(nativeId);
-        // Set protocol based on camera type
         this.protocol = !options.nvrDevice && options.type === 'battery' ? 'udp' : 'tcp';
 
         // Store NVR device reference if provided
         this.nvrDevice = options.nvrDevice;
+        this.thisDevice = sdk.systemManager.getDeviceById<Settings>(this.id);
 
         setTimeout(async () => {
             await this.parentInit();
@@ -1501,6 +1518,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         // this.storageSettings.settings.snapshotCacheMinutes.hide = !isBattery;
         this.storageSettings.settings.uid.hide = !isBattery;
         this.storageSettings.settings.batteryUpdateIntervalMinutes.hide = !isBattery;
+        this.storageSettings.settings.lowThresholdBatteryRecording.hide = !isBattery;
+        this.storageSettings.settings.highThresholdBatteryRecording.hide = !isBattery;
 
         if (isBattery && !this.storageSettings.values.mixinsSetup) {
             try {

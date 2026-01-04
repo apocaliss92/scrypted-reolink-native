@@ -7,6 +7,14 @@ import { getDeviceInterfaces } from "./utils";
 
 class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, DeviceCreator {
     devices = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera | ReolinkNativeNvrDevice>();
+    nvrDeviceId: string;
+
+    constructor(nativeId: string) {
+        super(nativeId);
+
+        const nvrDevice = sdk.systemManager.getDeviceByName('Scrypted NVR');
+        this.nvrDeviceId = nvrDevice?.id;
+    }
 
     getScryptedDeviceCreator(): string {
         return 'Reolink Native camera';

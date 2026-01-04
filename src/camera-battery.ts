@@ -180,6 +180,26 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
         }
     }
 
+    async checkRecordingAction(newBatteryLevel: number) {
+        const nvrDeviceId = this.plugin.nvrDeviceId;
+        if (nvrDeviceId && this.mixins.includes(nvrDeviceId)) {
+            const logger = this.getBaichuanLogger();
+
+            const settings = await this.thisDevice.getSettings();
+            const isRecording = !settings.find(setting => setting.key === 'recording:privacyMode')?.value;
+            const { lowThresholdBatteryRecording, highThresholdBatteryRecording } = this.storageSettings.values;
+
+            if (isRecording && newBatteryLevel < lowThresholdBatteryRecording) {
+                logger.log(`Recording is enabled, but battery level is below low threshold (${newBatteryLevel}% < ${lowThresholdBatteryRecording}%), disabling recording`);
+                await this.thisDevice.putSetting('recording:privacyMode', true);
+            } else if (!isRecording && newBatteryLevel > highThresholdBatteryRecording) {
+                logger.log(`Recording is disabled, but battery level is above high threshold (${newBatteryLevel}% > ${highThresholdBatteryRecording}%), enabling recording`);
+                await this.thisDevice.putSetting('recording:privacyMode', false);
+            }
+
+        }
+    }
+
     async updateBatteryInfo() {
         const api = await this.ensureClient();
         const channel = this.storageSettings.values.rtspChannel;
@@ -193,6 +213,8 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
             const oldLevel = this.lastBatteryLevel;
             this.batteryLevel = batteryInfo.batteryPercent;
             this.lastBatteryLevel = batteryInfo.batteryPercent;
+
+            let shouldCheckRecordingAction = true;
 
             // Log only if battery level changed
             if (oldLevel !== undefined && oldLevel !== batteryInfo.batteryPercent) {
@@ -211,6 +233,12 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
                 } else {
                     this.getBaichuanLogger().log(`Battery level set: ${batteryInfo.batteryPercent}%`);
                 }
+            } else {
+                shouldCheckRecordingAction = false;
+            }
+
+            if (shouldCheckRecordingAction) {
+                await this.checkRecordingAction(batteryInfo.batteryPercent);
             }
         }
     }
