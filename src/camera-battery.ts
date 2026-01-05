@@ -120,8 +120,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
 
         logger.log('Starting periodic tasks for battery camera');
 
-        // Check sleeping state every 5 seconds (non-blocking)
-        if (!this.nvrDevice) {
+        if (!this.nvrDevice && !this.multiFocalDevice) {
             this.sleepCheckTimer = setInterval(async () => {
                 try {
                     const api = this.baichuanApi;

@@ -232,7 +232,7 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
     async reportDevices(): Promise<void> {
         const api = await this.ensureBaichuanClient();
         const logger = this.getBaichuanLogger();
-        const { protocol, username, password, ipAddress, uid } = this.storageSettings.values;
+        const { username, password, ipAddress, uid } = this.storageSettings.values;
 
         const { capabilities, support, abilities, features, objects, presets } = await api.getDeviceCapabilities();
 

@@ -527,8 +527,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     thisDevice: Settings
 
     constructor(
-        nativeId: string, 
-        public plugin: ReolinkNativePlugin, 
+        nativeId: string,
+        public plugin: ReolinkNativePlugin,
         public options: CommonCameraMixinOptions
     ) {
         super(nativeId);
@@ -654,7 +654,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     public getAbilities(): DeviceCapabilities {
-        if(this.options.multiFocalDevice) {
+        if (this.options.multiFocalDevice) {
             return this.options.multiFocalDevice.getInterfaces(this.storageSettings.values.rtspChannel).capabilities;
         } else {
             return this.storageSettings.values.capabilities;
@@ -1116,6 +1116,11 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     async updateDeviceInfo(): Promise<void> {
         const logger = this.getBaichuanLogger();
 
+        if (this.options.multiFocalDevice) {
+            this.info = this.options.multiFocalDevice.info;
+            return;
+        }
+
         const { ipAddress, rtspChannel } = this.storageSettings.values;
         try {
             const api = await this.ensureClient();
@@ -1446,38 +1451,41 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         const channel = this.storageSettings.values.rtspChannel;
 
         try {
-            const { capabilities, abilities, support, presets, objects } = await this.withBaichuanRetry(async () => {
-                const api = await this.ensureClient();
-                return await api.getDeviceCapabilities(channel);
-            });
-            this.classes = objects;
-            this.presets = presets;
-            this.storageSettings.values.capabilities = capabilities;
-            this.ptzPresets.setCachedPtzPresets(presets);
-
-            try {
-                const { interfaces, type } = getDeviceInterfaces({
-                    capabilities,
-                    logger: this.console,
+            if (this.options.multiFocalDevice) {
+                // do nothing for now
+            } else {
+                const { capabilities, abilities, support, presets, objects } = await this.withBaichuanRetry(async () => {
+                    const api = await this.ensureClient();
+                    return await api.getDeviceCapabilities(channel);
                 });
+                this.classes = objects;
+                this.presets = presets;
+                this.ptzPresets.setCachedPtzPresets(presets);
 
-                const device: Device = {
-                    nativeId: this.nativeId,
-                    providerNativeId: this.nvrDevice?.nativeId ?? this.plugin?.nativeId,
-                    name: this.name,
-                    interfaces,
-                    type,
-                    info: this.info,
-                };
+                try {
+                    const { interfaces, type } = getDeviceInterfaces({
+                        capabilities,
+                        logger: this.console,
+                    });
 
-                logger.log(`Updating device interfaces: ${JSON.stringify(device)}`);
+                    const device: Device = {
+                        nativeId: this.nativeId,
+                        providerNativeId: this.nvrDevice?.nativeId ?? this.plugin?.nativeId,
+                        name: this.name,
+                        interfaces,
+                        type,
+                        info: this.info,
+                    };
 
-                await sdk.deviceManager.onDeviceDiscovered(device);
-            } catch (e) {
-                logger.error('Failed to update device interfaces', e);
+                    logger.log(`Updating device interfaces: ${JSON.stringify(device)}`);
+
+                    await sdk.deviceManager.onDeviceDiscovered(device);
+                } catch (e) {
+                    logger.error('Failed to update device interfaces', e);
+                }
+
+                logger.log(`Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets })}`);
             }
-
-            logger.log(`Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets })}`);
         }
         catch (e) {
             logger.error('Failed to refresh abilities', e);
