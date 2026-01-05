@@ -1,12 +1,12 @@
-import sdk, { DeviceCreator, DeviceCreatorSettings, DeviceInformation, DeviceProvider, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedNativeId, Setting, Settings } from "@scrypted/sdk";
+import sdk, { DeviceCreator, DeviceCreatorSettings, DeviceProvider, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedNativeId, Setting } from "@scrypted/sdk";
+import { BaseBaichuanClass } from "./baichuan-base";
 import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
-import { ReolinkNativeNvrDevice } from "./nvr";
-import { ReolinkNativeMultiFocalDevice } from "./multifocal";
-import { autoDetectDeviceType, createBaichuanApi, type BaichuanTransport } from "./connect";
-import { batteryCameraSuffix, cameraSuffix, getDeviceInterfaces, multifocalSuffix, nvrSuffix } from "./utils";
-import { BaseBaichuanClass } from "./baichuan-base";
 import { CommonCameraMixin } from "./common";
+import { createBaichuanApi } from "./connect";
+import { ReolinkNativeMultiFocalDevice } from "./multifocal";
+import { ReolinkNativeNvrDevice } from "./nvr";
+import { batteryCameraSuffix, cameraSuffix, getDeviceInterfaces, multifocalSuffix, nvrSuffix } from "./utils";
 
 class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, DeviceCreator {
     devices = new Map<string, BaseBaichuanClass>();
@@ -45,6 +45,8 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
         // Auto-detect device type (camera, battery-cam, or nvr)
         this.console.log(`[AutoDetect] Starting device type detection for ${ipAddress}...`);
+        const { autoDetectDeviceType } = await import("@apocaliss92/reolink-baichuan-js");
+
         const detection = await autoDetectDeviceType(
             {
                 host: ipAddress,
@@ -53,7 +55,6 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 uid,
                 logger: this.console,
             },
-            this.console
         );
 
         this.console.log(`[AutoDetect] Detected device type: ${detection.type} (transport: ${detection.transport})`);
@@ -88,11 +89,6 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             device.storageSettings.values.username = username;
             device.storageSettings.values.password = password;
             device.storageSettings.values.uid = detection.uid || '';
-            
-            // Update the protocol based on detection result
-            // Note: This requires updating the protocol property, but it's readonly
-            // The transport is already set in the constructor during createDevice
-            // For now, we'll rely on the constructor parameter
 
             return nativeId;
         }
