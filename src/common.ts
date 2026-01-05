@@ -263,6 +263,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             defaultValue: [],
             choices: getDebugLogChoices(),
             onPut: async (ov, value) => {
+                const logger = this.getBaichuanLogger();
                 const oldApiOptions = getApiRelevantDebugLogs(ov || []);
                 const newApiOptions = getApiRelevantDebugLogs(value || []);
 
@@ -288,7 +289,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                             // Trigger reconnection
                             await this.ensureClient();
                         } catch (e) {
-                            this.getBaichuanLogger().warn('Failed to reset client after debug logs change', e);
+                            logger.warn('Failed to reset client after debug logs change', e);
                         }
                     }, 2000);
                 }
@@ -691,6 +692,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     onSimpleEvent = (ev: ReolinkSimpleEvent) => {
+        const logger = this.getBaichuanLogger();
+
         try {
             const logger = this.getBaichuanLogger();
 
@@ -737,7 +740,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             });
         }
         catch (e) {
-            this.getBaichuanLogger().warn('Error in onSimpleEvent handler', e);
+            logger.warn('Error in onSimpleEvent handler', e);
         }
     }
 
@@ -832,6 +835,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
     // PanTiltZoom interface implementation
     async ptzCommand(command: PanTiltZoomCommand): Promise<void> {
+        const logger = this.getBaichuanLogger();
+
         const client = await this.ensureClient();
         if (!client) {
             return;
@@ -844,13 +849,13 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         if (preset !== undefined && preset !== null) {
             const presetId = Number(preset);
             if (!Number.isFinite(presetId)) {
-                this.getBaichuanLogger().warn(`Invalid PTZ preset id: ${preset}`);
+                logger.warn(`Invalid PTZ preset id: ${preset}`);
                 return;
             }
             if (this.ptzPresets) {
                 await this.ptzPresets.moveToPreset(presetId);
             } else {
-                this.getBaichuanLogger().warn('PTZ presets not available');
+                logger.warn('PTZ presets not available');
             }
             return;
         }
@@ -885,14 +890,14 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
             const step = Number(this.storageSettings.values.ptzZoomStep);
             if (!Number.isFinite(step) || step <= 0) {
-                this.getBaichuanLogger().warn('Invalid PTZ zoom step, using default 0.1');
+                logger.warn('Invalid PTZ zoom step, using default 0.1');
                 return;
             }
 
             // Get current zoom factor and apply step
             const info = await client.getZoomFocus(channel);
             if (!info?.zoom) {
-                this.getBaichuanLogger().warn('Zoom command requested but camera did not report zoom support.');
+                logger.warn('Zoom command requested but camera did not report zoom support.');
                 return;
             }
 
@@ -1100,6 +1105,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     async updateDeviceInfo(): Promise<void> {
+        const logger = this.getBaichuanLogger();
+
         const { ipAddress, rtspChannel } = this.storageSettings.values;
         try {
             const api = await this.ensureClient();
@@ -1110,8 +1117,10 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 ipAddress,
                 deviceData,
             });
+
+            logger.log(`Device info updated: ${JSON.stringify(deviceData)}`);
         } catch (e) {
-            this.getBaichuanLogger().warn('Failed to fetch device info', e);
+            logger.warn('Failed to fetch device info', e);
         }
     }
 
@@ -1187,6 +1196,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
      * This should be called periodically for regular cameras and once when battery cameras wake up.
      */
     async alignAuxDevicesState(): Promise<void> {
+        const logger = this.getBaichuanLogger();
+
         const api = this.baichuanApi;
         if (!api) return;
 
@@ -1200,7 +1211,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     const sirenState = await api.getSiren(channel);
                     this.siren.on = sirenState.enabled;
                 } catch (e) {
-                    this.getBaichuanLogger().debug('Failed to align siren state', e);
+                    logger.debug('Failed to align siren state', e);
                 }
             }
 
@@ -1213,7 +1224,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                         this.floodlight.brightness = wl.brightness;
                     }
                 } catch (e) {
-                    this.getBaichuanLogger().debug('Failed to align floodlight state', e);
+                    logger.debug('Failed to align floodlight state', e);
                 }
             }
 
@@ -1237,16 +1248,18 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                         }
                     }
                 } catch (e) {
-                    this.getBaichuanLogger().debug('Failed to align PIR state', e);
+                    logger.debug('Failed to align PIR state', e);
                 }
             }
         } catch (e) {
-            this.getBaichuanLogger().debug('Failed to align auxiliary devices state', e);
+            logger.debug('Failed to align auxiliary devices state', e);
         }
     }
 
     // Video stream helper methods
     protected addRtspCredentials(rtspUrl: string): string {
+        const logger = this.getBaichuanLogger();
+
         const { username, password } = this.storageSettings.values;
         if (!username) {
             return rtspUrl;
@@ -1271,7 +1284,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             return url.toString();
         } catch (e) {
             // If URL parsing fails, return original URL
-            this.getBaichuanLogger().warn('Failed to parse URL for credentials', e);
+            logger.warn('Failed to parse URL for credentials', e);
             return rtspUrl;
         }
     }
@@ -1289,6 +1302,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     protected async ensureNetPortCache(): Promise<void> {
+        const logger = this.getBaichuanLogger();
+
         if (this.cachedNetPort) {
             return;
         }
@@ -1312,7 +1327,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         } catch (e) {
             // Only log if it's not a recoverable error to avoid spam
             if (!this.isRecoverableBaichuanError?.(e)) {
-                this.getBaichuanLogger().warn('Failed to get net port, using defaults', e);
+                logger.warn('Failed to get net port, using defaults', e);
             }
             // Use defaults if we can't get the ports
             this.cachedNetPort = {
@@ -1368,7 +1383,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
 
         if (streams.length) {
-            this.getBaichuanLogger().log('Fetched video stream options', { streams, netPort: this.cachedNetPort });
+            logger.log('Fetched video stream options', { streams, netPort: this.cachedNetPort });
             this.cachedVideoStreamOptions = streams;
             return streams;
         }
@@ -1497,14 +1512,14 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     info: this.info,
                 };
 
-                this.getBaichuanLogger().log(`Updating device interfaces: ${JSON.stringify(device)}`);
+                logger.log(`Updating device interfaces: ${JSON.stringify(device)}`);
 
                 await sdk.deviceManager.onDeviceDiscovered(device);
             } catch (e) {
-                this.getBaichuanLogger().error('Failed to update device interfaces', e);
+                logger.error('Failed to update device interfaces', e);
             }
 
-            this.getBaichuanLogger().log(`Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets })}`);
+            logger.log(`Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets })}`);
         }
         catch (e) {
             logger.error('Failed to refresh abilities', e);
@@ -1566,7 +1581,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         this.streamManager = new StreamManager({
             createStreamClient: () => this.createStreamClient(),
-            getLogger: () => this.getBaichuanLogger() as Console,
+            getLogger: () => logger as Console,
             credentials: {
                 username,
                 password

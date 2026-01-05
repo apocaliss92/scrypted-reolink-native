@@ -53,7 +53,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         rtspChannel: number;
         deviceData: DeviceInfoResponse;
     }>();
-    lastHubInfoCheck: number | undefined;
+    lastNvrInfoCheck: number | undefined;
     lastErrorsCheck: number | undefined;
     lastDevicesStatusCheck: number | undefined;
     cameraNativeMap = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera>();
@@ -169,7 +169,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             // Find camera for this channel
             const channel = ev?.channel;
             if (channel === undefined) {
-                logger.debug('Event has no channel, ignoring');
+                logger.error('Event has no channel, ignoring');
                 return;
             }
 
@@ -177,7 +177,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             const targetCamera = nativeId ? this.cameraNativeMap.get(nativeId) : undefined;
 
             if (!targetCamera) {
-                logger.debug(`No camera found for channel ${channel}, ignoring event`);
+                logger.info(`No camera found for channel ${channel}, ignoring event`);
                 return;
             }
 
@@ -211,7 +211,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                     motion = true;
                     break;
                 default:
-                    logger.debug(`Unknown event type: ${ev?.type}`);
+                    logger.error(`Unknown event type: ${ev?.type}`);
                     return;
             }
 
@@ -309,13 +309,12 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                     // Note: ReolinkCgiApi doesn't have checkErrors, skip for now
                 }
 
-                if (!this.lastHubInfoCheck || now - this.lastHubInfoCheck > 1000 * 60 * 5) {
-                    logger.log('Starting Hub info data fetch');
-                    this.lastHubInfoCheck = now;
-                    const { hubData } = await api.getHubInfo();
+                if (!this.lastNvrInfoCheck || now - this.lastNvrInfoCheck > 1000 * 60 * 5) {
+                    logger.log('Starting NVR info data fetch');
+                    this.lastNvrInfoCheck = now;
+                    const { nvrData } = await api.getNvrInfo();
                     const { devicesData, channelsResponse, response } = await api.getDevicesInfo();
-                    logger.log('Hub info data fetched');
-                    logger.debug(`${JSON.stringify({ hubData, devicesData, channelsResponse, response })}`);
+                    logger.log(`NVR info data fetched: ${JSON.stringify({ nvrData, devicesData, channelsResponse, response })}`);
 
                     await this.discoverDevices(true);
                 }
@@ -355,6 +354,8 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     }
 
     async updateDeviceInfo(): Promise<void> {
+        const logger = this.getBaichuanLogger();
+
         const { ipAddress } = this.storageSettings.values;
         try {
             const api = await this.ensureClient();
@@ -365,8 +366,10 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                 ipAddress,
                 deviceData,
             });
+
+            logger.log(`Device info updated: ${JSON.stringify(deviceData)}`);
         } catch (e) {
-            this.getBaichuanLogger().warn('Failed to fetch device info', e);
+            logger.warn('Failed to fetch device info', e);
         }
     }
 
@@ -422,12 +425,8 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         const api = await this.ensureClient();
         const logger = this.getBaichuanLogger();
 
-        logger.log('Starting channels discovery using getDevicesInfo...');
-
         const { devicesData, channels } = await api.getDevicesInfo();
-
-        logger.log(`getDevicesInfo completed. Found ${channels.length} channels.`);
-
+        logger.log(`Sync entities from remote for ${channels.length} channels`);
         // Process each channel that was successfully discovered
         for (const channel of channels) {
             try {
@@ -479,7 +478,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             }
         }
 
-        logger.log(`Channel discovery completed. Found ${this.discoveredDevices.size} devices.`);
+        logger.log(`Channel discovery completed. ${JSON.stringify({ devicesData, channels })}`);
     }
 
     async discoverDevices(scan?: boolean): Promise<DiscoveredDevice[]> {
@@ -532,7 +531,8 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         await sdk.deviceManager.onDeviceDiscovered(actualDevice);
 
         const device = await this.getDevice(adopt.nativeId);
-        this.getBaichuanLogger().debug('Adopted device', entry, device?.name);
+        const logger = this.getBaichuanLogger();
+        logger.log('Adopted device', entry, device?.name);
         const { username, password, ipAddress } = this.storageSettings.values;
 
         device.storageSettings.values.rtspChannel = entry.rtspChannel;
