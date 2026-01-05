@@ -43,6 +43,16 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             type: 'password',
             onPut: async () => await this.reinit()
         },
+        diagnosticsRun: {
+            subgroup: 'Diagnostics',
+            title: 'Run NVR Diagnostics',
+            description: 'Collect NVR diagnostics and display results in logs.',
+            type: 'button',
+            immediate: true,
+            onPut: async () => {
+                await this.runNvrDiagnostics();
+            },
+        },
     });
     plugin: ReolinkNativePlugin;
     nvrApi: ReolinkCgiApi | undefined;
@@ -66,7 +76,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
         setTimeout(async () => {
             await this.init();
-        }, 5000);
+        }, 2000);
     }
 
     async reboot(): Promise<void> {
@@ -243,6 +253,26 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         // Use base class implementation
         await super.subscribeToEvents();
         logger.log('Subscribed to all events for NVR cameras');
+    }
+
+    private async runNvrDiagnostics(): Promise<void> {
+        const logger = this.getBaichuanLogger();
+        logger.log(`Starting NVR diagnostics...`);
+
+        try {
+            const cgiApi = await this.ensureClient();
+
+            const diagnostics = await cgiApi.collectNvrDiagnostics({
+                logger: this.console,
+            });
+
+            logger.log(`NVR diagnostics completed successfully.`);
+            
+            cgiApi.printNvrDiagnostics(diagnostics, this.console);
+        } catch (e) {
+            logger.error('Failed to run NVR diagnostics', e);
+            throw e;
+        }
     }
 
     async unsubscribeFromAllEvents(): Promise<void> {
@@ -544,7 +574,6 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         device.storageSettings.values.ipAddress = ipAddress;
         device.storageSettings.values.capabilities = capabilities;
         device.storageSettings.values.uid = entry.deviceData.channelStatus.uid;
-        device.storageSettings.values.isFromNvr = true;
 
         this.discoveredDevices.delete(adopt.nativeId);
         return device?.id;

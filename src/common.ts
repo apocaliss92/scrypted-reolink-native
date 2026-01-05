@@ -8,6 +8,7 @@ import { convertDebugLogsToApiOptions, DebugLogDisplayNames, DebugLogOption, get
 import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
 import { ReolinkNativeNvrDevice } from "./nvr";
+import { ReolinkNativeMultiFocalDevice } from "./multifocal";
 import { ReolinkPtzPresets } from "./presets";
 import {
     buildVideoStreamOptions,
@@ -26,6 +27,7 @@ export type CameraType = 'battery' | 'regular';
 export interface CommonCameraMixinOptions {
     type: CameraType;
     nvrDevice?: ReolinkNativeNvrDevice; // Optional reference to NVR device
+    multiFocalDevice?: ReolinkNativeMultiFocalDevice; // Optional reference to multi-focal device
 }
 
 class ReolinkCameraSiren extends ScryptedDeviceBase implements OnOff {
@@ -229,11 +231,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             onPut: async () => {
                 await this.credentialsChanged();
             }
-        },
-        isFromNvr: {
-            type: 'boolean',
-            hide: true,
-            defaultValue: false,
         },
         mixinsSetup: {
             type: 'boolean',
@@ -525,14 +522,16 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     resetBaichuanClient?(reason?: any): Promise<void>;
 
     protected nvrDevice?: ReolinkNativeNvrDevice;
+    protected multiFocalDevice?: ReolinkNativeMultiFocalDevice;
     thisDevice: Settings
 
     constructor(nativeId: string, public plugin: ReolinkNativePlugin, public options: CommonCameraMixinOptions) {
         super(nativeId);
-        this.protocol = !options.nvrDevice && options.type === 'battery' ? 'udp' : 'tcp';
+        this.protocol = !options.nvrDevice && !options.multiFocalDevice && options.type === 'battery' ? 'udp' : 'tcp';
 
         // Store NVR device reference if provided
         this.nvrDevice = options.nvrDevice;
+        this.multiFocalDevice = options.multiFocalDevice;
         this.thisDevice = sdk.systemManager.getDeviceById<Settings>(this.id);
 
         setTimeout(async () => {
@@ -745,7 +744,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     async subscribeToEvents(): Promise<void> {
-        if (this.nvrDevice) {
+        if (this.nvrDevice || this.multiFocalDevice) {
             return;
         }
 
@@ -1110,7 +1109,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         const { ipAddress, rtspChannel } = this.storageSettings.values;
         try {
             const api = await this.ensureClient();
-            const deviceData = await api.getInfo(this.nvrDevice ? rtspChannel : undefined);
+            const deviceData = await api.getInfo((this.nvrDevice || this.multiFocalDevice) ? rtspChannel : undefined);
 
             await updateDeviceInfo({
                 device: this,
@@ -1458,6 +1457,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         if (this.nvrDevice) {
             return await this.nvrDevice.ensureBaichuanClient();
         }
+        if (this.multiFocalDevice) {
+            return await this.multiFocalDevice.ensureBaichuanClient();
+        }
 
         // Use base class implementation
         return await this.ensureBaichuanClient();
@@ -1619,9 +1621,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             logger.warn('Failed to subscribe to Baichuan events', e);
         }
 
-        const { isFromNvr } = this.storageSettings.values;
 
-        if (isFromNvr && this.nvrDevice) {
+        if (this.nvrDevice) {
             this.storageSettings.settings.username.hide = true;
             this.storageSettings.settings.password.hide = true;
             this.storageSettings.settings.ipAddress.hide = true;
@@ -1630,6 +1631,17 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             this.storageSettings.settings.username.defaultValue = this.nvrDevice.storageSettings.values.username;
             this.storageSettings.settings.password.defaultValue = this.nvrDevice.storageSettings.values.password;
             this.storageSettings.settings.ipAddress.defaultValue = this.nvrDevice.storageSettings.values.ipAddress;
+        }
+
+        if (this.multiFocalDevice) {
+            this.storageSettings.settings.username.hide = true;
+            this.storageSettings.settings.password.hide = true;
+            this.storageSettings.settings.ipAddress.hide = true;
+            this.storageSettings.settings.uid.hide = true;
+
+            this.storageSettings.settings.username.defaultValue = this.multiFocalDevice.storageSettings.values.username;
+            this.storageSettings.settings.password.defaultValue = this.multiFocalDevice.storageSettings.values.password;
+            this.storageSettings.settings.ipAddress.defaultValue = this.multiFocalDevice.storageSettings.values.ipAddress;
         }
 
         await this.init();

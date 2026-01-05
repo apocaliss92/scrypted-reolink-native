@@ -1,5 +1,10 @@
 import type { DeviceCapabilities, ReolinkDeviceInfo } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import { DeviceBase, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface } from "@scrypted/sdk";
+import { DeviceBase, ScryptedDeviceType, ScryptedInterface } from "@scrypted/sdk";
+
+export const nvrSuffix = `-nvr`;
+export const batteryCameraSuffix = `-battery-cam`;
+export const multifocalSuffix = `-multifocal`;
+export const cameraSuffix = `-cam`;
 
 export const getDeviceInterfaces = (props: {
     capabilities: DeviceCapabilities,

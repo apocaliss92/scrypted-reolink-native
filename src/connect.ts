@@ -1,4 +1,4 @@
-import type { BaichuanClientOptions, ReolinkBaichuanApi } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { BaichuanClientOptions, ReolinkBaichuanApi, ReolinkDeviceInfo } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 
 export type BaichuanTransport = "tcp" | "udp";
 
@@ -116,13 +116,13 @@ export type UdpFallbackInfo = {
     tcpError: unknown;
 };
 
-export type DeviceType = 'camera' | 'battery-cam' | 'nvr';
+export type DeviceType = 'camera' | 'battery-cam' | 'nvr' | 'multifocal';
 
 export type AutoDetectResult = {
     type: DeviceType;
     transport: BaichuanTransport;
-    uid?: string;
-    deviceInfo?: Record<string, string>;
+    uid: string;
+    deviceInfo?: ReolinkDeviceInfo;
     channelNum?: number;
 };
 
@@ -134,7 +134,7 @@ async function pingHost(host: string, timeoutMs: number = 3000): Promise<boolean
         const { exec } = require('child_process');
         const platform = process.platform;
         const pingCmd = platform === 'win32' ? `ping -n 1 -w ${timeoutMs} ${host}` : `ping -c 1 -W ${Math.floor(timeoutMs / 1000)} ${host}`;
-        
+
         exec(pingCmd, (error: any) => {
             resolve(!error);
         });
@@ -173,12 +173,25 @@ export async function autoDetectDeviceType(
         });
         await tcpApi.login();
 
-        // Get device info to check if it's an NVR
+        // Get device info to check device type
         const deviceInfo = await tcpApi.getInfo();
         const { support } = await tcpApi.getDeviceCapabilities(0);
         const channelNum = support?.channelNum ?? 1;
 
         logger.log(`[AutoDetect] TCP connection successful. channelNum=${channelNum}`);
+
+        // Multi-focal devices have 2 or 3 channels
+        if (channelNum === 2 || channelNum === 3) {
+            logger.log(`[AutoDetect] Detected multi-focal device (${channelNum} channels, channelNum=${channelNum})`);
+            await tcpApi.close();
+            return {
+                type: 'multifocal',
+                transport: 'tcp',
+                uid: uid || '',
+                deviceInfo,
+                channelNum,
+            };
+        }
 
         // If channelNum > 1, it's likely an NVR
         if (channelNum > 1) {
@@ -187,6 +200,7 @@ export async function autoDetectDeviceType(
             return {
                 type: 'nvr',
                 transport: 'tcp',
+                uid: uid || '',
                 deviceInfo,
                 channelNum,
             };
@@ -198,6 +212,7 @@ export async function autoDetectDeviceType(
         return {
             type: 'camera',
             transport: 'tcp',
+            uid: uid || '',
             deviceInfo,
             channelNum: 1,
         };
@@ -233,6 +248,23 @@ export async function autoDetectDeviceType(
             await udpApi.login();
 
             const deviceInfo = await udpApi.getInfo();
+            const { support } = await udpApi.getDeviceCapabilities(0);
+            const channelNum = support?.channelNum ?? 1;
+
+            // Multi-focal devices can also be UDP (battery multi-focal cameras)
+            if (channelNum === 2 || channelNum === 3) {
+                logger.log(`[AutoDetect] UDP connection successful. Detected multi-focal device (${channelNum} channels).`);
+                await udpApi.close();
+                return {
+                    type: 'multifocal',
+                    transport: 'udp',
+                    uid: normalizedUid,
+                    deviceInfo,
+                    channelNum,
+                };
+            }
+
+            // Regular battery camera
             logger.log(`[AutoDetect] UDP connection successful. Detected battery camera.`);
             await udpApi.close();
 
@@ -251,47 +283,3 @@ export async function autoDetectDeviceType(
         }
     }
 }
-
-// export async function connectBaichuanWithTcpUdpFallback(
-//     inputs: BaichuanConnectInputs,
-//     onUdpFallback?: (info: UdpFallbackInfo) => void,
-// ): Promise<{ api: ReolinkBaichuanApi; transport: BaichuanTransport }> {
-//     let tcpApi: ReolinkBaichuanApi | undefined;
-//     try {
-//         tcpApi = await createBaichuanApi(inputs, "tcp");
-//         await tcpApi.login();
-//         return { api: tcpApi, transport: "tcp" };
-//     }
-//     catch (e) {
-//         try {
-//             await tcpApi?.close();
-//         }
-//         catch {
-//             // ignore
-//         }
-
-//         if (!isTcpFailureThatShouldFallbackToUdp(e)) {
-//             throw e;
-//         }
-
-//         const uid = normalizeUid(inputs.uid);
-//         const uidMissing = !uid;
-
-//         onUdpFallback?.({
-//             host: inputs.host,
-//             uid,
-//             uidMissing,
-//             tcpError: e,
-//         });
-
-//         if (uidMissing) {
-//             throw new Error(
-//                 `Baichuan TCP failed and this camera likely requires UDP/BCUDP. Set the Reolink UID in settings to continue (ip=${inputs.host}).`,
-//             );
-//         }
-
-//         const udpApi = await createBaichuanApi(inputs, "udp");
-//         await udpApi.login();
-//         return { api: udpApi, transport: "udp" };
-//     }
-// }

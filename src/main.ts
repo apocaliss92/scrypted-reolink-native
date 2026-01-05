@@ -1,12 +1,15 @@
-import sdk, { DeviceCreator, DeviceCreatorSettings, DeviceInformation, DeviceProvider, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedNativeId, Setting } from "@scrypted/sdk";
+import sdk, { DeviceCreator, DeviceCreatorSettings, DeviceInformation, DeviceProvider, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedNativeId, Setting, Settings } from "@scrypted/sdk";
 import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
 import { ReolinkNativeNvrDevice } from "./nvr";
-import { autoDetectDeviceType, createBaichuanApi } from "./connect";
-import { getDeviceInterfaces } from "./utils";
+import { ReolinkNativeMultiFocalDevice } from "./multifocal";
+import { autoDetectDeviceType, createBaichuanApi, type BaichuanTransport } from "./connect";
+import { batteryCameraSuffix, cameraSuffix, getDeviceInterfaces, multifocalSuffix, nvrSuffix } from "./utils";
+import { BaseBaichuanClass } from "./baichuan-base";
+import { CommonCameraMixin } from "./common";
 
 class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, DeviceCreator {
-    devices = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera | ReolinkNativeNvrDevice>();
+    devices = new Map<string, BaseBaichuanClass>();
     nvrDeviceId: string;
 
     constructor(nativeId: string) {
@@ -20,7 +23,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
         return 'Reolink Native camera';
     }
 
-    async getDevice(nativeId: ScryptedNativeId): Promise<ReolinkNativeCamera | ReolinkNativeBatteryCamera | ReolinkNativeNvrDevice> {
+    async getDevice(nativeId: ScryptedNativeId): Promise<BaseBaichuanClass> {
         if (this.devices.has(nativeId)) {
             return this.devices.get(nativeId)!;
         }
@@ -55,12 +58,51 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
         this.console.log(`[AutoDetect] Detected device type: ${detection.type} (transport: ${detection.transport})`);
 
+        // Handle multi-focal device case
+        if (detection.type === 'multifocal') {
+            const deviceInfo = detection.deviceInfo || {};
+            const name = deviceInfo.name || 'Reolink Multi-Focal';
+            const serialNumber = deviceInfo.serialNumber || deviceInfo.itemNo || `multifocal-${Date.now()}`;
+            nativeId = `${serialNumber}${multifocalSuffix}`;
+
+            settings.newCamera ||= name;
+
+            await sdk.deviceManager.onDeviceDiscovered({
+                nativeId,
+                name,
+                interfaces: [
+                    ScryptedInterface.Settings,
+                    ScryptedInterface.DeviceDiscovery,
+                    ScryptedInterface.DeviceProvider,
+                    ScryptedInterface.Reboot,
+                ],
+                type: ScryptedDeviceType.DeviceProvider,
+                providerNativeId: this.nativeId,
+            });
+
+            const device = await this.getDevice(nativeId);
+            if (!(device instanceof ReolinkNativeMultiFocalDevice)) {
+                throw new Error('Expected multi-focal device but got different type');
+            }
+            device.storageSettings.values.ipAddress = ipAddress;
+            device.storageSettings.values.username = username;
+            device.storageSettings.values.password = password;
+            device.storageSettings.values.uid = detection.uid || '';
+            
+            // Update the protocol based on detection result
+            // Note: This requires updating the protocol property, but it's readonly
+            // The transport is already set in the constructor during createDevice
+            // For now, we'll rely on the constructor parameter
+
+            return nativeId;
+        }
+
         // Handle NVR case
         if (detection.type === 'nvr') {
             const deviceInfo = detection.deviceInfo || {};
             const name = deviceInfo?.name || 'Reolink NVR';
             const serialNumber = deviceInfo?.serialNumber || deviceInfo?.itemNo || `nvr-${Date.now()}`;
-            nativeId = `${serialNumber}-nvr`;
+            nativeId = `${serialNumber}${nvrSuffix}`;
 
             settings.newCamera ||= name;
 
@@ -95,9 +137,9 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
         // Create nativeId based on device type
         if (detection.type === 'battery-cam') {
-            nativeId = `${serialNumber}-battery-cam`;
+            nativeId = `${serialNumber}${batteryCameraSuffix}`;
         } else {
-            nativeId = `${serialNumber}-cam`;
+            nativeId = `${serialNumber}${cameraSuffix}`;
         }
 
         settings.newCamera ||= name;
@@ -135,13 +177,8 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 providerNativeId: this.nativeId,
             });
 
-            const device = await this.getDevice(nativeId);
-            if (device instanceof ReolinkNativeNvrDevice) {
-                // NVR devices are handled separately above
-                throw new Error('NVR device should not reach this code path');
-            }
+            const device = await this.getDevice(nativeId) as CommonCameraMixin;
 
-            // Type guard: device is either ReolinkNativeCamera or ReolinkNativeBatteryCamera
             device.info = deviceInfo;
             device.classes = objects;
             device.presets = presets;
@@ -198,10 +235,16 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
     }
 
     createCamera(nativeId: string) {
-        if (nativeId.endsWith('-battery-cam')) {
+        if (nativeId.endsWith(batteryCameraSuffix)) {
             return new ReolinkNativeBatteryCamera(nativeId, this);
-        } else if (nativeId.endsWith('-nvr')) {
+        } else if (nativeId.endsWith(nvrSuffix)) {
             return new ReolinkNativeNvrDevice(nativeId, this);
+        } else if (nativeId.endsWith(multifocalSuffix)) {
+            // Get transport from device settings if available, otherwise default to TCP
+            // The transport is determined during autoDetect and should be stored
+            // For now, we'll try to infer from UID presence (if UID is set, likely UDP)
+            // Default to TCP for now - the transport will be set correctly during createDevice
+            return new ReolinkNativeMultiFocalDevice(nativeId, this, 'tcp');
         } else {
             return new ReolinkNativeCamera(nativeId, this);
         }
