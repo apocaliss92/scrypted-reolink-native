@@ -6,6 +6,8 @@ import {
 } from "./common";
 import { createBaichuanApi } from './connect';
 import ReolinkNativePlugin from "./main";
+import { ReolinkNativeNvrDevice } from "./nvr";
+import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 
 export const moToB64 = async (mo: MediaObject) => {
     const bufferImage = await sdk.mediaManager.convertMediaObjectToBuffer(mo, 'image/jpeg');
@@ -28,10 +30,16 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
     private statusPollTimer: NodeJS.Timeout | undefined;
 
 
-    constructor(nativeId: string, public plugin: ReolinkNativePlugin, nvrDevice?: any) {
+    constructor(
+        nativeId: string, 
+        public plugin: ReolinkNativePlugin, 
+        nvrDevice?: ReolinkNativeNvrDevice,
+        multiFocalDevice?: ReolinkNativeMultiFocalDevice
+    ) {
         super(nativeId, plugin, {
             type: 'regular',
             nvrDevice,
+            multiFocalDevice,
         });
     }
 
@@ -107,10 +115,6 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
         await api.login();
 
         return api;
-    }
-
-    getClient(): ReolinkBaichuanApi | undefined {
-        return this.baichuanApi;
     }
 
     private passiveRefreshTimer: ReturnType<typeof setTimeout> | undefined;

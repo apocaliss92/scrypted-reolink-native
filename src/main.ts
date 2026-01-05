@@ -4,9 +4,10 @@ import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
 import { CommonCameraMixin } from "./common";
 import { createBaichuanApi } from "./connect";
-import { ReolinkNativeMultiFocalDevice } from "./multifocal";
+import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
 import { batteryCameraSuffix, cameraSuffix, getDeviceInterfaces, multifocalSuffix, nvrSuffix } from "./utils";
+import { BaichuanTransport } from "./connect";
 
 class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, DeviceCreator {
     devices = new Map<string, BaseBaichuanClass>();
@@ -73,7 +74,6 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 name,
                 interfaces: [
                     ScryptedInterface.Settings,
-                    ScryptedInterface.DeviceDiscovery,
                     ScryptedInterface.DeviceProvider,
                     ScryptedInterface.Reboot,
                 ],
@@ -89,6 +89,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             device.storageSettings.values.username = username;
             device.storageSettings.values.password = password;
             device.storageSettings.values.uid = detection.uid || '';
+            device.storageSettings.values.protocol = detection.transport || 'tcp' as BaichuanTransport;
 
             return nativeId;
         }
@@ -237,7 +238,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
         } else if (nativeId.endsWith(nvrSuffix)) {
             return new ReolinkNativeNvrDevice(nativeId, this);
         } else if (nativeId.endsWith(multifocalSuffix)) {
-            return new ReolinkNativeMultiFocalDevice(nativeId, this, 'tcp');
+            return new ReolinkNativeMultiFocalDevice(nativeId, this);
         } else {
             return new ReolinkNativeCamera(nativeId, this);
         }

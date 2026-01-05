@@ -9,6 +9,8 @@ import {
 } from "./common";
 import { DebugLogOption } from "./debug-options";
 import type ReolinkNativePlugin from "./main";
+import { ReolinkNativeNvrDevice } from "./nvr";
+import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 
 export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
     private lastPicture: { mo: MediaObject; atMs: number } | undefined;
@@ -28,10 +30,16 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
         return debugLogs.includes(DebugLogOption.BatteryInfo);
     }
 
-    constructor(nativeId: string, public plugin: ReolinkNativePlugin, nvrDevice?: any) {
+    constructor(
+        nativeId: string, 
+        public plugin: ReolinkNativePlugin, 
+        nvrDevice?: ReolinkNativeNvrDevice,
+        multiFocalDevice?: ReolinkNativeMultiFocalDevice
+    ) {
         super(nativeId, plugin, {
             type: 'battery',
             nvrDevice,
+            multiFocalDevice,
         });
     }
 

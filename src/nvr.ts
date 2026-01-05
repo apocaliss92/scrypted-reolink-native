@@ -124,12 +124,10 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     }
 
     protected async onBeforeCleanup(): Promise<void> {
-        // Unsubscribe from events if needed
         await this.unsubscribeFromAllEvents();
     }
 
     async reinit() {
-        // Cancel any pending init/reinit
         if (this.initReinitTimeout) {
             clearTimeout(this.initReinitTimeout);
             this.initReinitTimeout = undefined;
@@ -307,7 +305,6 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         if (eventSource !== 'Native') {
             await this.unsubscribeFromAllEvents();
         } else {
-
             this.subscribeToAllEvents().catch((e) => {
                 logger.warn('Failed to subscribe to Native events', e);
             });
@@ -343,7 +340,6 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         
         await this.updateDeviceInfo();
 
-        // Initialize event subscriptions based on selected source
         await this.reinitEventSubscriptions();
 
         setInterval(async () => {

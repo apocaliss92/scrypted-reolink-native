@@ -1,6 +1,6 @@
-import type { BaichuanClientOptions, ReolinkBaichuanApi } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { BaichuanTransport as BaichuanTransportParent, BaichuanClientOptions, ReolinkBaichuanApi } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 
-export type BaichuanTransport = "tcp" | "udp";
+export type BaichuanTransport = BaichuanTransportParent;
 
 export type BaichuanConnectInputs = {
     host: string;

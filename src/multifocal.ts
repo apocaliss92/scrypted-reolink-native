@@ -1,14 +1,14 @@
-import type { DeviceInfoResponse, ReolinkBaichuanApi, ReolinkCgiApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { AdoptDevice, Device, DeviceDiscovery, DeviceProvider, DiscoveredDevice, Reboot, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, SettingValue } from "@scrypted/sdk";
+import type { DeviceCapabilities, DualLensChannelAnalysis, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import sdk, { Device, DeviceProvider, Reboot, ScryptedDeviceType, Setting, Settings, SettingValue } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
-import { BaseBaichuanClass, type BaichuanConnectionConfig, type BaichuanConnectionCallbacks } from "./baichuan-base";
+import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
 import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
-import { normalizeUid, type BaichuanTransport } from "./connect";
+import { normalizeUid } from "./connect";
 import ReolinkNativePlugin from "./main";
-import { getDeviceInterfaces, updateDeviceInfo } from "./utils";
+import { batteryCameraSuffix, cameraSuffix, getDeviceInterfaces, updateDeviceInfo } from "./utils";
 
-export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements Settings, DeviceDiscovery, DeviceProvider, Reboot {
+export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements Settings, DeviceProvider, Reboot {
     storageSettings = new StorageSettings(this, {
         debugEvents: {
             title: 'Debug Events',
@@ -39,6 +39,10 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
             hide: true,
             onPut: async () => await this.reinit()
         },
+        protocol: {
+            type: 'string',
+            hide: true,
+        },
         diagnosticsRun: {
             subgroup: 'Diagnostics',
             title: 'Run Diagnostics',
@@ -49,26 +53,27 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
                 await this.runDiagnostics();
             },
         },
+        multifocalInfo: {
+            json: true,
+            hide: true,
+        },
+        capabilities: {
+            json: true,
+            hide: true,
+        }
     });
+
     plugin: ReolinkNativePlugin;
-    protected readonly protocol: BaichuanTransport;
-    discoveredDevices = new Map<string, {
-        device: Device;
-        description: string;
-        rtspChannel: number;
-        deviceData: DeviceInfoResponse;
-    }>();
     cameraNativeMap = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera>();
     private channelToNativeIdMap = new Map<number, string>();
-    processing = false;
-    private syncInProgress = false;
-    private syncPromise: Promise<void> | undefined;
     private initReinitTimeout: NodeJS.Timeout | undefined;
+    isBattery: boolean;
 
-    constructor(nativeId: string, plugin: ReolinkNativePlugin, transport: BaichuanTransport = 'tcp') {
+    constructor(nativeId: string, plugin: ReolinkNativePlugin) {
         super(nativeId);
         this.plugin = plugin;
-        this.protocol = transport;
+
+        this.isBattery = this.storageSettings.values.protocol === 'udp';
 
         this.scheduleInit();
     }
@@ -78,16 +83,17 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
         await api.reboot();
     }
 
-    // BaseBaichuanClass abstract methods implementation
     protected getConnectionConfig(): BaichuanConnectionConfig {
         const { ipAddress, username, password, uid } = this.storageSettings.values;
         if (!ipAddress || !username || !password) {
             throw new Error('Missing device credentials');
         }
 
-        const normalizedUid = this.protocol === 'udp' ? normalizeUid(uid) : undefined;
+        const { protocol } = this.storageSettings.values;
 
-        if (this.protocol === 'udp' && !normalizedUid) {
+        const normalizedUid = this.isBattery ? normalizeUid(uid) : undefined;
+
+        if (protocol === 'udp' && !normalizedUid) {
             throw new Error('UID is required for UDP multi-focal devices (BCUDP)');
         }
 
@@ -96,7 +102,7 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
             username,
             password,
             uid: normalizedUid,
-            transport: this.protocol,
+            transport: protocol,
             logger: this.console,
         };
     }
@@ -107,10 +113,24 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
             onClose: async () => {
                 // Reinit after cleanup
                 await this.reinit();
+                if (!this.isBattery) {
+                    setTimeout(async () => {
+                        try {
+                            await this.subscribeToEvents();
+                        } catch (e) {
+                            const logger = this.getBaichuanLogger();
+                            logger.warn('Failed to resubscribe to events after reconnection', e);
+                        }
+                    }, 1000);
+                }
             },
             onSimpleEvent: (ev) => this.forwardNativeEvent(ev),
             getEventSubscriptionEnabled: () => true,
         };
+    }
+
+    protected async onBeforeCleanup(): Promise<void> {
+        await this.unsubscribeFromAllEvents();
     }
 
     protected isDebugEnabled(): boolean {
@@ -152,25 +172,14 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
     async init(): Promise<void> {
         const logger = this.getBaichuanLogger();
         try {
-            // Update UID setting visibility based on transport
-            this.storageSettings.settings.uid.hide = this.protocol === 'tcp';
+            this.storageSettings.settings.uid.hide = !this.isBattery;
 
-            logger.debug('Initializing: ensuring Baichuan client...');
             await this.ensureBaichuanClient();
-
-            logger.debug('Initializing: updating device info...');
             await this.updateDeviceInfo();
-
-            logger.debug('Initializing: subscribing to events...');
+            await this.reportDevices();
             await this.subscribeToEvents();
-
-            logger.debug('Initializing: discovering devices...');
-            await this.discoverDevices(true);
-
-            logger.log('Initialization completed successfully');
         } catch (e) {
             logger.error('Failed to initialize multi-focal device', e);
-            // Log more details about the error
             if (e instanceof Error) {
                 logger.error(`Error message: ${e.message}`);
                 logger.error(`Error stack: ${e.stack}`);
@@ -198,188 +207,95 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
         }
     }
 
-    async syncEntitiesFromRemote() {
-        // If sync is already in progress, wait for it to complete
-        if (this.syncInProgress && this.syncPromise) {
-            const logger = this.getBaichuanLogger();
-            logger.debug('Sync already in progress, waiting for completion...');
-            await this.syncPromise;
-            return;
-        }
+    getInterfaces(channel: number) {
+        const logger = this.getBaichuanLogger();
+        const { capabilities: caps, multifocalInfo } = this.storageSettings.values;
+        const channelInfo = (multifocalInfo as DualLensChannelAnalysis).channels.find(c => c.channel === channel);
 
-        // Start new sync
-        this.syncInProgress = true;
-        this.syncPromise = (async () => {
-            const api = await this.ensureBaichuanClient();
-            const logger = this.getBaichuanLogger();
-
-            try {
-            // const channelsInfo = await api.getNvrChannelsInfo();
-            // const deviceInfo = await api.getInfo();
-            const { support } = await api.getDeviceCapabilities();
-            const channelNum = support?.channelNum ?? 1;
-            logger.log(`Sync entities from remote for ${channelNum} channels`);
-            const channels = Array.from({ length: channelNum }, (_, i) => i + 1);
-
-            const multifocalInfo = await api.getDualLensChannelInfo();
-
-            logger.log(`Multichannel info: ${JSON.stringify(multifocalInfo)}`);
-
-            // if (channelNum === 2) {
-
-            // }
-
-            for (const channel of channels) {
-                //     try {
-                //         const name = deviceInfo?.name || `Channel ${channel}`;
-                //         const uid = deviceInfo?.uid;
-                //         const isBattery = !!(abilities?.battery?.ver ?? 0);
-
-                //         const nativeId = this.buildNativeId(channel, uid, isBattery);
-                //         const interfaces = [ScryptedInterface.VideoCamera];
-                //         if (isBattery) {
-                //             interfaces.push(ScryptedInterface.Battery);
-                //         }
-                //         const type = abilities.supportDoorbellLight ? ScryptedDeviceType.Doorbell : ScryptedDeviceType.Camera;
-
-                //         const device: Device = {
-                //             nativeId,
-                //             name,
-                //             providerNativeId: this.nativeId,
-                //             interfaces,
-                //             type,
-                //             info: {
-                //                 manufacturer: 'Reolink',
-                //                 model: channelInfo?.typeInfo,
-                //                 serialNumber: uid,
-                //             }
-                //         };
-
-                //         this.channelToNativeIdMap.set(channel, nativeId);
-
-                //         if (sdk.deviceManager.getNativeIds().includes(nativeId)) {
-                //             continue;
-                //         }
-
-                //         if (this.discoveredDevices.has(nativeId)) {
-                //             continue;
-                //         }
-
-                //         this.discoveredDevices.set(nativeId, {
-                //             device,
-                //             description: `${name} (Channel ${channel})`,
-                //             rtspChannel: channel,
-                //             deviceData: devicesData[channel],
-                //         });
-
-                //         logger.debug(`Discovered channel ${channel}: ${name}`);
-                //     } catch (e: any) {
-                //         logger.debug(`Error processing channel ${channel}: ${e?.message || String(e)}`);
-                //     }
-            }
-
-            // logger.log(`Channel discovery completed. ${JSON.stringify({ devicesData, channels })}`);
-            } catch (e) {
-                logger.error('Failed to sync entities from remote', e);
-                if (e instanceof Error) {
-                    logger.error(`Error in syncEntitiesFromRemote: ${e.message}`);
-                    logger.error(`Stack: ${e.stack}`);
-                } else {
-                    logger.error(`Error details: ${JSON.stringify(e)}`);
-                }
-                throw e;
-            } finally {
-                this.syncInProgress = false;
-                this.syncPromise = undefined;
-            }
-        })();
-
-        await this.syncPromise;
-    }
-
-    async discoverDevices(scan?: boolean): Promise<DiscoveredDevice[]> {
-        if (scan) {
-            await this.syncEntitiesFromRemote();
-        }
-
-        return [...this.discoveredDevices.values()].map(d => ({
-            ...d.device,
-            description: d.description,
-        }));
-    }
-
-    async adoptDevice(adopt: AdoptDevice): Promise<string> {
-        const entry = this.discoveredDevices.get(adopt.nativeId);
-
-        if (!entry)
-            throw new Error('device not found');
-
-        await this.onDeviceEvent(ScryptedInterface.DeviceDiscovery, await this.discoverDevices());
-
-        const isBattery = entry.device.interfaces.includes(ScryptedInterface.Battery);
-        const { channelStatus } = entry.deviceData;
-
-        const { ReolinkBaichuanApi } = await import("@apocaliss92/reolink-baichuan-js");
-        const transport = this.protocol;
-        const uid = channelStatus?.uid || this.storageSettings.values.uid;
-        // For battery cameras or UDP transport, use UID if available
-        const normalizedUid = (isBattery || transport === 'udp') && uid ? normalizeUid(uid) : undefined;
-        const baichuanApi = new ReolinkBaichuanApi({
-            host: this.storageSettings.values.ipAddress,
-            username: this.storageSettings.values.username,
-            password: this.storageSettings.values.password,
-            transport,
-            channel: entry.rtspChannel,
-            ...(normalizedUid ? { uid: normalizedUid } : {}),
-        });
-        await baichuanApi.login();
-        const { capabilities, objects, presets } = await baichuanApi.getDeviceCapabilities(entry.rtspChannel);
-        const { interfaces, type } = getDeviceInterfaces({
-            capabilities,
-            logger: this.console,
-        });
-
-        const actualDevice: Device = {
-            ...entry.device,
-            interfaces,
-            type
+        const capabilities: DeviceCapabilities = {
+            ...caps,
+            hasPan: channelInfo.hasPan,
+            hasTilt: channelInfo.hasTilt,
+            hasZoom: channelInfo.hasZoom,
+            hasPresets: channelInfo.hasPresets,
+            hasIntercom: channelInfo.hasIntercom,
         };
 
-        await sdk.deviceManager.onDeviceDiscovered(actualDevice);
+        const { interfaces } = getDeviceInterfaces({
+            capabilities,
+            logger,
+        });
 
-        const device = await this.getDevice(adopt.nativeId);
-        if (device instanceof ReolinkNativeCamera || device instanceof ReolinkNativeBatteryCamera) {
-            device.storageSettings.values.ipAddress = this.storageSettings.values.ipAddress;
-            device.storageSettings.values.username = this.storageSettings.values.username;
-            device.storageSettings.values.password = this.storageSettings.values.password;
-            device.storageSettings.values.rtspChannel = entry.rtspChannel;
-            // Set multiFocalDevice reference through options (similar to how NVR does it)
-            (device).options = { ...(device).options, multiFocalDevice: this, nvrDevice: undefined };
-            device.classes = objects;
-            device.presets = presets;
-        }
-
-        return adopt.nativeId;
+        return { interfaces, capabilities };
     }
 
-    async getDevice(nativeId: string): Promise<ReolinkNativeCamera | ReolinkNativeBatteryCamera> {
-        if (this.cameraNativeMap.has(nativeId)) {
-            return this.cameraNativeMap.get(nativeId)!;
+    async reportDevices(): Promise<void> {
+        const api = await this.ensureBaichuanClient();
+        const logger = this.getBaichuanLogger();
+        const { protocol, username, password, ipAddress, uid } = this.storageSettings.values;
+
+        const { capabilities, support, abilities, features, objects, presets } = await api.getDeviceCapabilities();
+
+        const multifocalInfo = await api.getDualLensChannelInfo();
+        logger.log(`Sync entities from remote for ${multifocalInfo.channels.length} channels`);
+
+        this.storageSettings.values.multifocalInfo = multifocalInfo;
+        this.storageSettings.values.capabilities = capabilities;
+
+        logger.debug(`Multichannel info: ${JSON.stringify({ multifocalInfo, capabilities, support, abilities, features, objects, presets })}`);
+
+        for (const channelInfo of multifocalInfo?.channels ?? []) {
+            const { channel, lensType } = channelInfo;
+
+            const name = `${this.name} - ${lensType}`;
+            const nativeId = this.buildNativeId(channel);
+
+            this.channelToNativeIdMap.set(channel, nativeId);
+            const { interfaces, capabilities: deviceCapabilities } = this.getInterfaces(channel);
+
+            const device: Device = {
+                providerNativeId: this.nativeId,
+                name,
+                nativeId,
+                info: {
+                    ...this.info,
+                    metadata: {
+                        channel,
+                        lensType
+                    }
+                },
+                interfaces,
+                type: ScryptedDeviceType.Camera,
+            };
+
+            await sdk.deviceManager.onDeviceDiscovered(device);
+
+            const camera = await this.getDevice(nativeId);
+
+            camera.storageSettings.values.rtspChannel = channel;
+            camera.classes = objects;
+            camera.presets = presets;
+            camera.storageSettings.values.username = username;
+            camera.storageSettings.values.password = password;
+            camera.storageSettings.values.ipAddress = ipAddress;
+            camera.storageSettings.values.capabilities = deviceCapabilities;
+            if (this.isBattery) {
+                camera.storageSettings.values.uid = uid;
+            }
+        }
+    }
+
+    async getDevice(nativeId: string) {
+        let device = this.cameraNativeMap.get(nativeId);
+        if (!device) {
+            if (nativeId.endsWith(batteryCameraSuffix)) {
+                device = new ReolinkNativeBatteryCamera(nativeId, this.plugin, undefined, this);
+            } else {
+                device = new ReolinkNativeCamera(nativeId, this.plugin, undefined, this);
+            }
         }
 
-        const entry = this.discoveredDevices.get(nativeId);
-        if (!entry) {
-            throw new Error(`Device ${nativeId} not found`);
-        }
-
-        const isBattery = entry.device.interfaces.includes(ScryptedInterface.Battery);
-        const cameraNativeId = entry.device.nativeId;
-        const camera = isBattery
-            ? new ReolinkNativeBatteryCamera(cameraNativeId, this.plugin, { type: 'battery', multiFocalDevice: this, nvrDevice: undefined })
-            : new ReolinkNativeCamera(cameraNativeId, this.plugin, { type: 'regular', multiFocalDevice: this, nvrDevice: undefined });
-
-        this.cameraNativeMap.set(nativeId, camera);
-        return camera;
+        return device;
     }
 
     async getSettings(): Promise<Setting[]> {
@@ -395,17 +311,12 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
         this.cameraNativeMap.delete(nativeId);
     }
 
-    buildNativeId(channel: number, uid?: string, isBattery?: boolean): string {
-        const serialNumber = uid || this.storageSettings.values.ipAddress || 'unknown';
-        const suffix = isBattery ? '-battery-cam' : '-cam';
-        return `${serialNumber}-channel${channel}${suffix}`;
+    buildNativeId(channel: number): string {
+        const { protocol } = this.storageSettings.values;
+        return `${this.nativeId}-channel${channel}${protocol === "udp" ? batteryCameraSuffix : cameraSuffix}`;
     }
 
     forwardNativeEvent(ev: ReolinkSimpleEvent): void {
-        if (this.processing) {
-            return;
-        }
-
         const logger = this.getBaichuanLogger();
         const channel = ev?.channel;
 
@@ -431,11 +342,8 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
             camera.onSimpleEvent(ev);
         }
     }
-
-    async subscribeToAllEvents(): Promise<void> {
-        const logger = this.getBaichuanLogger();
-        logger.log('Subscribed to all events for multi-focal device cameras');
-        await this.subscribeToEvents();
+    async unsubscribeFromAllEvents(): Promise<void> {
+        await super.unsubscribeFromEvents();
     }
 
     private async runDiagnostics(): Promise<void> {

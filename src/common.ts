@@ -8,7 +8,7 @@ import { convertDebugLogsToApiOptions, DebugLogDisplayNames, DebugLogOption, get
 import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
 import { ReolinkNativeNvrDevice } from "./nvr";
-import { ReolinkNativeMultiFocalDevice } from "./multifocal";
+import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { ReolinkPtzPresets } from "./presets";
 import {
     createRfc4571MediaObjectFromStreamManager,
@@ -526,7 +526,11 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     protected multiFocalDevice?: ReolinkNativeMultiFocalDevice;
     thisDevice: Settings
 
-    constructor(nativeId: string, public plugin: ReolinkNativePlugin, public options: CommonCameraMixinOptions) {
+    constructor(
+        nativeId: string, 
+        public plugin: ReolinkNativePlugin, 
+        public options: CommonCameraMixinOptions
+    ) {
         super(nativeId);
         this.protocol = !options.nvrDevice && !options.multiFocalDevice && options.type === 'battery' ? 'udp' : 'tcp';
 
@@ -644,12 +648,17 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             }
         }
     }
+
     createStreamClient(): Promise<ReolinkBaichuanApi> {
         throw new Error("Method not implemented.");
     }
 
     public getAbilities(): DeviceCapabilities {
-        return this.storageSettings.values.capabilities;
+        if(this.options.multiFocalDevice) {
+            return this.options.multiFocalDevice.getInterfaces(this.storageSettings.values.rtspChannel).capabilities;
+        } else {
+            return this.storageSettings.values.capabilities;
+        }
     }
 
     getBaichuanDebugOptions(): any | undefined {
@@ -1357,21 +1366,16 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         const vsos = await this.getVideoStreamOptions();
         const selected = selectStreamOption(vsos, vso);
 
-        // Check if this is a native stream (prefixed with "native_")
-
-        // If stream has RTSP/RTMP URL (not native), add credentials and create MediaStreamUrl
         if (selected.url && (selected.container === 'rtsp' || selected.container === 'rtmp')) {
             const urlWithCredentials = this.addRtspCredentials(selected.url);
             const ret: MediaStreamUrl = {
                 container: selected.container,
-                // url: selected.url,
                 url: urlWithCredentials,
                 mediaStreamOptions: selected,
             };
             return await this.createMediaObject(ret, ScryptedMimeTypes.MediaStreamUrl);
         }
 
-        // Use streamManager for native Baichuan streams (native_* or streams without URL)
         if (!this.streamManager) {
             throw new Error('StreamManager not initialized');
         }
@@ -1406,9 +1410,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         return await this.withBaichuanRetry(createStreamFn);
     }
 
-    // Client management
     async ensureClient(): Promise<ReolinkBaichuanApi> {
-        // If camera is connected to NVR, use NVR's shared Baichuan connection
         if (this.nvrDevice) {
             return await this.nvrDevice.ensureBaichuanClient();
         }
