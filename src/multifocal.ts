@@ -41,12 +41,12 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
         },
         diagnosticsRun: {
             subgroup: 'Diagnostics',
-            title: 'Run NVR Diagnostics',
-            description: 'Collect NVR diagnostics and display results in logs.',
+            title: 'Run Diagnostics',
+            description: 'Collect diagnostics and display results in logs.',
             type: 'button',
             immediate: true,
             onPut: async () => {
-                await this.runNvrDiagnostics();
+                await this.runDiagnostics();
             },
         },
     });
@@ -61,6 +61,8 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
     cameraNativeMap = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera>();
     private channelToNativeIdMap = new Map<number, string>();
     processing = false;
+    private syncInProgress = false;
+    private syncPromise: Promise<void> | undefined;
     private initReinitTimeout: NodeJS.Timeout | undefined;
 
     constructor(nativeId: string, plugin: ReolinkNativePlugin, transport: BaichuanTransport = 'tcp') {
@@ -197,79 +199,102 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
     }
 
     async syncEntitiesFromRemote() {
-        const api = await this.ensureBaichuanClient();
-        const logger = this.getBaichuanLogger();
+        // If sync is already in progress, wait for it to complete
+        if (this.syncInProgress && this.syncPromise) {
+            const logger = this.getBaichuanLogger();
+            logger.debug('Sync already in progress, waiting for completion...');
+            await this.syncPromise;
+            return;
+        }
 
-        try {
-            const channelsInfo = await api.getNvrChannelsInfo();
-            const deviceInfo = await api.getInfo();
+        // Start new sync
+        this.syncInProgress = true;
+        this.syncPromise = (async () => {
+            const api = await this.ensureBaichuanClient();
+            const logger = this.getBaichuanLogger();
+
+            try {
+            // const channelsInfo = await api.getNvrChannelsInfo();
+            // const deviceInfo = await api.getInfo();
             const { support } = await api.getDeviceCapabilities();
             const channelNum = support?.channelNum ?? 1;
             logger.log(`Sync entities from remote for ${channelNum} channels`);
             const channels = Array.from({ length: channelNum }, (_, i) => i + 1);
 
-            logger.log(JSON.stringify({ channelsInfo, deviceInfo, channels }));
+            const multifocalInfo = await api.getDualLensChannelInfo();
 
-            // for (const channel of channels) {
-            //     try {
-            //         const name = deviceInfo?.name || `Channel ${channel}`;
-            //         const uid = deviceInfo?.uid;
-            //         const isBattery = !!(abilities?.battery?.ver ?? 0);
+            logger.log(`Multichannel info: ${JSON.stringify(multifocalInfo)}`);
 
-            //         const nativeId = this.buildNativeId(channel, uid, isBattery);
-            //         const interfaces = [ScryptedInterface.VideoCamera];
-            //         if (isBattery) {
-            //             interfaces.push(ScryptedInterface.Battery);
-            //         }
-            //         const type = abilities.supportDoorbellLight ? ScryptedDeviceType.Doorbell : ScryptedDeviceType.Camera;
+            // if (channelNum === 2) {
 
-            //         const device: Device = {
-            //             nativeId,
-            //             name,
-            //             providerNativeId: this.nativeId,
-            //             interfaces,
-            //             type,
-            //             info: {
-            //                 manufacturer: 'Reolink',
-            //                 model: channelInfo?.typeInfo,
-            //                 serialNumber: uid,
-            //             }
-            //         };
-
-            //         this.channelToNativeIdMap.set(channel, nativeId);
-
-            //         if (sdk.deviceManager.getNativeIds().includes(nativeId)) {
-            //             continue;
-            //         }
-
-            //         if (this.discoveredDevices.has(nativeId)) {
-            //             continue;
-            //         }
-
-            //         this.discoveredDevices.set(nativeId, {
-            //             device,
-            //             description: `${name} (Channel ${channel})`,
-            //             rtspChannel: channel,
-            //             deviceData: devicesData[channel],
-            //         });
-
-            //         logger.debug(`Discovered channel ${channel}: ${name}`);
-            //     } catch (e: any) {
-            //         logger.debug(`Error processing channel ${channel}: ${e?.message || String(e)}`);
-            //     }
             // }
 
-            // logger.log(`Channel discovery completed. ${JSON.stringify({ devicesData, channels })}`);
-        } catch (e) {
-            logger.error('Failed to sync entities from remote', e);
-            if (e instanceof Error) {
-                logger.error(`Error in syncEntitiesFromRemote: ${e.message}`);
-                logger.error(`Stack: ${e.stack}`);
-            } else {
-                logger.error(`Error details: ${JSON.stringify(e)}`);
+            for (const channel of channels) {
+                //     try {
+                //         const name = deviceInfo?.name || `Channel ${channel}`;
+                //         const uid = deviceInfo?.uid;
+                //         const isBattery = !!(abilities?.battery?.ver ?? 0);
+
+                //         const nativeId = this.buildNativeId(channel, uid, isBattery);
+                //         const interfaces = [ScryptedInterface.VideoCamera];
+                //         if (isBattery) {
+                //             interfaces.push(ScryptedInterface.Battery);
+                //         }
+                //         const type = abilities.supportDoorbellLight ? ScryptedDeviceType.Doorbell : ScryptedDeviceType.Camera;
+
+                //         const device: Device = {
+                //             nativeId,
+                //             name,
+                //             providerNativeId: this.nativeId,
+                //             interfaces,
+                //             type,
+                //             info: {
+                //                 manufacturer: 'Reolink',
+                //                 model: channelInfo?.typeInfo,
+                //                 serialNumber: uid,
+                //             }
+                //         };
+
+                //         this.channelToNativeIdMap.set(channel, nativeId);
+
+                //         if (sdk.deviceManager.getNativeIds().includes(nativeId)) {
+                //             continue;
+                //         }
+
+                //         if (this.discoveredDevices.has(nativeId)) {
+                //             continue;
+                //         }
+
+                //         this.discoveredDevices.set(nativeId, {
+                //             device,
+                //             description: `${name} (Channel ${channel})`,
+                //             rtspChannel: channel,
+                //             deviceData: devicesData[channel],
+                //         });
+
+                //         logger.debug(`Discovered channel ${channel}: ${name}`);
+                //     } catch (e: any) {
+                //         logger.debug(`Error processing channel ${channel}: ${e?.message || String(e)}`);
+                //     }
             }
-            throw e;
-        }
+
+            // logger.log(`Channel discovery completed. ${JSON.stringify({ devicesData, channels })}`);
+            } catch (e) {
+                logger.error('Failed to sync entities from remote', e);
+                if (e instanceof Error) {
+                    logger.error(`Error in syncEntitiesFromRemote: ${e.message}`);
+                    logger.error(`Stack: ${e.stack}`);
+                } else {
+                    logger.error(`Error details: ${JSON.stringify(e)}`);
+                }
+                throw e;
+            } finally {
+                this.syncInProgress = false;
+                this.syncPromise = undefined;
+            }
+        })();
+
+        await this.syncPromise;
     }
 
     async discoverDevices(scan?: boolean): Promise<DiscoveredDevice[]> {
@@ -391,7 +416,7 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
 
         const nativeId = this.channelToNativeIdMap.get(channel);
         if (!nativeId) {
-            logger.error(`No camera found for channel ${channel}, ignoring event`);
+            logger.debug(`No camera found for channel ${channel}, ignoring event`);
             return;
         }
 
@@ -413,9 +438,9 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
         await this.subscribeToEvents();
     }
 
-    private async runNvrDiagnostics(): Promise<void> {
+    private async runDiagnostics(): Promise<void> {
         const logger = this.getBaichuanLogger();
-        logger.log(`Starting NVR diagnostics...`);
+        logger.log(`Starting Multifocal diagnostics...`);
 
         try {
             const { ipAddress, username, password } = this.storageSettings.values;
@@ -423,23 +448,12 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
                 throw new Error('Missing device credentials');
             }
 
-            const { ReolinkCgiApi } = await import("@apocaliss92/reolink-baichuan-js");
-            const cgiApi = new ReolinkCgiApi({
-                host: ipAddress,
-                username,
-                password,
-            });
+            const api = await this.ensureBaichuanClient();
 
-            await cgiApi.login();
-
-            const diagnostics = await cgiApi.collectNvrDiagnostics({
-                logger: this.console,
-            });
+            const multifocalDiagnostics = await api.collectMultifocalDiagnostics(logger);
 
             logger.log(`NVR diagnostics completed successfully.`);
-
-            // Print diagnostics to console
-            cgiApi.printNvrDiagnostics(diagnostics, this.console);
+            logger.log(JSON.stringify(multifocalDiagnostics));
         } catch (e) {
             logger.error('Failed to run NVR diagnostics', e);
             throw e;

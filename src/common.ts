@@ -1332,7 +1332,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     name,
                     url,
                     container,
-                    video: { codec, width: metadata.width, height: metadata.height }
+                    video: { codec, width: metadata.width, height: metadata.height },
+                    // audio: { codec: metadata.audioCodec }
                 })
             }
         } catch (e) {
