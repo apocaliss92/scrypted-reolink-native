@@ -69,14 +69,13 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     cameraNativeMap = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera>();
     private channelToNativeIdMap = new Map<number, string>();
     processing = false;
+    private initReinitTimeout: NodeJS.Timeout | undefined;
 
     constructor(nativeId: string, plugin: ReolinkNativePlugin) {
         super(nativeId);
         this.plugin = plugin;
 
-        setTimeout(async () => {
-            await this.init();
-        }, 2000);
+        this.scheduleInit();
     }
 
     async reboot(): Promise<void> {
@@ -130,18 +129,40 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     }
 
     async reinit() {
-        // Cleanup CGI API
-        if (this.nvrApi) {
-            try {
-                await this.nvrApi.logout();
-            } catch {
-                // ignore
-            }
+        // Cancel any pending init/reinit
+        if (this.initReinitTimeout) {
+            clearTimeout(this.initReinitTimeout);
+            this.initReinitTimeout = undefined;
         }
-        this.nvrApi = undefined;
 
-        // Cleanup Baichuan API (this handles all listeners and connection)
-        await super.cleanupBaichuanApi();
+        // Schedule reinit with debounce
+        this.scheduleInit(true);
+    }
+
+    private scheduleInit(isReinit: boolean = false): void {
+        // Cancel any pending init/reinit
+        if (this.initReinitTimeout) {
+            clearTimeout(this.initReinitTimeout);
+        }
+
+        this.initReinitTimeout = setTimeout(async () => {
+            if (isReinit) {
+                // Cleanup CGI API
+                if (this.nvrApi) {
+                    try {
+                        await this.nvrApi.logout();
+                    } catch {
+                        // ignore
+                    }
+                }
+                this.nvrApi = undefined;
+
+                // Cleanup Baichuan API (this handles all listeners and connection)
+                await super.cleanupBaichuanApi();
+            }
+            await this.init();
+            this.initReinitTimeout = undefined;
+        }, isReinit ? 500 : 2000);
     }
 
     async ensureClient(): Promise<ReolinkCgiApi> {

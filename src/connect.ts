@@ -175,7 +175,7 @@ export async function autoDetectDeviceType(
 
         // Get device info to check device type
         const deviceInfo = await tcpApi.getInfo();
-        const { support } = await tcpApi.getDeviceCapabilities(0);
+        const { support } = await tcpApi.getDeviceCapabilities();
         const channelNum = support?.channelNum ?? 1;
 
         logger.log(`[AutoDetect] TCP connection successful. channelNum=${channelNum}`);
@@ -248,7 +248,7 @@ export async function autoDetectDeviceType(
             await udpApi.login();
 
             const deviceInfo = await udpApi.getInfo();
-            const { support } = await udpApi.getDeviceCapabilities(0);
+            const { support } = await udpApi.getDeviceCapabilities();
             const channelNum = support?.channelNum ?? 1;
 
             // Multi-focal devices can also be UDP (battery multi-focal cameras)
