@@ -158,7 +158,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             const rtspChannel = 0;
             const { abilities, capabilities, objects, presets } = await api.getDeviceCapabilities(rtspChannel);
 
-            this.console.log(JSON.stringify({ abilities, capabilities, deviceInfo }));
+            this.console.log(nativeId, JSON.stringify({ abilities, capabilities, deviceInfo }));
 
             const { interfaces, type } = getDeviceInterfaces({
                 capabilities,
@@ -174,6 +174,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             });
 
             const device = await this.getDevice(nativeId) as CommonCameraMixin;
+            this.console.log(name, interfaces, type, device);
 
             device.info = deviceInfo;
             device.classes = objects;
@@ -236,10 +237,6 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
         } else if (nativeId.endsWith(nvrSuffix)) {
             return new ReolinkNativeNvrDevice(nativeId, this);
         } else if (nativeId.endsWith(multifocalSuffix)) {
-            // Get transport from device settings if available, otherwise default to TCP
-            // The transport is determined during autoDetect and should be stored
-            // For now, we'll try to infer from UID presence (if UID is set, likely UDP)
-            // Default to TCP for now - the transport will be set correctly during createDevice
             return new ReolinkNativeMultiFocalDevice(nativeId, this, 'tcp');
         } else {
             return new ReolinkNativeCamera(nativeId, this);

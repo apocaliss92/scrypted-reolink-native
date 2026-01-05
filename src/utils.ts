@@ -1,6 +1,25 @@
 import type { DeviceCapabilities, ReolinkDeviceInfo } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import { DeviceBase, ScryptedDeviceType, ScryptedInterface } from "@scrypted/sdk";
 
+/**
+ * Enumeration of operation types that may require specific channel assignments
+ */
+export enum OperationChannelType {
+    PAN = 'pan',
+    TILT = 'tilt',
+    ZOOM = 'zoom',
+    INTERCOM = 'intercom',
+    GOTO = 'goto',
+    PRESET = 'preset',
+    PATROL = 'patrol',
+    TRACK = 'track',
+}
+
+/**
+ * Type for channel-specific operation mappings
+ */
+export type OperationChannelMap = Partial<Record<OperationChannelType, number>>;
+
 export const nvrSuffix = `-nvr`;
 export const batteryCameraSuffix = `-battery-cam`;
 export const multifocalSuffix = `-multifocal`;

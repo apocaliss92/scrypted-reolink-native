@@ -1,4 +1,4 @@
-import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent, StreamSamplingSelection } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent, ReolinkSupportedStream, StreamSamplingSelection } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
@@ -11,10 +11,8 @@ import { ReolinkNativeNvrDevice } from "./nvr";
 import { ReolinkNativeMultiFocalDevice } from "./multifocal";
 import { ReolinkPtzPresets } from "./presets";
 import {
-    buildVideoStreamOptions,
     createRfc4571MediaObjectFromStreamManager,
     expectedVideoTypeFromUrlMediaStreamOptions,
-    isNativeStreamId,
     parseStreamProfileFromId,
     selectStreamOption,
     StreamManager
@@ -219,6 +217,10 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             defaultValue: 0,
         },
         capabilities: {
+            json: true,
+            hide: true,
+        },
+        operationChannels: {
             json: true,
             hide: true,
         },
@@ -503,7 +505,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     // Video stream properties
     protected cachedVideoStreamOptions?: UrlMediaStreamOptions[];
     protected fetchingStreams = false;
-    protected cachedNetPort?: { rtsp?: { port?: number; enable?: number }; rtmp?: { port?: number; enable?: number } };
     protected lastNetPortCacheAttempt: number = 0;
     protected netPortCacheBackoffMs: number = 5000; // 5 seconds backoff on failure
 
@@ -752,7 +753,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         const selection = Array.from(this.getDispatchEventsSelection?.() ?? new Set()).sort();
         const enabled = selection.length > 0;
 
-        logger.log(`subscribeToEvents called: enabled=${enabled}, selection=[${selection.join(', ')}], protocol=${this.protocol}`);
+        logger.debug(`subscribeToEvents called: enabled=${enabled}, selection=[${selection.join(', ')}], protocol=${this.protocol}`);
 
         this.unsubscribedToEvents();
 
@@ -1288,54 +1289,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
     }
 
-    protected getRtspAddress(): string {
-        const { ipAddress } = this.storageSettings.values;
-        const rtspPort = this.cachedNetPort?.rtsp?.port ?? 554;
-        return `${ipAddress}:${rtspPort}`;
-    }
-
-    protected getRtmpAddress(): string {
-        const { ipAddress } = this.storageSettings.values;
-        const rtmpPort = this.cachedNetPort?.rtmp?.port ?? 1935;
-        return `${ipAddress}:${rtmpPort}`;
-    }
-
-    protected async ensureNetPortCache(): Promise<void> {
-        const logger = this.getBaichuanLogger();
-
-        if (this.cachedNetPort) {
-            return;
-        }
-
-        // Implement backoff to avoid spam when socket is closed
-        const now = Date.now();
-        if (now - this.lastNetPortCacheAttempt < this.netPortCacheBackoffMs) {
-            // Use defaults if we're in backoff period
-            this.cachedNetPort = {
-                rtsp: { port: 554, enable: 1 },
-                rtmp: { port: 1935, enable: 1 },
-            };
-            return;
-        }
-
-        this.lastNetPortCacheAttempt = now;
-
-        try {
-            const client = await this.ensureClient();
-            this.cachedNetPort = await client.getNetPort();
-        } catch (e) {
-            // Only log if it's not a recoverable error to avoid spam
-            if (!this.isRecoverableBaichuanError?.(e)) {
-                logger.warn('Failed to get net port, using defaults', e);
-            }
-            // Use defaults if we can't get the ports
-            this.cachedNetPort = {
-                rtsp: { port: 554, enable: 1 },
-                rtmp: { port: 1935, enable: 1 },
-            };
-        }
-    }
-
     async getVideoStreamOptions(): Promise<UrlMediaStreamOptions[]> {
         const logger = this.getBaichuanLogger();
 
@@ -1353,36 +1306,43 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         const client = await this.ensureClient();
 
-        const { ipAddress, rtspChannel } = this.storageSettings.values;
+        const { rtspChannel } = this.storageSettings.values;
 
         try {
-            await this.ensureNetPortCache();
-        } catch (e) {
-            if (!this.isRecoverableBaichuanError?.(e)) {
-                logger.warn('Failed to ensure net port cache, falling back to Native', e);
+            const { nativeStreams, rtmpStreams, rtspStreams } = await client.buildVideoStreamOptions(rtspChannel);
+
+            let supportedStreams: ReolinkSupportedStream[] = [];
+            if (this.nvrDevice && this.nvrDevice.info.model === 'HOMEHUB') {
+                supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
+            } else {
+                supportedStreams = [...rtspStreams, ...rtmpStreams, ...nativeStreams];
             }
-        }
 
-        try {
-            streams = await buildVideoStreamOptions(
-                {
-                    client,
-                    ipAddress,
-                    cachedNetPort: this.cachedNetPort,
-                    nvrDevice: this.nvrDevice,
-                    rtspChannel,
-                    logger,
-                },
-            );
+            for (const supportedStream of supportedStreams) {
+                const { id, metadata, url, name, container } = supportedStream;
+
+                const codec = String(metadata.videoEncType || "").includes("264")
+                    ? "h264"
+                    : String(metadata.videoEncType || "").includes("265")
+                        ? "h265"
+                        : String(metadata.videoEncType || "").toLowerCase();
+
+                streams.push({
+                    id,
+                    name,
+                    url,
+                    container,
+                    video: { codec, width: metadata.width, height: metadata.height }
+                })
+            }
         } catch (e) {
             if (!this.isRecoverableBaichuanError?.(e)) {
                 logger.warn('Failed to build RTSP/RTMP stream options, falling back to Native', e);
             }
-            this.cachedNetPort = undefined;
         }
 
         if (streams.length) {
-            logger.log('Fetched video stream options', { streams, netPort: this.cachedNetPort });
+            logger.log('Fetched video stream options', { streams });
             this.cachedVideoStreamOptions = streams;
             return streams;
         }
@@ -1397,13 +1357,13 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         const selected = selectStreamOption(vsos, vso);
 
         // Check if this is a native stream (prefixed with "native_")
-        const isNative = isNativeStreamId(selected.id);
 
         // If stream has RTSP/RTMP URL (not native), add credentials and create MediaStreamUrl
-        if (!isNative && selected.url && (selected.container === 'rtsp' || selected.container === 'rtmp')) {
+        if (selected.url && (selected.container === 'rtsp' || selected.container === 'rtmp')) {
             const urlWithCredentials = this.addRtspCredentials(selected.url);
             const ret: MediaStreamUrl = {
                 container: selected.container,
+                // url: selected.url,
                 url: urlWithCredentials,
                 mediaStreamOptions: selected,
             };
@@ -1429,22 +1389,16 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 expectedVideoType,
                 selected,
                 sourceId: this.id,
-                onDetectedCodec: (detectedCodec) => {
-                    // Update cached stream options with detected codec
-                    const nativeId = `native_${profile}`;
-                    const name = `Native ${profile}`;
-
-                    const prev = this.cachedVideoStreamOptions ?? [];
-                    const next = prev.filter((s) => s.id !== nativeId);
-                    next.push({
-                        name,
-                        id: nativeId,
-                        container: 'rtp',
-                        video: { codec: detectedCodec },
-                        url: ``
-                    });
-                    this.cachedVideoStreamOptions = next;
-                },
+                // onDetectedCodec: (detectedCodec) => {
+                //     const prev = this.cachedVideoStreamOptions ?? [];
+                //     const next = prev.filter((s) => s.id !== nativeId);
+                //     next.push({
+                //         container: 'rtp',
+                //         video: { codec: detectedCodec },
+                //         url: ``
+                //     });
+                //     this.cachedVideoStreamOptions = next;
+                // },
             });
         };
 
@@ -1467,7 +1421,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
     async credentialsChanged(): Promise<void> {
         this.cachedVideoStreamOptions = undefined;
-        this.cachedNetPort = undefined;
     }
 
     // PTZ Presets methods

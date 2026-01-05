@@ -70,17 +70,11 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
 
             // Reset client and clear cache on recoverable error
             await this.resetBaichuanClient(e);
-            this.cachedNetPort = undefined;
 
             // Important: callers must re-acquire the client inside fn.
             try {
                 return await fn();
             } catch (retryError) {
-                // If retry also fails with recoverable error, don't spam logs
-                if (this.isRecoverableBaichuanError(retryError)) {
-                    // Silently fail to avoid spam, but still throw to caller
-                    throw retryError;
-                }
                 throw retryError;
             }
         }

@@ -208,7 +208,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             const targetCamera = nativeId ? this.cameraNativeMap.get(nativeId) : undefined;
 
             if (!targetCamera) {
-                logger.info(`No camera found for channel ${channel}, ignoring event`);
+                logger.debug(`No camera found for channel ${channel}, ignoring event`);
                 return;
             }
 
@@ -262,18 +262,13 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     }
 
     async subscribeToAllEvents(): Promise<void> {
-        const logger = this.getBaichuanLogger();
         const eventSource = this.storageSettings.values.eventSource || 'Native';
 
-        // Only subscribe if Native is selected
         if (eventSource !== 'Native') {
             await this.unsubscribeFromAllEvents();
-            return;
+        } else {
+            await super.subscribeToEvents();
         }
-
-        // Use base class implementation
-        await super.subscribeToEvents();
-        logger.log('Subscribed to all events for NVR cameras');
     }
 
     private async runNvrDiagnostics(): Promise<void> {
@@ -288,7 +283,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             });
 
             logger.log(`NVR diagnostics completed successfully.`);
-            
+
             cgiApi.printNvrDiagnostics(diagnostics, this.console);
         } catch (e) {
             logger.error('Failed to run NVR diagnostics', e);
@@ -340,8 +335,12 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     }
 
     async init() {
-        const api = await this.ensureClient();
         const logger = this.getBaichuanLogger();
+        
+        // Ensure both APIs are ready before proceeding
+        const api = await this.ensureClient();
+        await this.ensureBaichuanClient();
+        
         await this.updateDeviceInfo();
 
         // Initialize event subscriptions based on selected source
@@ -473,12 +472,40 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     }
 
     async syncEntitiesFromRemote() {
-        const api = await this.ensureClient();
         const logger = this.getBaichuanLogger();
+        
+        // Ensure both APIs are ready before syncing
+        const api = await this.ensureClient();
+        const baichuanApi = await this.ensureBaichuanClient();
+        
+        // Wait for Baichuan connection to be fully established
+        if (baichuanApi?.client) {
+            // Check if already connected
+            if (!baichuanApi.client.isSocketConnected()) {
+                logger.debug('Waiting for Baichuan connection to be established...');
+                // Wait up to 5 seconds for connection
+                let attempts = 0;
+                while (!baichuanApi.client.isSocketConnected() && attempts < 50) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    attempts++;
+                }
+                if (!baichuanApi.client.isSocketConnected()) {
+                    logger.warn('Baichuan connection not established after waiting, proceeding anyway');
+                } else {
+                    logger.debug('Baichuan connection established');
+                }
+            }
+        }
 
         const { devicesData, channels } = await api.getDevicesInfo();
+
+        if (!channels.length) {
+            logger.debug(`No channels found, ${JSON.stringify({ devicesData, channels })}`);
+            return;
+        }
+
         logger.log(`Sync entities from remote for ${channels.length} channels`);
-        // Process each channel that was successfully discovered
+
         for (const channel of channels) {
             try {
                 const { channelStatus, channelInfo, abilities } = devicesData[channel];
