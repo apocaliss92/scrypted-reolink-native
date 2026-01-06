@@ -5,7 +5,7 @@ import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
 import { CameraType, CommonCameraMixin } from "./common";
 import ReolinkNativePlugin from "./main";
-import { batteryCameraSuffix, getDeviceInterfaces, updateDeviceInfo } from "./utils";
+import { batteryCameraSuffix, cameraSuffix, getDeviceInterfaces, updateDeviceInfo } from "./utils";
 
 export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements Settings, DeviceProvider, Reboot {
     plugin: ReolinkNativePlugin;
@@ -225,16 +225,19 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
     }
 
     async getDevice(nativeId: string) {
-        let device = this.cameraNativeMap.get(nativeId);
-        if (!device) {
-            if (nativeId.endsWith(batteryCameraSuffix)) {
-                device = new ReolinkNativeBatteryCamera(nativeId, this.plugin, undefined, this);
-            } else {
-                device = new ReolinkNativeCamera(nativeId, this.plugin, undefined, this);
+        if (nativeId.endsWith(cameraSuffix) || nativeId.endsWith(batteryCameraSuffix)) {
+            let device = this.cameraNativeMap.get(nativeId);
+            if (!device) {
+                if (nativeId.endsWith(batteryCameraSuffix)) {
+                    device = new ReolinkNativeBatteryCamera(nativeId, this.plugin, undefined, this);
+                } else {
+                    device = new ReolinkNativeCamera(nativeId, this.plugin, undefined, this);
+                }
             }
+            return device;
+        } else {
+            return super.getDevice(nativeId);
         }
-
-        return device;
     }
 
     async getSettings(): Promise<Setting[]> {
@@ -248,6 +251,7 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
 
     async releaseDevice(id: string, nativeId: string) {
         this.cameraNativeMap.delete(nativeId);
+        super.releaseDevice(id, nativeId);
     }
 
     buildNativeId(channel: number): string {

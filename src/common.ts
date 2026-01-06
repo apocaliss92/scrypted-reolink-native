@@ -1548,16 +1548,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         const isBatteryMultiFocal = this.options.type === 'multi-focal-battery';
         const isBattery = isBatteryCamera || isBatteryMultiFocal;
 
-        this.streamManager = new StreamManager({
-            createStreamClient: () => this.createStreamClient(),
-            getLogger: () => logger as Console,
-            credentials: {
-                username,
-                password
-            },
-            sharedConnection: isBattery,
-        });
-
         this.storageSettings.settings.uid.hide = !isBattery;
         this.storageSettings.settings.batteryUpdateIntervalMinutes.hide = !isBattery;
         this.storageSettings.settings.lowThresholdBatteryRecording.hide = !isBattery;
@@ -1586,6 +1576,16 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
 
         if (isCamera) {
+            this.streamManager = new StreamManager({
+                createStreamClient: () => this.createStreamClient(),
+                getLogger: () => logger as Console,
+                credentials: {
+                    username,
+                    password
+                },
+                sharedConnection: isBattery,
+            });
+
             const { hasIntercom, hasPtz } = this.getAbilities();
 
             if (hasIntercom) {
@@ -1610,7 +1610,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             }
         }
 
-        if (this.nvrDevice) {
+        if (this.nvrDevice || this.multiFocalDevice) {
             this.storageSettings.settings.username.hide = true;
             this.storageSettings.settings.password.hide = true;
             this.storageSettings.settings.ipAddress.hide = true;
@@ -1619,17 +1619,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             this.storageSettings.settings.username.defaultValue = this.nvrDevice.storageSettings.values.username;
             this.storageSettings.settings.password.defaultValue = this.nvrDevice.storageSettings.values.password;
             this.storageSettings.settings.ipAddress.defaultValue = this.nvrDevice.storageSettings.values.ipAddress;
-        }
-
-        if (this.multiFocalDevice) {
-            this.storageSettings.settings.username.hide = true;
-            this.storageSettings.settings.password.hide = true;
-            this.storageSettings.settings.ipAddress.hide = true;
-            this.storageSettings.settings.uid.hide = true;
-
-            this.storageSettings.settings.username.defaultValue = this.multiFocalDevice.storageSettings.values.username;
-            this.storageSettings.settings.password.defaultValue = this.multiFocalDevice.storageSettings.values.password;
-            this.storageSettings.settings.ipAddress.defaultValue = this.multiFocalDevice.storageSettings.values.ipAddress;
         }
 
         await this.init();

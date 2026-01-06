@@ -19,16 +19,16 @@ export function normalizeUid(uid?: string): string | undefined {
 export async function createBaichuanApi(props: {
     inputs: BaichuanConnectInputs,
     transport: BaichuanTransport,
-    logger: Console,
 }): Promise<ReolinkBaichuanApi> {
-    const { inputs, transport, logger } = props;
+    const { inputs, transport } = props;
+    const { logger } = inputs;
     const { ReolinkBaichuanApi } = await import("@apocaliss92/reolink-baichuan-js");
 
     const base: BaichuanClientOptions = {
         host: inputs.host,
         username: inputs.username,
         password: inputs.password,
-        logger: logger, // Use the logger passed to createBaichuanApi, not inputs.logger
+        logger,
         debugOptions: inputs.debugOptions ?? {}
     };
 

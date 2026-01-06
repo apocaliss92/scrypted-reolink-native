@@ -31,8 +31,8 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
 
 
     constructor(
-        nativeId: string, 
-        public plugin: ReolinkNativePlugin, 
+        nativeId: string,
+        public plugin: ReolinkNativePlugin,
         nvrDevice?: ReolinkNativeNvrDevice,
         multiFocalDevice?: ReolinkNativeMultiFocalDevice
     ) {
@@ -76,6 +76,7 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
 
     async createStreamClient(): Promise<ReolinkBaichuanApi> {
         const { ipAddress, username, password } = this.storageSettings.values;
+        const logger = this.getBaichuanLogger();
 
         const debugOptions = this.getBaichuanDebugOptions();
         const api = await createBaichuanApi(
@@ -84,11 +85,10 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
                     host: ipAddress,
                     username: username,
                     password: password,
-                    logger: this.console,
+                    logger,
                     debugOptions
                 },
                 transport: 'tcp',
-                logger: this.console,
             },
         );
         await api.login();

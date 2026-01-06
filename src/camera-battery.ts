@@ -380,8 +380,6 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
     }
 
     async createStreamClient(): Promise<ReolinkBaichuanApi> {
-        // Reuse the main Baichuan client connection instead of creating a new one
-        // This ensures we use a single session for everything (general + streams)
         return await this.ensureClient();
     }
 }

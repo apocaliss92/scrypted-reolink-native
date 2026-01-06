@@ -248,11 +248,10 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                     username: config.username,
                     password: config.password,
                     uid: config.uid,
-                    logger: logger as Console,
+                    logger,
                     debugOptions: config.debugOptions,
                 },
                 transport: config.transport,
-                logger: logger as Console,
             });
 
             await api.login();
