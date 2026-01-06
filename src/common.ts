@@ -1058,11 +1058,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         const { hasSiren, hasFloodlight, hasPir } = abilities;
 
-        const devices: Device[] = [];
-
         if (hasSiren) {
             const sirenNativeId = `${this.nativeId}${sirenSuffix}`;
-            devices.push({
+            const device: Device = {
                 providerNativeId: this.nativeId,
                 name: `${this.name} Siren`,
                 nativeId: sirenNativeId,
@@ -1071,12 +1069,13 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 },
                 interfaces: [ScryptedInterface.OnOff, ScryptedInterface.Settings],
                 type: ScryptedDeviceType.Siren,
-            });
+            };
+            sdk.deviceManager.onDeviceDiscovered(device);
         }
 
         if (hasFloodlight) {
             const floodlightNativeId = `${this.nativeId}${floodlightSuffix}`;
-            devices.push({
+            const device: Device = {
                 providerNativeId: this.nativeId,
                 name: `${this.name} Floodlight`,
                 nativeId: floodlightNativeId,
@@ -1085,12 +1084,13 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 },
                 interfaces: [ScryptedInterface.OnOff, ScryptedInterface.Settings],
                 type: ScryptedDeviceType.Light,
-            });
+            };
+            sdk.deviceManager.onDeviceDiscovered(device);
         }
 
         if (hasPir) {
             const pirNativeId = `${this.nativeId}${pirSuffix}`;
-            devices.push({
+            const device: Device = {
                 providerNativeId: this.nativeId,
                 name: `${this.name} PIR`,
                 nativeId: pirNativeId,
@@ -1099,13 +1099,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 },
                 interfaces: [ScryptedInterface.OnOff, ScryptedInterface.Settings],
                 type: ScryptedDeviceType.Switch,
-            });
+            };
+            sdk.deviceManager.onDeviceDiscovered(device);
         }
-
-        sdk.deviceManager.onDevicesChanged({
-            providerNativeId: this.nativeId,
-            devices,
-        });
     }
 
     async getSettings(): Promise<Setting[]> {

@@ -216,6 +216,11 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
 
             const camera = await this.getDevice(nativeId);
 
+            if (!camera) {
+                logger.error(`Failed to get device ${nativeId}`);
+                continue;
+            }
+
             camera.storageSettings.values.rtspChannel = channel;
             camera.classes = objects;
             camera.presets = presets;
@@ -227,6 +232,8 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
                 camera.storageSettings.values.uid = uid;
             }
         }
+
+        await super.reportDevices();
     }
 
     async getDevice(nativeId: string) {
