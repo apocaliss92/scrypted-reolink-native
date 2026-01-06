@@ -685,8 +685,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     public getAbilities(): DeviceCapabilities {
-        if (this.options.multiFocalDevice) {
-            return this.options.multiFocalDevice.getInterfaces(this.storageSettings.values.rtspChannel).capabilities;
+        if (this.multiFocalDevice) {
+            return this.multiFocalDevice.getInterfaces(this.storageSettings.values.rtspChannel).capabilities;
         } else {
             return this.storageSettings.values.capabilities;
         }
@@ -1142,8 +1142,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     async updateDeviceInfo(): Promise<void> {
         const logger = this.getBaichuanLogger();
 
-        if (this.options.multiFocalDevice) {
-            this.info = this.options.multiFocalDevice.info;
+        if (this.multiFocalDevice) {
+            this.info = this.multiFocalDevice.info;
             return;
         }
 

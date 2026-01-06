@@ -159,7 +159,6 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 logger: this.console,
             },
             transport: detection.transport,
-            logger: this.console,
         });
 
         try {
