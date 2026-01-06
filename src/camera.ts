@@ -67,27 +67,6 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
         }
     }
 
-    async withBaichuanRetry<T>(fn: () => Promise<T>): Promise<T> {
-        try {
-            return await fn();
-        }
-        catch (e) {
-            if (!this.isRecoverableBaichuanError(e)) {
-                throw e;
-            }
-
-            // Reset client and clear cache on recoverable error
-            await this.resetBaichuanClient(e);
-
-            // Important: callers must re-acquire the client inside fn.
-            try {
-                return await fn();
-            } catch (retryError) {
-                throw retryError;
-            }
-        }
-    }
-
 
     async init() {
         this.startPeriodicTasks();

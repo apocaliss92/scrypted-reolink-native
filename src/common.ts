@@ -1,14 +1,15 @@
 import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent, ReolinkSupportedStream, StreamSamplingSelection } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
+import path from 'path';
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
 import { normalizeUid, type BaichuanTransport } from "./connect";
 import { convertDebugLogsToApiOptions, DebugLogDisplayNames, DebugLogOption, getApiRelevantDebugLogs, getDebugLogChoices } from "./debug-options";
 import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
-import { ReolinkNativeNvrDevice } from "./nvr";
 import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
+import { ReolinkNativeNvrDevice } from "./nvr";
 import { ReolinkPtzPresets } from "./presets";
 import {
     createRfc4571MediaObjectFromStreamManager,
@@ -17,10 +18,9 @@ import {
     selectStreamOption,
     StreamManager
 } from "./stream-utils";
-import { getDeviceInterfaces, updateDeviceInfo } from "./utils";
-import path from 'path';
+import { floodlightSuffix, getDeviceInterfaces, pirSuffix, sirenSuffix, updateDeviceInfo } from "./utils";
 
-export type CameraType = 'battery' | 'regular';
+export type CameraType = 'battery' | 'regular' | 'multi-focal' | 'multi-focal-battery';
 
 export interface CommonCameraMixinOptions {
     type: CameraType;
@@ -197,6 +197,12 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 await this.credentialsChanged();
             }
         },
+        debugEvents: {
+            title: 'Debug Events',
+            type: 'boolean',
+            immediate: true,
+            hide: true,
+        },
         username: {
             type: 'string',
             title: 'Username',
@@ -220,7 +226,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             json: true,
             hide: true,
         },
-        operationChannels: {
+        multifocalInfo: {
             json: true,
             hide: true,
         },
@@ -515,7 +521,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     // Abstract init method that subclasses must implement
     abstract init(): Promise<void>;
 
-    abstract withBaichuanRetry<T>(fn: () => Promise<T>): Promise<T>;
     protected withBaichuanClient?<T>(fn: (api: ReolinkBaichuanApi) => Promise<T>): Promise<T>;
     motionTimeout?: NodeJS.Timeout;
     doorbellBinaryTimeout?: NodeJS.Timeout;
@@ -532,12 +537,14 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         public options: CommonCameraMixinOptions
     ) {
         super(nativeId);
-        this.protocol = !options.nvrDevice && !options.multiFocalDevice && options.type === 'battery' ? 'udp' : 'tcp';
 
         // Store NVR device reference if provided
         this.nvrDevice = options.nvrDevice;
         this.multiFocalDevice = options.multiFocalDevice;
         this.thisDevice = sdk.systemManager.getDeviceById<Settings>(this.id);
+
+        const isBattery = options.type === 'battery' || options.type === 'multi-focal-battery';
+        this.protocol = isBattery ? 'udp' : 'tcp';
 
         setTimeout(async () => {
             await this.parentInit();
@@ -601,7 +608,31 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         return this.name || 'Camera';
     }
 
-    private async runDiagnostics(): Promise<void> {
+    async withBaichuanRetry<T>(fn: () => Promise<T>): Promise<T> {
+        if (this.protocol === 'udp') {
+            return await fn();
+        } else {
+            try {
+                return await fn();
+            } catch (e) {
+                if (!this.isRecoverableBaichuanError(e)) {
+                    throw e;
+                }
+
+                // Reset client and clear cache on recoverable error
+                await this.resetBaichuanClient(e);
+
+                // Important: callers must re-acquire the client inside fn.
+                try {
+                    return await fn();
+                } catch (retryError) {
+                    throw retryError;
+                }
+            }
+        }
+    }
+
+    async runDiagnostics(): Promise<void> {
         const logger = this.getBaichuanLogger();
         const outputPath = this.storageSettings.values.diagnosticsOutputPath || process.env.SCRYPTED_PLUGIN_VOLUME || "";
 
@@ -690,9 +721,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
     // Event subscription methods
     unsubscribedToEvents(): void {
-        // Use base class unsubscribe
         this.unsubscribeFromEvents().catch(() => {
-            // ignore
         });
 
         if (this.motionDetected) {
@@ -1024,20 +1053,17 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         this.binaryState = false;
     }
 
-    // Report devices (siren, floodlight, PIR)
     async reportDevices(): Promise<void> {
-        if (!this.nativeId || !this.name) {
-            return;
-        }
+        const abilities = this.getAbilities();
 
-        const { hasSiren, hasFloodlight, hasPir } = this.getAbilities();
+        const { hasSiren, hasFloodlight, hasPir } = abilities;
 
         const devices: Device[] = [];
 
         if (hasSiren) {
-            const sirenNativeId = `${this.nativeId}-siren`;
+            const sirenNativeId = `${this.nativeId}${sirenSuffix}`;
             devices.push({
-                providerNativeId: this.plugin?.nativeId,
+                providerNativeId: this.nativeId,
                 name: `${this.name} Siren`,
                 nativeId: sirenNativeId,
                 info: {
@@ -1049,9 +1075,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
 
         if (hasFloodlight) {
-            const floodlightNativeId = `${this.nativeId}-floodlight`;
+            const floodlightNativeId = `${this.nativeId}${floodlightSuffix}`;
             devices.push({
-                providerNativeId: this.plugin?.nativeId,
+                providerNativeId: this.nativeId,
                 name: `${this.name} Floodlight`,
                 nativeId: floodlightNativeId,
                 info: {
@@ -1063,9 +1089,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
 
         if (hasPir) {
-            const pirNativeId = `${this.nativeId}-pir`;
+            const pirNativeId = `${this.nativeId}${pirSuffix}`;
             devices.push({
-                providerNativeId: this.plugin?.nativeId,
+                providerNativeId: this.nativeId,
                 name: `${this.name} PIR`,
                 nativeId: pirNativeId,
                 info: {
@@ -1130,9 +1156,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 device: this,
                 ipAddress,
                 deviceData,
+                logger,
             });
 
-            logger.log(`Device info updated: ${JSON.stringify(deviceData)}`);
         } catch (e) {
             logger.warn('Failed to fetch device info', e);
         }
@@ -1140,24 +1166,24 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
     // Device provider methods
     async getDevice(nativeId: string): Promise<any> {
-        if (nativeId.endsWith('-siren')) {
+        if (nativeId.endsWith(sirenSuffix)) {
             this.siren ||= new ReolinkCameraSiren(this, nativeId);
             return this.siren;
-        } else if (nativeId.endsWith('-floodlight')) {
+        } else if (nativeId.endsWith(floodlightSuffix)) {
             this.floodlight ||= new ReolinkCameraFloodlight(this, nativeId);
             return this.floodlight;
-        } else if (nativeId.endsWith('-pir')) {
+        } else if (nativeId.endsWith(pirSuffix)) {
             this.pirSensor ||= new ReolinkCameraPirSensor(this, nativeId);
             return this.pirSensor;
         }
     }
 
     async releaseDevice(id: string, nativeId: string): Promise<void> {
-        if (nativeId.endsWith('-siren')) {
+        if (nativeId.endsWith(sirenSuffix)) {
             this.siren = undefined;
-        } else if (nativeId.endsWith('-floodlight')) {
+        } else if (nativeId.endsWith(floodlightSuffix)) {
             this.floodlight = undefined;
-        } else if (nativeId.endsWith('-pir')) {
+        } else if (nativeId.endsWith(pirSuffix)) {
             this.pirSensor = undefined;
         }
     }
@@ -1357,7 +1383,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
 
         if (streams.length) {
-            logger.log('Fetched video stream options', { streams });
+            logger.log('Fetched video stream options', streams.map((s) => s.name).join(', '));
+            logger.debug(JSON.stringify(streams));
             this.cachedVideoStreamOptions = streams;
             return streams;
         }
@@ -1451,41 +1478,41 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         const channel = this.storageSettings.values.rtspChannel;
 
         try {
-            if (this.options.multiFocalDevice) {
-                // do nothing for now
-            } else {
-                const { capabilities, abilities, support, presets, objects } = await this.withBaichuanRetry(async () => {
-                    const api = await this.ensureClient();
-                    return await api.getDeviceCapabilities(channel);
+            const { capabilities, abilities, support, presets, objects } = await this.withBaichuanRetry(async () => {
+                const api = await this.ensureClient();
+                return await api.getDeviceCapabilities(channel);
+            });
+            this.classes = objects;
+            this.presets = presets;
+            this.ptzPresets.setCachedPtzPresets(presets);
+
+            try {
+                const { interfaces, type } = getDeviceInterfaces({
+                    capabilities,
+                    logger: this.console,
                 });
-                this.classes = objects;
-                this.presets = presets;
-                this.ptzPresets.setCachedPtzPresets(presets);
 
-                try {
-                    const { interfaces, type } = getDeviceInterfaces({
-                        capabilities,
-                        logger: this.console,
-                    });
+                const device: Device = {
+                    nativeId: this.nativeId,
+                    providerNativeId: this.nvrDevice?.nativeId ??
+                        this.multiFocalDevice?.nativeId ??
+                        this.plugin?.nativeId,
+                    name: this.name,
+                    interfaces,
+                    type,
+                    info: this.info,
+                };
 
-                    const device: Device = {
-                        nativeId: this.nativeId,
-                        providerNativeId: this.nvrDevice?.nativeId ?? this.plugin?.nativeId,
-                        name: this.name,
-                        interfaces,
-                        type,
-                        info: this.info,
-                    };
+                await sdk.deviceManager.onDeviceDiscovered(device);
 
-                    logger.log(`Updating device interfaces: ${JSON.stringify(device)}`);
-
-                    await sdk.deviceManager.onDeviceDiscovered(device);
-                } catch (e) {
-                    logger.error('Failed to update device interfaces', e);
-                }
-
-                logger.log(`Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets })}`);
+                logger.log(`Device interfaces updated`);
+                logger.debug(`${JSON.stringify(device)}`);
+            } catch (e) {
+                logger.error('Failed to update device interfaces', e);
             }
+
+            logger.log(`Refreshed device capabilities: ${JSON.stringify(capabilities)}`);
+            logger.debug(`Refreshed device capabilities: ${JSON.stringify({ abilities, support, presets, objects })}`);
         }
         catch (e) {
             logger.error('Failed to refresh abilities', e);
@@ -1505,45 +1532,21 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             logger.warn('Failed to update device info during init', e);
         }
 
-        try {
-            await this.refreshDeviceState();
-        }
-        catch (e) {
-            logger.warn('Failed to connect/refresh during init', e);
-        }
-
-        try {
-            await this.reportDevices();
-        }
-        catch (e) {
-            logger.warn('Failed to report devices during init', e);
+        if (!this.multiFocalDevice) {
+            try {
+                await this.refreshDeviceState();
+                await this.reportDevices();
+            }
+            catch (e) {
+                logger.warn('Failed to connect/refresh during init', e);
+            }
         }
 
-        const { hasIntercom, hasPtz } = this.getAbilities();
-
-        if (hasIntercom) {
-            this.intercom = new ReolinkBaichuanIntercom(this);
-        }
-
-        if (hasPtz) {
-            const choices = (this.presets || []).map((preset: any) => preset.id + '=' + preset.name);
-
-            this.storageSettings.settings.presets.choices = choices;
-            this.storageSettings.settings.ptzSelectedPreset.choices = choices;
-
-            this.storageSettings.settings.presets.hide = false;
-            this.storageSettings.settings.ptzMoveDurationMs.hide = false;
-            this.storageSettings.settings.ptzZoomStep.hide = false;
-            this.storageSettings.settings.ptzCreatePreset.hide = false;
-            this.storageSettings.settings.ptzSelectedPreset.hide = false;
-            this.storageSettings.settings.ptzUpdateSelectedPreset.hide = false;
-            this.storageSettings.settings.ptzDeleteSelectedPreset.hide = false;
-
-            this.updatePtzCaps();
-        }
-
-        const isBattery = this.options.type === 'battery';
         const { username, password } = this.storageSettings.values;
+        const isCamera = this.options.type === 'regular' || this.options.type === 'battery';
+        const isBatteryCamera = this.options.type === 'battery';
+        const isBatteryMultiFocal = this.options.type === 'multi-focal-battery';
+        const isBattery = isBatteryCamera || isBatteryMultiFocal;
 
         this.streamManager = new StreamManager({
             createStreamClient: () => this.createStreamClient(),
@@ -1552,18 +1555,15 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 username,
                 password
             },
-            // For battery cameras, we use a shared connection
             sharedConnection: isBattery,
         });
 
-
-        // this.storageSettings.settings.snapshotCacheMinutes.hide = !isBattery;
         this.storageSettings.settings.uid.hide = !isBattery;
         this.storageSettings.settings.batteryUpdateIntervalMinutes.hide = !isBattery;
         this.storageSettings.settings.lowThresholdBatteryRecording.hide = !isBattery;
         this.storageSettings.settings.highThresholdBatteryRecording.hide = !isBattery;
 
-        if (isBattery && !this.storageSettings.values.mixinsSetup) {
+        if (isBatteryCamera && !this.storageSettings.values.mixinsSetup) {
             try {
                 const device = sdk.systemManager.getDeviceById<Settings>(this.id);
                 if (device) {
@@ -1585,6 +1585,30 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             logger.warn('Failed to subscribe to Baichuan events', e);
         }
 
+        if (isCamera) {
+            const { hasIntercom, hasPtz } = this.getAbilities();
+
+            if (hasIntercom) {
+                this.intercom = new ReolinkBaichuanIntercom(this);
+            }
+
+            if (hasPtz) {
+                const choices = (this.presets || []).map((preset: any) => preset.id + '=' + preset.name);
+
+                this.storageSettings.settings.presets.choices = choices;
+                this.storageSettings.settings.ptzSelectedPreset.choices = choices;
+
+                this.storageSettings.settings.presets.hide = false;
+                this.storageSettings.settings.ptzMoveDurationMs.hide = false;
+                this.storageSettings.settings.ptzZoomStep.hide = false;
+                this.storageSettings.settings.ptzCreatePreset.hide = false;
+                this.storageSettings.settings.ptzSelectedPreset.hide = false;
+                this.storageSettings.settings.ptzUpdateSelectedPreset.hide = false;
+                this.storageSettings.settings.ptzDeleteSelectedPreset.hide = false;
+
+                this.updatePtzCaps();
+            }
+        }
 
         if (this.nvrDevice) {
             this.storageSettings.settings.username.hide = true;
@@ -1609,6 +1633,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
 
         await this.init();
+
         this.initComplete = true;
     }
 }

@@ -1,81 +1,37 @@
 import type { DeviceCapabilities, DualLensChannelAnalysis, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { Device, DeviceProvider, Reboot, ScryptedDeviceType, Setting, Settings, SettingValue } from "@scrypted/sdk";
-import { StorageSettings } from "@scrypted/sdk/storage-settings";
-import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
+import sdk, { Device, DeviceProvider, MediaObject, Reboot, ScryptedDeviceType, Setting, Settings, SettingValue } from "@scrypted/sdk";
+import { type BaichuanConnectionCallbacks } from "./baichuan-base";
 import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
-import { normalizeUid } from "./connect";
+import { CameraType, CommonCameraMixin } from "./common";
 import ReolinkNativePlugin from "./main";
-import { batteryCameraSuffix, cameraSuffix, getDeviceInterfaces, updateDeviceInfo } from "./utils";
+import { batteryCameraSuffix, getDeviceInterfaces, updateDeviceInfo } from "./utils";
 
-export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements Settings, DeviceProvider, Reboot {
-    storageSettings = new StorageSettings(this, {
-        debugEvents: {
-            title: 'Debug Events',
-            type: 'boolean',
-            immediate: true,
-        },
-        ipAddress: {
-            title: 'IP address',
-            type: 'string',
-            onPut: async () => await this.reinit()
-        },
-        username: {
-            title: 'Username',
-            placeholder: 'admin',
-            defaultValue: 'admin',
-            type: 'string',
-            onPut: async () => await this.reinit()
-        },
-        password: {
-            title: 'Password',
-            type: 'password',
-            onPut: async () => await this.reinit()
-        },
-        uid: {
-            title: 'UID',
-            description: 'Reolink UID (required for UDP/battery multi-focal devices)',
-            type: 'string',
-            hide: true,
-            onPut: async () => await this.reinit()
-        },
-        protocol: {
-            type: 'string',
-            hide: true,
-        },
-        diagnosticsRun: {
-            subgroup: 'Diagnostics',
-            title: 'Run Diagnostics',
-            description: 'Collect diagnostics and display results in logs.',
-            type: 'button',
-            immediate: true,
-            onPut: async () => {
-                await this.runDiagnostics();
-            },
-        },
-        multifocalInfo: {
-            json: true,
-            hide: true,
-        },
-        capabilities: {
-            json: true,
-            hide: true,
-        }
-    });
-
+export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements Settings, DeviceProvider, Reboot {
     plugin: ReolinkNativePlugin;
     cameraNativeMap = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera>();
     private channelToNativeIdMap = new Map<number, string>();
     private initReinitTimeout: NodeJS.Timeout | undefined;
     isBattery: boolean;
 
-    constructor(nativeId: string, plugin: ReolinkNativePlugin) {
-        super(nativeId);
+    constructor(nativeId: string, plugin: ReolinkNativePlugin, type: CameraType) {
+        super(nativeId, plugin, { type });
         this.plugin = plugin;
 
-        this.isBattery = this.storageSettings.values.protocol === 'udp';
-
         this.scheduleInit();
+    }
+
+    getAbilities(): DeviceCapabilities {
+        const { capabilities } = this.storageSettings.values;
+
+        return {
+            ...capabilities,
+            hasPan: false,
+            hasTilt: false,
+            hasZoom: false,
+            hasPresets: false,
+            hasIntercom: false,
+        }
     }
 
     async reboot(): Promise<void> {
@@ -83,28 +39,12 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
         await api.reboot();
     }
 
-    protected getConnectionConfig(): BaichuanConnectionConfig {
-        const { ipAddress, username, password, uid } = this.storageSettings.values;
-        if (!ipAddress || !username || !password) {
-            throw new Error('Missing device credentials');
-        }
+    takePicture(options?: any): Promise<MediaObject> {
+        throw new Error("Method not implemented.");
+    }
 
-        const { protocol } = this.storageSettings.values;
-
-        const normalizedUid = this.isBattery ? normalizeUid(uid) : undefined;
-
-        if (protocol === 'udp' && !normalizedUid) {
-            throw new Error('UID is required for UDP multi-focal devices (BCUDP)');
-        }
-
-        return {
-            host: ipAddress,
-            username,
-            password,
-            uid: normalizedUid,
-            transport: protocol,
-            logger: this.console,
-        };
+    getPictureOptions(): Promise<any[]> {
+        throw new Error("Method not implemented.");
     }
 
     protected getConnectionCallbacks(): BaichuanConnectionCallbacks {
@@ -134,7 +74,7 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
     }
 
     protected isDebugEnabled(): boolean {
-        return this.storageSettings.values.debugEvents;
+        return this.storageSettings.values.debugEvents || false;
     }
 
     protected getDeviceName(): string {
@@ -199,9 +139,8 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
                 device: this,
                 deviceData,
                 ipAddress: this.storageSettings.values.ipAddress,
+                logger,
             });
-
-            logger.log(`Device info updated: ${JSON.stringify(deviceData)}`);
         } catch (e) {
             logger.warn('Failed to fetch device info', e);
         }
@@ -312,8 +251,7 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
     }
 
     buildNativeId(channel: number): string {
-        const { protocol } = this.storageSettings.values;
-        return `${this.nativeId}-channel${channel}${protocol === "udp" ? batteryCameraSuffix : cameraSuffix}`;
+        return `${this.nativeId}-channel${channel}`;
     }
 
     forwardNativeEvent(ev: ReolinkSimpleEvent): void {
@@ -337,16 +275,14 @@ export class ReolinkNativeMultiFocalDevice extends BaseBaichuanClass implements 
             return;
         }
 
-        // Forward event to camera
-        if (camera.onSimpleEvent) {
-            camera.onSimpleEvent(ev);
-        }
+        camera.onSimpleEvent(ev);
     }
+
     async unsubscribeFromAllEvents(): Promise<void> {
         await super.unsubscribeFromEvents();
     }
 
-    private async runDiagnostics(): Promise<void> {
+    public async runDiagnostics(): Promise<void> {
         const logger = this.getBaichuanLogger();
         logger.log(`Starting Multifocal diagnostics...`);
 

@@ -360,7 +360,8 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                     this.lastNvrInfoCheck = now;
                     const { nvrData } = await api.getNvrInfo();
                     const { devicesData, channelsResponse, response } = await api.getDevicesInfo();
-                    logger.log(`NVR info data fetched: ${JSON.stringify({ nvrData, devicesData, channelsResponse, response })}`);
+                    logger.log(`NVR info data fetched`);
+                    logger.debug(`${JSON.stringify({ nvrData, devicesData, channelsResponse, response })}`);
 
                     await this.discoverDevices(true);
                 }
@@ -372,7 +373,6 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                     this.forwardCgiEvents(eventsRes.parsed);
                 }
 
-                // Always fetch battery info (not event-related)
                 const { batteryInfoData, response } = await api.getAllChannelsBatteryInfo();
 
                 logger.debug(`Battery info call result: ${JSON.stringify({ batteryInfoData, response })}`);
@@ -411,9 +411,8 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                 device: this,
                 ipAddress,
                 deviceData,
+                logger
             });
-
-            logger.log(`Device info updated: ${JSON.stringify(deviceData)}`);
         } catch (e) {
             logger.warn('Failed to fetch device info', e);
         }
@@ -552,7 +551,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             }
         }
 
-        logger.log(`Channel discovery completed. ${JSON.stringify({ devicesData, channels })}`);
+        logger.debug(`Channel discovery completed. ${JSON.stringify({ devicesData, channels })}`);
     }
 
     async discoverDevices(scan?: boolean): Promise<DiscoveredDevice[]> {
@@ -606,7 +605,8 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
         const device = await this.getDevice(adopt.nativeId);
         const logger = this.getBaichuanLogger();
-        logger.log('Adopted device', entry, device?.name);
+        logger.log('Adopted device', device?.name);
+        logger.log(JSON.stringify(entry));
         const { username, password, ipAddress } = this.storageSettings.values;
 
         device.storageSettings.values.rtspChannel = entry.rtspChannel;

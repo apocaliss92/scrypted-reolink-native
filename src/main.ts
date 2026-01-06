@@ -4,10 +4,9 @@ import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
 import { CommonCameraMixin } from "./common";
 import { createBaichuanApi } from "./connect";
-import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
-import { batteryCameraSuffix, cameraSuffix, getDeviceInterfaces, multifocalSuffix, nvrSuffix } from "./utils";
-import { BaichuanTransport } from "./connect";
+import { batteryCameraSuffix, batteryMultifocalSuffix, cameraSuffix, getDeviceInterfaces, multifocalSuffix, nvrSuffix } from "./utils";
+import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 
 class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, DeviceCreator {
     devices = new Map<string, BaseBaichuanClass>();
@@ -65,18 +64,28 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             const deviceInfo = detection.deviceInfo || {};
             const name = deviceInfo.name || 'Reolink Multi-Focal';
             const serialNumber = deviceInfo.serialNumber || deviceInfo.itemNo || `multifocal-${Date.now()}`;
-            nativeId = `${serialNumber}${multifocalSuffix}`;
+            const isBattery = detection.transport === 'udp';
+            nativeId = `${serialNumber}${isBattery ? batteryMultifocalSuffix : multifocalSuffix}`;
 
             settings.newCamera ||= name;
+
+            const interfaces = [
+                ScryptedInterface.Settings,
+                ScryptedInterface.DeviceProvider,
+                ScryptedInterface.Reboot,
+            ];
+
+            if (isBattery) {
+                interfaces.push(
+                    ScryptedInterface.Battery,
+                    ScryptedInterface.Sleep
+                );
+            }
 
             await sdk.deviceManager.onDeviceDiscovered({
                 nativeId,
                 name,
-                interfaces: [
-                    ScryptedInterface.Settings,
-                    ScryptedInterface.DeviceProvider,
-                    ScryptedInterface.Reboot,
-                ],
+                interfaces,
                 type: ScryptedDeviceType.DeviceProvider,
                 providerNativeId: this.nativeId,
             });
@@ -89,7 +98,6 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             device.storageSettings.values.username = username;
             device.storageSettings.values.password = password;
             device.storageSettings.values.uid = detection.uid || '';
-            device.storageSettings.values.protocol = detection.transport || 'tcp' as BaichuanTransport;
 
             return nativeId;
         }
@@ -157,9 +165,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
         try {
             await api.login();
             const rtspChannel = 0;
-            const { abilities, capabilities, objects, presets } = await api.getDeviceCapabilities(rtspChannel);
-
-            this.console.log(nativeId, JSON.stringify({ abilities, capabilities, deviceInfo }));
+            const { capabilities, objects, presets } = await api.getDeviceCapabilities(rtspChannel);
 
             const { interfaces, type } = getDeviceInterfaces({
                 capabilities,
@@ -175,7 +181,6 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             });
 
             const device = await this.getDevice(nativeId) as CommonCameraMixin;
-            this.console.log(name, interfaces, type, device);
 
             device.info = deviceInfo;
             device.classes = objects;
@@ -214,10 +219,12 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 key: 'ip',
                 title: 'IP Address',
                 placeholder: '192.168.2.222',
+                value: '192.168.',
             },
             {
                 key: 'username',
                 title: 'Username',
+                value: 'admin',
             },
             {
                 key: 'password',
@@ -237,8 +244,10 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             return new ReolinkNativeBatteryCamera(nativeId, this);
         } else if (nativeId.endsWith(nvrSuffix)) {
             return new ReolinkNativeNvrDevice(nativeId, this);
+        } else if (nativeId.endsWith(batteryMultifocalSuffix)) {
+            return new ReolinkNativeMultiFocalDevice(nativeId, this, "multi-focal-battery");
         } else if (nativeId.endsWith(multifocalSuffix)) {
-            return new ReolinkNativeMultiFocalDevice(nativeId, this);
+            return new ReolinkNativeMultiFocalDevice(nativeId, this, "multi-focal");
         } else {
             return new ReolinkNativeCamera(nativeId, this);
         }

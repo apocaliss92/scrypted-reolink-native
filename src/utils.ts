@@ -1,5 +1,5 @@
 import type { DeviceCapabilities, ReolinkDeviceInfo } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import { DeviceBase, ScryptedDeviceType, ScryptedInterface } from "@scrypted/sdk";
+import sdk, { Device, DeviceBase, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface } from "@scrypted/sdk";
 
 /**
  * Enumeration of operation types that may require specific channel assignments
@@ -23,7 +23,11 @@ export type OperationChannelMap = Partial<Record<OperationChannelType, number>>;
 export const nvrSuffix = `-nvr`;
 export const batteryCameraSuffix = `-battery-cam`;
 export const multifocalSuffix = `-multifocal`;
+export const batteryMultifocalSuffix = `-battery-multifocal`;
 export const cameraSuffix = `-cam`;
+export const sirenSuffix = `-siren`;
+export const floodlightSuffix = `-floodlight`;
+export const pirSuffix = `-pir`;
 
 export const getDeviceInterfaces = (props: {
     capabilities: DeviceCapabilities,
@@ -78,9 +82,10 @@ export const getDeviceInterfaces = (props: {
 export const updateDeviceInfo = async (props: {
     device: DeviceBase,
     ipAddress: string,
-    deviceData: ReolinkDeviceInfo
+    deviceData: ReolinkDeviceInfo,
+    logger: Console
 }) => {
-    const { device, ipAddress, deviceData } = props;
+    const { device, ipAddress, deviceData, logger } = props;
     try {
         const info = device.info || {};
 
@@ -101,5 +106,9 @@ export const updateDeviceInfo = async (props: {
         device.info = info;
 
         throw e;
+    } finally {
+
+        logger.log(`Device info updated`);
+        logger.debug(`${JSON.stringify({ newInfo: device.info, deviceData })}`);
     }
 }
