@@ -58,10 +58,6 @@ export class BaichuanLogger implements Console {
         }
     }
 
-    isDebugEnabled(): boolean {
-        return this.isDebugEnabledCallback();
-    }
-
     // Console interface implementation - delegate to baseLogger
     assert(condition?: boolean, ...data: any[]): void {
         this.baseLogger.assert(condition, ...data);

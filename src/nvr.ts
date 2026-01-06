@@ -10,7 +10,7 @@ import { getDeviceInterfaces, updateDeviceInfo } from "./utils";
 
 export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Settings, DeviceDiscovery, DeviceProvider, Reboot {
     storageSettings = new StorageSettings(this, {
-        debugEvents: {
+        debugLogs: {
             title: 'Debug Events',
             type: 'boolean',
             immediate: true,
@@ -68,6 +68,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     lastDevicesStatusCheck: number | undefined;
     cameraNativeMap = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera>();
     private channelToNativeIdMap = new Map<number, string>();
+    private discoverDevicesPromise: Promise<DiscoveredDevice[]> | undefined;
     processing = false;
     private initReinitTimeout: NodeJS.Timeout | undefined;
 
@@ -116,7 +117,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
 
     protected isDebugEnabled(): boolean {
-        return this.storageSettings.values.debugEvents || false;
+        return this.storageSettings.values.debugLogs || false;
     }
 
     protected getDeviceName(): string {
@@ -333,11 +334,11 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
     async init() {
         const logger = this.getBaichuanLogger();
-        
+
         // Ensure both APIs are ready before proceeding
         const api = await this.ensureClient();
         await this.ensureBaichuanClient();
-        
+
         await this.updateDeviceInfo();
 
         await this.reinitEventSubscriptions();
@@ -467,11 +468,11 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
     async syncEntitiesFromRemote() {
         const logger = this.getBaichuanLogger();
-        
+
         // Ensure both APIs are ready before syncing
         const api = await this.ensureClient();
         const baichuanApi = await this.ensureBaichuanClient();
-        
+
         // Wait for Baichuan connection to be fully established
         if (baichuanApi?.client) {
             // Check if already connected
@@ -554,10 +555,28 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     }
 
     async discoverDevices(scan?: boolean): Promise<DiscoveredDevice[]> {
-        if (scan) {
-            await this.syncEntitiesFromRemote();
+        // If a discovery is already in progress, return that promise
+        if (this.discoverDevicesPromise) {
+            return await this.discoverDevicesPromise;
         }
 
+        // If scan is requested, start a new discovery
+        if (scan) {
+            this.discoverDevicesPromise = (async () => {
+                try {
+                    await this.syncEntitiesFromRemote();
+                    return [...this.discoveredDevices.values()].map(d => ({
+                        ...d.device,
+                        description: d.description,
+                    }));
+                } finally {
+                    this.discoverDevicesPromise = undefined;
+                }
+            })();
+            return await this.discoverDevicesPromise;
+        }
+
+        // If no scan requested, return cached devices immediately
         return [...this.discoveredDevices.values()].map(d => ({
             ...d.device,
             description: d.description,

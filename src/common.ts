@@ -5,13 +5,14 @@ import path from 'path';
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
 import { normalizeUid, type BaichuanTransport } from "./connect";
-import { convertDebugLogsToApiOptions, DebugLogDisplayNames, DebugLogOption, getApiRelevantDebugLogs, getDebugLogChoices } from "./debug-options";
+import { convertDebugLogsToApiOptions, getApiRelevantDebugLogs, getDebugLogChoices } from "./debug-options";
 import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
 import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
 import { ReolinkPtzPresets } from "./presets";
 import {
+    createRfc4571CompositeMediaObjectFromStreamManager,
     createRfc4571MediaObjectFromStreamManager,
     expectedVideoTypeFromUrlMediaStreamOptions,
     parseStreamProfileFromId,
@@ -134,7 +135,8 @@ class ReolinkCameraPirSensor extends ScryptedDeviceBase implements OnOff, Settin
     }
 
     async getSettings(): Promise<Setting[]> {
-        return this.storageSettings.getSettings();
+        const settings = await this.storageSettings.getSettings();
+        return settings;
     }
 
     async putSetting(key: string, value: SettingValue): Promise<void> {
@@ -197,12 +199,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 await this.credentialsChanged();
             }
         },
-        debugEvents: {
-            title: 'Debug Events',
-            type: 'boolean',
-            immediate: true,
-            hide: true,
-        },
         username: {
             type: 'string',
             title: 'Username',
@@ -230,6 +226,53 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             json: true,
             hide: true,
         },
+        // Multifocal composite stream PIP settings
+        pipPosition: {
+            title: 'PIP Position',
+            description: 'Position of the tele lens overlay on the wider lens view',
+            type: 'string',
+            defaultValue: 'bottom-right',
+            choices: [
+                'top-left',
+                'top-right',
+                'bottom-left',
+                'bottom-right',
+                'center',
+                'top-center',
+                'bottom-center',
+                'left-center',
+                'right-center',
+            ],
+            hide: true, // Only show for multifocal devices via getAdditionalSettings
+        },
+        pipSize: {
+            title: 'PIP Size',
+            description: 'Relative size of the PIP overlay (0.1 = 10%, 0.3 = 30%, etc.)',
+            type: 'number',
+            defaultValue: 0.25,
+            hide: true, // Only show for multifocal devices via getAdditionalSettings
+        },
+        pipMargin: {
+            title: 'PIP Margin',
+            description: 'Margin from edge in pixels',
+            type: 'number',
+            defaultValue: 10,
+            hide: true, // Only show for multifocal devices via getAdditionalSettings
+        },
+        widerChannel: {
+            title: 'Wider Channel',
+            description: 'Channel number for wider lens (typically 0)',
+            type: 'number',
+            defaultValue: 0,
+            hide: true, // Only show for multifocal devices via getAdditionalSettings
+        },
+        teleChannel: {
+            title: 'Tele Channel',
+            description: 'Channel number for tele lens (typically 1)',
+            type: 'number',
+            defaultValue: 1,
+            hide: true, // Only show for multifocal devices via getAdditionalSettings
+        },
         // Battery camera specific
         uid: {
             title: 'UID',
@@ -239,6 +282,11 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             onPut: async () => {
                 await this.credentialsChanged();
             }
+        },
+        debugLogs: {
+            title: 'Debug logs',
+            type: 'boolean',
+            immediate: true,
         },
         mixinsSetup: {
             type: 'boolean',
@@ -258,10 +306,10 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 await this.subscribeToEvents();
             },
         },
-        debugLogs: {
+        socketApiDebugLogs: {
             subgroup: 'Advanced',
-            title: 'Debug Logs',
-            description: 'Enable specific debug logs. Baichuan client logs require reconnect; event logs are immediate.',
+            title: 'Socket API Debug Logs',
+            description: 'Enable specific debug logs.',
             multiple: true,
             combobox: true,
             immediate: true,
@@ -609,9 +657,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         };
     }
 
-
     protected isDebugEnabled(): boolean {
-        return this.isEventLogsEnabled();
+        return this.storageSettings.values.debugLogs;
     }
 
     protected getDeviceName(): string {
@@ -1039,11 +1086,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
     }
 
-    isEventLogsEnabled(): boolean {
-        const debugLogs = this.storageSettings.values.debugLogs || [];
-        return debugLogs.includes(DebugLogDisplayNames[DebugLogOption.EventLogs]);
-    }
-
     // BinarySensor interface implementation (for doorbell)
     handleDoorbellEvent(): void {
         if (!this.doorbellBinaryTimeout) {
@@ -1143,7 +1185,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             const shouldTakeNewSnapshot = this.forceNewSnapshot;
 
             if (!shouldTakeNewSnapshot && this.lastPicture) {
-                logger.debug(`Returning cached snapshot, taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
+                logger.log(`Returning cached snapshot, taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
                 return this.lastPicture.mo;
             }
 
@@ -1471,6 +1513,28 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             throw new Error('StreamManager not initialized');
         }
 
+        // Check if this is a composite stream request (for multifocal devices)
+        const isComposite = selected.id?.startsWith('composite_');
+        if (isComposite && this.options && (this.options.type === 'multi-focal' || this.options.type === 'multi-focal-battery')) {
+            const profile = parseStreamProfileFromId(selected.id.replace('composite_', '')) || 'main';
+            const streamKey = `composite_${profile}`;
+            const expectedVideoType = expectedVideoTypeFromUrlMediaStreamOptions(selected);
+
+            const createStreamFn = async () => {
+                return await createRfc4571CompositeMediaObjectFromStreamManager({
+                    streamManager: this.streamManager!,
+                    profile,
+                    streamKey,
+                    expectedVideoType,
+                    selected,
+                    sourceId: this.id,
+                });
+            };
+
+            return await this.withBaichuanRetry(createStreamFn);
+        }
+
+        // Regular stream for single channel
         const profile = parseStreamProfileFromId(selected.id) || 'main';
         const channel = this.storageSettings.values.rtspChannel;
         const streamKey = `${channel}_${profile}`;
@@ -1603,11 +1667,19 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         const { username, password } = this.storageSettings.values;
         const isBattery = ['multi-focal-battery', 'battery'].includes(this.options.type);
+        const isMultiFocal = ['multi-focal', 'multi-focal'].includes(this.options.type);
 
         this.storageSettings.settings.uid.hide = !isBattery;
         this.storageSettings.settings.batteryUpdateIntervalMinutes.hide = !isBattery;
         this.storageSettings.settings.lowThresholdBatteryRecording.hide = !isBattery;
         this.storageSettings.settings.highThresholdBatteryRecording.hide = !isBattery;
+
+        // Show PIP settings only for multifocal devices
+        this.storageSettings.settings.pipPosition.hide = !isMultiFocal;
+        this.storageSettings.settings.pipSize.hide = !isMultiFocal;
+        this.storageSettings.settings.pipMargin.hide = !isMultiFocal;
+        this.storageSettings.settings.widerChannel.hide = !isMultiFocal;
+        this.storageSettings.settings.teleChannel.hide = !isMultiFocal;
 
         if (isBattery && !this.storageSettings.values.mixinsSetup) {
             try {

@@ -18,10 +18,6 @@ export enum DebugLogOption {
     DebugH264 = 'debugH264',
     /** SPS/PPS parameter sets debug logs */
     DebugParamSets = 'debugParamSets',
-    /** Event logs (plugin-specific, not passed to API) */
-    EventLogs = 'eventLogs',
-    /** Battery info logs (plugin-specific, not passed to API) */
-    BatteryInfo = 'batteryInfo',
 }
 
 /**
@@ -36,8 +32,6 @@ export function mapDebugLogToApiOption(option: DebugLogOption): keyof DebugOptio
         [DebugLogOption.TraceEvents]: 'traceEvents',
         [DebugLogOption.DebugH264]: 'debugH264',
         [DebugLogOption.DebugParamSets]: 'debugParamSets',
-        [DebugLogOption.EventLogs]: null, // Plugin-specific, not passed to API
-        [DebugLogOption.BatteryInfo]: null, // Plugin-specific, not passed to API
     };
     return mapping[option];
 }
@@ -88,8 +82,6 @@ export const DebugLogDisplayNames: Record<DebugLogOption, string> = {
     [DebugLogOption.TraceEvents]: 'Trace events XML',
     [DebugLogOption.DebugH264]: 'H264',
     [DebugLogOption.DebugParamSets]: 'Video param sets',
-    [DebugLogOption.EventLogs]: 'Object detection events',
-    [DebugLogOption.BatteryInfo]: 'Battery info update',
 };
 
 /**

@@ -22,14 +22,9 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
     private lastBatteryLevel: number | undefined;
     private batteryUpdateInProgress: boolean = false;
 
-    private isBatteryInfoLoggingEnabled(): boolean {
-        const debugLogs = this.storageSettings.values.debugLogs || [];
-        return debugLogs.includes(DebugLogOption.BatteryInfo);
-    }
-
     constructor(
-        nativeId: string, 
-        public plugin: ReolinkNativePlugin, 
+        nativeId: string,
+        public plugin: ReolinkNativePlugin,
         nvrDevice?: ReolinkNativeNvrDevice,
         multiFocalDevice?: ReolinkNativeMultiFocalDevice
     ) {
@@ -104,7 +99,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
 
     async updateSleepingState(sleepStatus: SleepStatus): Promise<void> {
         try {
-            if (this.isBatteryInfoLoggingEnabled()) {
+            if (this.isDebugEnabled()) {
                 this.getBaichuanLogger().debug('getSleepStatus result:', JSON.stringify(sleepStatus));
             }
 
@@ -162,7 +157,7 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
         const channel = this.storageSettings.values.rtspChannel;
 
         const batteryInfo = await api.getBatteryInfo(channel);
-        if (this.isBatteryInfoLoggingEnabled()) {
+        if (this.isDebugEnabled()) {
             this.getBaichuanLogger().debug('getBatteryInfo result:', JSON.stringify(batteryInfo));
         }
 
