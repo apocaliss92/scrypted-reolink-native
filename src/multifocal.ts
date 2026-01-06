@@ -181,13 +181,15 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
         this.storageSettings.values.multifocalInfo = multifocalInfo;
         this.storageSettings.values.capabilities = capabilities;
 
-        logger.debug(`Multichannel info: ${JSON.stringify({ multifocalInfo, capabilities, support, abilities, features, objects, presets })}`);
+        // TODO: Remove this after debugging
+        logger.log(`Multichannel info: ${JSON.stringify({ multifocalInfo, capabilities, support, abilities, features, objects, presets })}`);
+        // logger.debug(`Multichannel info: ${JSON.stringify({ multifocalInfo, capabilities, support, abilities, features, objects, presets })}`);
 
         for (const channelInfo of multifocalInfo?.channels ?? []) {
             const { channel, lensType } = channelInfo;
 
             const name = `${this.name} - ${lensType}`;
-            const nativeId = this.buildNativeId(channel);
+            const nativeId = `${this.nativeId}-channel${channel}${this.isBattery ? batteryCameraSuffix : cameraSuffix}`;
 
             this.channelToNativeIdMap.set(channel, nativeId);
             const { interfaces, capabilities: deviceCapabilities } = this.getInterfaces(channel);
@@ -208,6 +210,9 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
             };
 
             await sdk.deviceManager.onDeviceDiscovered(device);
+
+            // TODO: Remove this after debugging
+            logger.log(`Discovering lens device ${nativeId}: ${JSON.stringify({ interfaces, deviceCapabilities })}`);
 
             const camera = await this.getDevice(nativeId);
 
@@ -252,10 +257,6 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
     async releaseDevice(id: string, nativeId: string) {
         this.cameraNativeMap.delete(nativeId);
         super.releaseDevice(id, nativeId);
-    }
-
-    buildNativeId(channel: number): string {
-        return `${this.nativeId}-channel${channel}`;
     }
 
     forwardNativeEvent(ev: ReolinkSimpleEvent): void {
