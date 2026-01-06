@@ -13,8 +13,6 @@ import { ReolinkNativeNvrDevice } from "./nvr";
 import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 
 export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
-    private lastPicture: { mo: MediaObject; atMs: number } | undefined;
-    private takePictureInFlight: Promise<MediaObject> | undefined;
     doorbellBinaryTimeout?: NodeJS.Timeout;
     motionDetected: boolean = false;
     motionTimeout: NodeJS.Timeout | undefined;
@@ -22,7 +20,6 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
     private sleepCheckTimer: NodeJS.Timeout | undefined;
     private batteryUpdateTimer: NodeJS.Timeout | undefined;
     private lastBatteryLevel: number | undefined;
-    private forceNewSnapshot: boolean = false;
     private batteryUpdateInProgress: boolean = false;
 
     private isBatteryInfoLoggingEnabled(): boolean {
@@ -41,53 +38,6 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
             nvrDevice,
             multiFocalDevice,
         });
-    }
-
-    async takePicture(options?: RequestPictureOptions): Promise<MediaObject> {
-        const logger = this.getBaichuanLogger();
-        // Allow new snapshot if:
-        // 1. forceNewSnapshot is true, OR
-        // 2. Camera is awake AND last snapshot was taken at least 10 seconds ago
-        // const minSnapshotIntervalMs = 10_000; // 10 seconds
-        // const now = Date.now();
-        const shouldTakeNewSnapshot = this.forceNewSnapshot;
-        // const now = Date.now();
-        // const shouldTakeNewSnapshot = this.forceNewSnapshot || 
-        //     (!this.sleeping && this.lastPicture && (now - this.lastPicture.atMs >= minSnapshotIntervalMs));
-
-        if (!shouldTakeNewSnapshot && this.lastPicture) {
-            logger.debug(`Returning cached snapshot, taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
-            return this.lastPicture.mo;
-        }
-
-        if (this.takePictureInFlight) {
-            return await this.takePictureInFlight;
-        }
-
-        logger.log(`Taking new snapshot from camera (forceNewSnapshot: ${this.forceNewSnapshot})`);
-        this.forceNewSnapshot = false;
-
-        this.takePictureInFlight = (async () => {
-            const channel = this.storageSettings.values.rtspChannel;
-            const snapshotBuffer = await this.withBaichuanClient(async (api) => {
-                return await api.getSnapshot(channel);
-            });
-            const mo = await sdk.mediaManager.createMediaObject(snapshotBuffer, 'image/jpeg');
-            this.lastPicture = { mo, atMs: Date.now() };
-            logger.log(`Snapshot taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
-            return mo;
-        })();
-
-        try {
-            return await this.takePictureInFlight;
-        }
-        finally {
-            this.takePictureInFlight = undefined;
-        }
-    }
-
-    async getPictureOptions(): Promise<ResponsePictureOptions[]> {
-        return [];
     }
 
     async init(): Promise<void> {

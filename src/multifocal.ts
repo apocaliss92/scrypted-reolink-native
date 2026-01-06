@@ -1,10 +1,12 @@
-import type { DeviceCapabilities, DualLensChannelAnalysis, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { Device, DeviceProvider, MediaObject, Reboot, ScryptedDeviceType, Setting, Settings, SettingValue } from "@scrypted/sdk";
+import type { DeviceCapabilities, DualLensChannelAnalysis, ReolinkSimpleEvent, ReolinkSupportedStream } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import sdk, { Device, DeviceProvider, MediaObject, Reboot, RequestMediaStreamOptions, ScryptedDeviceType, Setting, Settings, SettingValue } from "@scrypted/sdk";
 import { type BaichuanConnectionCallbacks } from "./baichuan-base";
 import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
 import { CameraType, CommonCameraMixin } from "./common";
 import ReolinkNativePlugin from "./main";
+import { createRfc4571CompositeMediaObjectFromStreamManager, parseStreamProfileFromId, selectStreamOption, StreamManager, expectedVideoTypeFromUrlMediaStreamOptions } from "./stream-utils";
+import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { batteryCameraSuffix, cameraSuffix, getDeviceInterfaces, updateDeviceInfo } from "./utils";
 
 export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements Settings, DeviceProvider, Reboot {
@@ -32,19 +34,6 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
             hasPresets: false,
             hasIntercom: false,
         }
-    }
-
-    async reboot(): Promise<void> {
-        const api = await this.ensureBaichuanClient();
-        await api.reboot();
-    }
-
-    takePicture(options?: any): Promise<MediaObject> {
-        throw new Error("Method not implemented.");
-    }
-
-    getPictureOptions(): Promise<any[]> {
-        throw new Error("Method not implemented.");
     }
 
     protected getConnectionCallbacks(): BaichuanConnectionCallbacks {
@@ -234,6 +223,26 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
         }
 
         await super.reportDevices();
+
+        // Initialize StreamManager with composite options for multifocal device
+        if (!this.streamManager) {
+            this.streamManager = new StreamManager({
+                createStreamClient: () => this.createStreamClient(),
+                getLogger: () => logger,
+                credentials: {
+                    username,
+                    password
+                },
+                sharedConnection: this.isBattery,
+                compositeOptions: {
+                    widerChannel: 0,
+                    teleChannel: 1,
+                    pipPosition: "bottom-right",
+                    pipSize: 0.25,
+                    pipMargin: 10,
+                },
+            });
+        }
     }
 
     async getDevice(nativeId: string) {
@@ -292,6 +301,41 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
 
     async unsubscribeFromAllEvents(): Promise<void> {
         await super.unsubscribeFromEvents();
+    }
+
+
+    async getVideoStream(vso: RequestMediaStreamOptions): Promise<MediaObject> {
+        if (!vso) throw new Error("video streams not set up or no longer exists.");
+
+        const vsos = await this.getVideoStreamOptions();
+        const selected = selectStreamOption(vsos, vso);
+
+        // Check if this is a composite stream request
+        if (selected.id?.startsWith('composite_')) {
+            if (!this.streamManager) {
+                throw new Error('StreamManager not initialized');
+            }
+
+            const profile = parseStreamProfileFromId(selected.id.replace('composite_', '')) || 'main';
+            const streamKey = `composite_${profile}`;
+            const expectedVideoType = expectedVideoTypeFromUrlMediaStreamOptions(selected);
+
+            const createStreamFn = async () => {
+                return await createRfc4571CompositeMediaObjectFromStreamManager({
+                    streamManager: this.streamManager!,
+                    profile,
+                    streamKey,
+                    expectedVideoType,
+                    selected,
+                    sourceId: this.id,
+                });
+            };
+
+            return await this.withBaichuanRetry(createStreamFn);
+        }
+
+        // For non-composite streams, use parent implementation
+        return await super.getVideoStream(vso);
     }
 
     public async runDiagnostics(): Promise<void> {

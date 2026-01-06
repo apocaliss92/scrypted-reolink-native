@@ -1,5 +1,5 @@
 import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent, ReolinkSupportedStream, StreamSamplingSelection } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, RequestMediaStreamOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
+import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, Reboot, RequestMediaStreamOptions, RequestPictureOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import path from 'path';
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
@@ -187,7 +187,7 @@ class ReolinkCameraPirSensor extends ScryptedDeviceBase implements OnOff, Settin
     }
 }
 
-export abstract class CommonCameraMixin extends BaseBaichuanClass implements VideoCamera, Camera, Settings, DeviceProvider, ObjectDetector, PanTiltZoom, VideoTextOverlays, BinarySensor, Intercom {
+export abstract class CommonCameraMixin extends BaseBaichuanClass implements VideoCamera, Camera, Settings, DeviceProvider, ObjectDetector, PanTiltZoom, VideoTextOverlays, BinarySensor, Intercom, Reboot {
     storageSettings = new StorageSettings(this, {
         // Basic connection settings
         ipAddress: {
@@ -508,6 +508,11 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     floodlight?: ReolinkCameraFloodlight;
     pirSensor?: ReolinkCameraPirSensor;
 
+
+    private lastPicture: { mo: MediaObject; atMs: number } | undefined;
+    private takePictureInFlight: Promise<MediaObject> | undefined;
+    forceNewSnapshot: boolean = false;
+
     // Video stream properties
     protected cachedVideoStreamOptions?: UrlMediaStreamOptions[];
     protected fetchingStreams = false;
@@ -549,6 +554,11 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         setTimeout(async () => {
             await this.parentInit();
         }, 2000);
+    }
+
+    async reboot(): Promise<void> {
+        const api = await this.ensureBaichuanClient();
+        await api.reboot();
     }
 
     // BaseBaichuanClass abstract methods implementation
@@ -1114,9 +1124,59 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         await this.storageSettings.putSetting(key, value);
     }
 
-    // Camera interface methods (must be implemented by subclasses)
-    abstract takePicture(options?: any): Promise<MediaObject>;
-    abstract getPictureOptions(): Promise<any[]>;
+    async takePicture(options?: RequestPictureOptions) {
+        if (this.protocol === 'tcp') {
+            try {
+                return this.withBaichuanRetry(async () => {
+                    const client = await this.ensureClient();
+                    const snapshotBuffer = await client.getSnapshot(this.storageSettings.values.rtspChannel);
+                    const mo = await this.createMediaObject(snapshotBuffer, 'image/jpeg');
+
+                    return mo;
+                });
+            } catch (e) {
+                this.getBaichuanLogger().error('Error taking snapshot', e);
+                throw e;
+            }
+        } else {
+            const logger = this.getBaichuanLogger();
+            const shouldTakeNewSnapshot = this.forceNewSnapshot;
+
+            if (!shouldTakeNewSnapshot && this.lastPicture) {
+                logger.debug(`Returning cached snapshot, taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
+                return this.lastPicture.mo;
+            }
+
+            if (this.takePictureInFlight) {
+                return await this.takePictureInFlight;
+            }
+
+            logger.log(`Taking new snapshot from camera (forceNewSnapshot: ${this.forceNewSnapshot})`);
+            this.forceNewSnapshot = false;
+
+            this.takePictureInFlight = (async () => {
+                const channel = this.storageSettings.values.rtspChannel;
+                const snapshotBuffer = await this.withBaichuanClient(async (api) => {
+                    return await api.getSnapshot(channel);
+                });
+                const mo = await sdk.mediaManager.createMediaObject(snapshotBuffer, 'image/jpeg');
+                this.lastPicture = { mo, atMs: Date.now() };
+                logger.log(`Snapshot taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
+                return mo;
+            })();
+
+            try {
+                return await this.takePictureInFlight;
+            }
+            finally {
+                this.takePictureInFlight = undefined;
+            }
+        }
+    }
+
+    async getPictureOptions(): Promise<ResponsePictureOptions[]> {
+        return [];
+    }
 
     // Intercom interface methods
     async startIntercom(media: MediaObject): Promise<void> {
@@ -1342,12 +1402,15 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         const client = await this.ensureClient();
 
-        const { rtspChannel } = this.storageSettings.values;
+        // For multifocal devices, use undefined channel to get composite streams
+        const isMultiFocal = this.options.type === 'multi-focal' || this.options.type === 'multi-focal-battery';
+        const channel = isMultiFocal ? undefined : this.storageSettings.values.rtspChannel;
 
         try {
-            const { nativeStreams, rtmpStreams, rtspStreams } = await client.buildVideoStreamOptions(rtspChannel);
+            const { nativeStreams, rtmpStreams, rtspStreams } = await client.buildVideoStreamOptions(channel);
 
             let supportedStreams: ReolinkSupportedStream[] = [];
+            // Homehub RTMP is not efficient, crashes, offers native streams to not overload the hub
             if (this.nvrDevice && this.nvrDevice.info.model === 'HOMEHUB') {
                 supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
             } else {
@@ -1539,17 +1602,14 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
 
         const { username, password } = this.storageSettings.values;
-        const isCamera = this.options.type === 'regular' || this.options.type === 'battery';
-        const isBatteryCamera = this.options.type === 'battery';
-        const isBatteryMultiFocal = this.options.type === 'multi-focal-battery';
-        const isBattery = isBatteryCamera || isBatteryMultiFocal;
+        const isBattery = ['multi-focal-battery', 'battery'].includes(this.options.type);
 
         this.storageSettings.settings.uid.hide = !isBattery;
         this.storageSettings.settings.batteryUpdateIntervalMinutes.hide = !isBattery;
         this.storageSettings.settings.lowThresholdBatteryRecording.hide = !isBattery;
         this.storageSettings.settings.highThresholdBatteryRecording.hide = !isBattery;
 
-        if (isBatteryCamera && !this.storageSettings.values.mixinsSetup) {
+        if (isBattery && !this.storageSettings.values.mixinsSetup) {
             try {
                 const device = sdk.systemManager.getDeviceById<Settings>(this.id);
                 if (device) {
@@ -1571,39 +1631,37 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             logger.warn('Failed to subscribe to Baichuan events', e);
         }
 
-        if (isCamera) {
-            this.streamManager = new StreamManager({
-                createStreamClient: () => this.createStreamClient(),
-                getLogger: () => logger as Console,
-                credentials: {
-                    username,
-                    password
-                },
-                sharedConnection: isBattery,
-            });
+        this.streamManager = new StreamManager({
+            createStreamClient: () => this.createStreamClient(),
+            getLogger: () => logger,
+            credentials: {
+                username,
+                password
+            },
+            sharedConnection: isBattery,
+        });
 
-            const { hasIntercom, hasPtz } = this.getAbilities();
+        const { hasIntercom, hasPtz } = this.getAbilities();
 
-            if (hasIntercom) {
-                this.intercom = new ReolinkBaichuanIntercom(this);
-            }
+        if (hasIntercom) {
+            this.intercom = new ReolinkBaichuanIntercom(this);
+        }
 
-            if (hasPtz) {
-                const choices = (this.presets || []).map((preset: any) => preset.id + '=' + preset.name);
+        if (hasPtz) {
+            const choices = (this.presets || []).map((preset: any) => preset.id + '=' + preset.name);
 
-                this.storageSettings.settings.presets.choices = choices;
-                this.storageSettings.settings.ptzSelectedPreset.choices = choices;
+            this.storageSettings.settings.presets.choices = choices;
+            this.storageSettings.settings.ptzSelectedPreset.choices = choices;
 
-                this.storageSettings.settings.presets.hide = false;
-                this.storageSettings.settings.ptzMoveDurationMs.hide = false;
-                this.storageSettings.settings.ptzZoomStep.hide = false;
-                this.storageSettings.settings.ptzCreatePreset.hide = false;
-                this.storageSettings.settings.ptzSelectedPreset.hide = false;
-                this.storageSettings.settings.ptzUpdateSelectedPreset.hide = false;
-                this.storageSettings.settings.ptzDeleteSelectedPreset.hide = false;
+            this.storageSettings.settings.presets.hide = false;
+            this.storageSettings.settings.ptzMoveDurationMs.hide = false;
+            this.storageSettings.settings.ptzZoomStep.hide = false;
+            this.storageSettings.settings.ptzCreatePreset.hide = false;
+            this.storageSettings.settings.ptzSelectedPreset.hide = false;
+            this.storageSettings.settings.ptzUpdateSelectedPreset.hide = false;
+            this.storageSettings.settings.ptzDeleteSelectedPreset.hide = false;
 
-                this.updatePtzCaps();
-            }
+            this.updatePtzCaps();
         }
 
         if (this.nvrDevice || this.multiFocalDevice) {

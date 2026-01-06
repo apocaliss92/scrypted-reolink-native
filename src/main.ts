@@ -59,6 +59,9 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
         this.console.log(`[AutoDetect] Detected device type: ${detection.type} (transport: ${detection.transport})`);
 
+        // Use the API that was successfully used for detection
+        const detectedApi = detection.api;
+
         // Handle multi-focal device case
         if (detection.type === 'multifocal') {
             const deviceInfo = detection.deviceInfo || {};
@@ -69,18 +72,12 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
             settings.newCamera ||= name;
 
-            const interfaces = [
-                ScryptedInterface.Settings,
-                ScryptedInterface.DeviceProvider,
-                ScryptedInterface.Reboot,
-            ];
+            const { capabilities, objects, presets } = await detectedApi.getDeviceCapabilities();
 
-            if (isBattery) {
-                interfaces.push(
-                    ScryptedInterface.Battery,
-                    ScryptedInterface.Sleep
-                );
-            }
+            const { interfaces } = getDeviceInterfaces({
+                capabilities,
+                logger: this.console,
+            });
 
             await sdk.deviceManager.onDeviceDiscovered({
                 nativeId,
@@ -94,10 +91,13 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             if (!(device instanceof ReolinkNativeMultiFocalDevice)) {
                 throw new Error('Expected multi-focal device but got different type');
             }
+            device.classes = objects;
+            device.presets = presets;
             device.storageSettings.values.ipAddress = ipAddress;
             device.storageSettings.values.username = username;
             device.storageSettings.values.password = password;
             device.storageSettings.values.uid = detection.uid || '';
+            device.storageSettings.values.capabilities = capabilities;
 
             return nativeId;
         }
@@ -149,22 +149,10 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
         settings.newCamera ||= name;
 
-        // Create API connection to get capabilities
-        const api = await createBaichuanApi({
-            inputs: {
-                host: ipAddress,
-                username,
-                password,
-                uid: detection.uid,
-                logger: this.console,
-            },
-            transport: detection.transport,
-        });
-
+        // Use the API that was successfully used for detection
         try {
-            await api.login();
             const rtspChannel = 0;
-            const { capabilities, objects, presets } = await api.getDeviceCapabilities(rtspChannel);
+            const { capabilities, objects, presets } = await detectedApi.getDeviceCapabilities(rtspChannel);
 
             const { interfaces, type } = getDeviceInterfaces({
                 capabilities,
@@ -196,9 +184,6 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
         catch (e) {
             this.console.error('Error adding Reolink device', e);
             throw e;
-        }
-        finally {
-            await api.close();
         }
     }
 

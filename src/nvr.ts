@@ -356,7 +356,6 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                 }
 
                 if (!this.lastNvrInfoCheck || now - this.lastNvrInfoCheck > 1000 * 60 * 5) {
-                    logger.log('Starting NVR info data fetch');
                     this.lastNvrInfoCheck = now;
                     const { nvrData } = await api.getNvrInfo();
                     const { devicesData, channelsResponse, response } = await api.getDevicesInfo();
