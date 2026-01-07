@@ -380,6 +380,11 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 logger.error(`[Thumbnail] Error: fileId=${request.fileId}`, error);
                 request.reject(error instanceof Error ? error : new Error(String(error)));
             }
+            
+            // Add 2 second delay between thumbnails (except after the last one)
+            if (this.thumbnailQueue.length > 0) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
         }
 
         this.thumbnailProcessing = false;

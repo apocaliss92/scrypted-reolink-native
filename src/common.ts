@@ -678,7 +678,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 count,
                 streamType: 'mainStream',
                 httpFallback: false,
-                fetchRtmpUrls: true
+                fetchRtmpUrls: false
             });
 
             const clips: VideoClip[] = [];
@@ -701,9 +701,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         } catch (e: any) {
             const message = e instanceof Error ? e.message : String(e);
 
-            // Se l'errore è dovuto all'assenza di UID/recordings, degradiamo a debug per evitare warning rumorosi.
             if (message?.includes('UID is required to access recordings')) {
-                logger.debug('getVideoClips: recordings not available or UID not resolvable for this device', {
+                logger.log('getVideoClips: recordings not available or UID not resolvable for this device', {
                     error: message,
                 });
             } else {
@@ -886,10 +885,21 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
             // Ensure cache directory exists
             await fs.promises.mkdir(cacheDir, { recursive: true });
+            // return null;
 
+            // Ensure client is connected and logged in (reuses existing connection if available)
+            // This ensures no new sessions are created during thumbnail operations
             const api = await this.ensureClient();
 
+            if (!api.client.isSocketConnected() || !api.client.loggedIn) {
+                logger.warn(`[Thumbnail] Client not ready, waiting for connection: fileId=${thumbnailId}`);
+                // ensureClient should have already handled connection, but wait a bit if needed
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+
             // Get RTMP URL from fileId
+            // Note: getRecordingPlaybackUrls internally calls login(), but it should be idempotent
+            // if ensureClient() already established the connection
             const { rtmpVodUrl } = await api.getRecordingPlaybackUrls({
                 fileName: thumbnailId,
             });

@@ -482,7 +482,6 @@ export async function handleVideoClipRequest(props: {
 
         // Get RTMP URL directly from API using fileId
         // Cast device to CommonCameraMixin to access API
-
         let rtmpVodUrl: string | undefined;
         try {
             const api = await device.ensureClient();

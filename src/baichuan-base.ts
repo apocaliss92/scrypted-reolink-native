@@ -208,13 +208,26 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
      * Ensure Baichuan client is connected and ready
      */
     async ensureBaichuanClient(): Promise<ReolinkBaichuanApi> {
-        // Reuse existing client if socket is still connected and logged in
-        if (this.baichuanApi && this.baichuanApi.client.isSocketConnected() && this.baichuanApi.client.loggedIn) {
-            return this.baichuanApi;
-        }
-
-        // Prevent concurrent login storms
+        // Prevent concurrent login storms - check promise first
         if (this.ensureClientPromise) return await this.ensureClientPromise;
+
+        // Reuse existing client if socket is still connected and logged in
+        // Check this AFTER checking the promise to avoid race conditions
+        if (this.baichuanApi) {
+            const isConnected = this.baichuanApi.client.isSocketConnected();
+            const isLoggedIn = this.baichuanApi.client.loggedIn;
+            
+            // Only reuse if both conditions are true
+            if (isConnected && isLoggedIn) {
+                return this.baichuanApi;
+            }
+            
+            // If socket is not connected or not logged in, cleanup the stale client
+            // This prevents leaking connections when the socket appears connected but isn't
+            const logger = this.getBaichuanLogger();
+            logger.log(`Stale client detected: connected=${isConnected}, loggedIn=${isLoggedIn}, cleaning up`);
+            await this.cleanupBaichuanApi();
+        }
 
         // Apply backoff to avoid aggressive reconnection after disconnection
         if (this.lastDisconnectTime > 0) {
@@ -309,6 +322,13 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
 
         // Close listener
         this.closeListener = async () => {
+            // Prevent multiple concurrent cleanup operations
+            if (!this.baichuanApi || this.baichuanApi !== api) {
+                // This close event is for a different/old client, ignore it
+                logger.debug('Close event for stale client, ignoring');
+                return;
+            }
+
             try {
                 const wasConnected = api.client.isSocketConnected();
                 const wasLoggedIn = api.client.loggedIn;
@@ -330,8 +350,16 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
 
             logger.log(`Socket closed, resetting client state for reconnection (last disconnect ${timeSinceLastDisconnect}ms ago)`);
 
-            // Cleanup
-            await this.cleanupBaichuanApi();
+            // Mark as disconnected immediately to prevent reuse
+            // This prevents race conditions where ensureBaichuanClient might check
+            // isSocketConnected() before cleanup completes
+            const currentApi = this.baichuanApi;
+            if (currentApi === api) {
+                // Only cleanup if this is still the current API instance
+                // This prevents cleanup of a new connection that was created
+                // while the old one was closing
+                await this.cleanupBaichuanApi();
+            }
 
             // Call custom close handler if provided
             if (callbacks.onClose) {
