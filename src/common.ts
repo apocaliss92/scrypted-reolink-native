@@ -19,7 +19,7 @@ import {
     selectStreamOption,
     StreamManager
 } from "./stream-utils";
-import { floodlightSuffix, getDeviceInterfaces, pirSuffix, sirenSuffix, updateDeviceInfo } from "./utils";
+import { floodlightSuffix, getDeviceInterfaces, pirSuffix, recordingFileToVideoClip, sirenSuffix, updateDeviceInfo } from "./utils";
 
 export type CameraType = 'battery' | 'regular' | 'multi-focal' | 'multi-focal-battery';
 
@@ -673,56 +673,12 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             const clips: VideoClip[] = [];
 
             for (const rec of recordings) {
-                // Handle both RecordingFile (has startTime/endTime as Date) and EnrichedRecordingFile (has startTimeMs/endTimeMs as number)
-                let recStart: Date;
-                let recEnd: Date;
-                
-                if ('startTime' in rec && rec.startTime instanceof Date) {
-                    recStart = rec.startTime;
-                } else if ('startTimeMs' in rec && typeof rec.startTimeMs === 'number') {
-                    recStart = new Date(rec.startTimeMs);
-                } else {
-                    recStart = rec.parsedFileName?.start ?? start;
-                }
-                
-                if ('endTime' in rec && rec.endTime instanceof Date) {
-                    recEnd = rec.endTime;
-                } else if ('endTimeMs' in rec && typeof rec.endTimeMs === 'number') {
-                    recEnd = new Date(rec.endTimeMs);
-                } else {
-                    recEnd = rec.parsedFileName?.end ?? recStart;
-                }
-
-                const recStartMs = recStart.getTime();
-                const recEndMs = Math.max(recEnd.getTime(), recStartMs);
-                const duration = recEndMs - recStartMs;
-
-                const id = rec.id || rec.fileName;
-
-                let videoHref: string | undefined;
-                try {
-                    const { rtmpVodUrl } = await api.getRecordingPlaybackUrls({
-                        fileName: rec.fileName,
-                    });
-                    videoHref = rtmpVodUrl;
-                } catch (e) {
-                    logger.debug('getVideoClips: failed to build playback URL for recording', rec.fileName, e);
-                }
-
-                const description = ('name' in rec && typeof rec.name === 'string' && rec.name) ? rec.name : (rec.fileName ?? rec.id ?? '');
-
-                clips.push({
-                    id,
-                    startTime: recStartMs,
-                    duration,
-                    event: rec.recordType,
-                    description,
-                    resources: videoHref
-                        ? {
-                            video: { href: videoHref },
-                        }
-                        : undefined,
+                const clip = await recordingFileToVideoClip(rec, {
+                    fallbackStart: start,
+                    api,
+                    logger,
                 });
+                clips.push(clip);
             }
 
             return clips;
