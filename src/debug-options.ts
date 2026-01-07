@@ -8,6 +8,8 @@ export enum DebugLogOption {
     General = 'general',
     /** RTSP proxy/server debug logs */
     DebugRtsp = 'debugRtsp',
+    /** Low-level tracing for recording-related commands */
+    TraceRecordings = 'traceRecordings',
     /** Stream command tracing */
     TraceStream = 'traceStream',
     /** Talkback tracing */
@@ -27,6 +29,7 @@ export function mapDebugLogToApiOption(option: DebugLogOption): keyof DebugOptio
     const mapping: Record<DebugLogOption, keyof DebugOptions | null> = {
         [DebugLogOption.General]: 'general',
         [DebugLogOption.DebugRtsp]: 'debugRtsp',
+        [DebugLogOption.TraceRecordings]: 'traceRecordings',
         [DebugLogOption.TraceStream]: 'traceStream',
         [DebugLogOption.TraceTalk]: 'traceTalk',
         [DebugLogOption.TraceEvents]: 'traceEvents',
@@ -77,6 +80,7 @@ export function getApiRelevantDebugLogs(debugLogs: string[]): string[] {
 export const DebugLogDisplayNames: Record<DebugLogOption, string> = {
     [DebugLogOption.General]: 'General',
     [DebugLogOption.DebugRtsp]: 'RTSP',
+    [DebugLogOption.TraceRecordings]: 'Trace recordings',
     [DebugLogOption.TraceStream]: 'Trace stream',
     [DebugLogOption.TraceTalk]: 'Trace talk',
     [DebugLogOption.TraceEvents]: 'Trace events XML',

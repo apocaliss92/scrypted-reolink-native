@@ -625,7 +625,122 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     async getVideoClips(options?: VideoClipOptions): Promise<VideoClip[]> {
-        throw new Error("getVideoClips is not implemented yet.");
+        // return [];
+        if (this.isBattery) {
+            const logger = this.getBaichuanLogger();
+            logger.debug('getVideoClips: disabled for battery devices');
+            return [];
+        }
+
+        const logger = this.getBaichuanLogger();
+
+        // Determine time window
+        const nowMs = Date.now();
+        const defaultWindowMs = 60 * 60 * 1000; // last 60 minutes
+
+        const startMs = options?.startTime ?? (nowMs - defaultWindowMs);
+        let endMs = options?.endTime ?? nowMs;
+        const count = options?.count;
+
+        if (endMs > nowMs) {
+            endMs = nowMs;
+        }
+
+        if (endMs <= startMs) {
+            logger.warn('getVideoClips: invalid time window, endTime <= startTime', {
+                startTime: startMs,
+                endTime: endMs,
+            });
+            return [];
+        }
+
+        const start = new Date(startMs);
+        const end = new Date(endMs);
+        start.setHours(0, 0, 0, 0);
+
+        try {
+            const api = await this.ensureClient();
+            const recordings = await api.listEnrichedRecordingsByTime({
+                start,
+                end,
+                count,
+                streamType: 'mainStream',
+                httpFallback: false,
+                fetchRtmpUrls: true
+            });
+            logger.log({ recordings });
+
+            const clips: VideoClip[] = [];
+
+            for (const rec of recordings) {
+                // Handle both RecordingFile (has startTime/endTime as Date) and EnrichedRecordingFile (has startTimeMs/endTimeMs as number)
+                let recStart: Date;
+                let recEnd: Date;
+                
+                if ('startTime' in rec && rec.startTime instanceof Date) {
+                    recStart = rec.startTime;
+                } else if ('startTimeMs' in rec && typeof rec.startTimeMs === 'number') {
+                    recStart = new Date(rec.startTimeMs);
+                } else {
+                    recStart = rec.parsedFileName?.start ?? start;
+                }
+                
+                if ('endTime' in rec && rec.endTime instanceof Date) {
+                    recEnd = rec.endTime;
+                } else if ('endTimeMs' in rec && typeof rec.endTimeMs === 'number') {
+                    recEnd = new Date(rec.endTimeMs);
+                } else {
+                    recEnd = rec.parsedFileName?.end ?? recStart;
+                }
+
+                const recStartMs = recStart.getTime();
+                const recEndMs = Math.max(recEnd.getTime(), recStartMs);
+                const duration = recEndMs - recStartMs;
+
+                const id = rec.id || rec.fileName;
+
+                let videoHref: string | undefined;
+                try {
+                    const { rtmpVodUrl } = await api.getRecordingPlaybackUrls({
+                        fileName: rec.fileName,
+                    });
+                    videoHref = rtmpVodUrl;
+                } catch (e) {
+                    logger.debug('getVideoClips: failed to build playback URL for recording', rec.fileName, e);
+                }
+
+                const description = ('name' in rec && typeof rec.name === 'string' && rec.name) ? rec.name : (rec.fileName ?? rec.id ?? '');
+
+                clips.push({
+                    id,
+                    startTime: recStartMs,
+                    duration,
+                    event: rec.recordType,
+                    description,
+                    resources: videoHref
+                        ? {
+                            video: { href: videoHref },
+                        }
+                        : undefined,
+                });
+            }
+
+            return clips;
+        } catch (e: any) {
+            const message = e instanceof Error ? e.message : String(e);
+
+            // Se l'errore è dovuto all'assenza di UID/recordings, degradiamo a debug per evitare warning rumorosi.
+            if (message?.includes('UID is required to access recordings')) {
+                logger.debug('getVideoClips: recordings not available or UID not resolvable for this device', {
+                    error: message,
+                });
+            } else {
+                logger.warn('getVideoClips: failed to list recordings', {
+                    error: message,
+                });
+            }
+            return [];
+        }
     }
 
     getVideoClip(videoId: string): Promise<MediaObject> {
@@ -655,13 +770,14 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             throw new Error('UID is required for battery cameras (BCUDP)');
         }
 
+        const logger = this.getBaichuanLogger();
         return {
             host: ipAddress,
             username,
             password,
             uid: normalizedUid,
             transport: this.protocol,
-            logger: this.console,
+            logger,
             debugOptions,
         };
     }
@@ -1809,7 +1925,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         const { username, password } = this.storageSettings.values;
 
-        this.storageSettings.settings.uid.hide = !this.isBattery;
         this.storageSettings.settings.batteryUpdateIntervalMinutes.hide = !this.isBattery;
         this.storageSettings.settings.lowThresholdBatteryRecording.hide = !this.isBattery;
         this.storageSettings.settings.highThresholdBatteryRecording.hide = !this.isBattery;
@@ -1873,7 +1988,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             this.storageSettings.settings.username.hide = true;
             this.storageSettings.settings.password.hide = true;
             this.storageSettings.settings.ipAddress.hide = true;
-            this.storageSettings.settings.uid.hide = true;
 
             this.storageSettings.settings.username.defaultValue = this.nvrDevice.storageSettings.values.username;
             this.storageSettings.settings.password.defaultValue = this.nvrDevice.storageSettings.values.password;
