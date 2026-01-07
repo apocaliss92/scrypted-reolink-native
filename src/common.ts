@@ -1,4 +1,4 @@
-import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent, ReolinkSupportedStream, StreamSamplingSelection } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent, ReolinkSupportedStream, StreamProfile, StreamSamplingSelection } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, Reboot, RequestMediaStreamOptions, RequestPictureOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoClip, VideoClipOptions, VideoClips, VideoClipThumbnailOptions, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import path from 'path';
@@ -1078,13 +1078,19 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
      * - For TCP devices (regular + multifocal), this creates a new TCP session with its own client.
      * - For UDP/battery devices, this reuses the existing client via ensureClient().
      */
-    async createStreamClient(): Promise<ReolinkBaichuanApi> {
+    async createStreamClient(profile?: StreamProfile): Promise<ReolinkBaichuanApi> {
         // Battery / BCUDP path: reuse the main client to avoid extra wake-ups and sockets.
         if (this.isBattery) {
             return await this.ensureClient();
         }
 
-        // TCP path: create a separate session for streaming (RFC4571/composite/NVR-friendly).
+        // For TCP path: create a new client ONLY for "ext" profile
+        // For other profiles (main, sub), reuse the main client
+        if (profile !== 'ext') {
+            return await this.ensureClient();
+        }
+
+        // TCP path with ext profile: create a separate session for streaming (RFC4571/composite/NVR-friendly).
         const { ipAddress, username, password } = this.storageSettings.values;
         const logger = this.getBaichuanLogger();
 
@@ -1126,7 +1132,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         const { username, password } = this.storageSettings.values;
 
         const baseOptions: any = {
-            createStreamClient: () => this.createStreamClient(),
+            createStreamClient: (profile?: StreamProfile) => this.createStreamClient(profile),
             getLogger: () => logger,
             credentials: {
                 username,

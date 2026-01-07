@@ -17,8 +17,9 @@ export interface StreamManagerOptions {
     /**
      * Creates a dedicated Baichuan session for streaming.
      * Required to support concurrent main+ext streams on firmwares where streamType overlaps.
+     * @param profile The stream profile (main, sub, ext) - used to determine if a new client is needed.
      */
-    createStreamClient: () => Promise<ReolinkBaichuanApi>;
+    createStreamClient: (profile?: StreamProfile) => Promise<ReolinkBaichuanApi>;
     getLogger: () => Console;
     /**
      * Credentials to include in the TCP stream (username, password).
@@ -249,7 +250,7 @@ export class StreamManager {
                 this.nativeRfcServers.delete(streamKey);
             }
 
-            const api = await this.opts.createStreamClient();
+            const api = await this.opts.createStreamClient(profile);
             const { createRfc4571TcpServer } = await import('@apocaliss92/reolink-baichuan-js');
 
             // Use the same credentials as the main connection
