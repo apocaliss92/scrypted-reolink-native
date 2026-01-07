@@ -90,8 +90,7 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
 
     getInterfaces(channel: number) {
         const logger = this.getBaichuanLogger();
-        const values = this.storageSettings.values as any;
-        const { capabilities: caps, multifocalInfo } = values;
+        const { capabilities: caps, multifocalInfo } = this.storageSettings.values;
         const channelInfo = (multifocalInfo as DualLensChannelAnalysis).channels.find(c => c.channel === channel);
 
         const capabilities: DeviceCapabilities = {

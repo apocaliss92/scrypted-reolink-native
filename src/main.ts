@@ -1,16 +1,34 @@
-import sdk, { DeviceCreator, DeviceCreatorSettings, DeviceProvider, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedNativeId, Setting } from "@scrypted/sdk";
+import sdk, { DeviceCreator, DeviceCreatorSettings, DeviceProvider, HttpRequest, HttpResponse, MediaObject, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, ScryptedNativeId, Setting, VideoClips } from "@scrypted/sdk";
 import { BaseBaichuanClass } from "./baichuan-base";
 import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
 import { CommonCameraMixin } from "./common";
-import { createBaichuanApi } from "./connect";
-import { ReolinkNativeNvrDevice } from "./nvr";
-import { batteryCameraSuffix, batteryMultifocalSuffix, cameraSuffix, getDeviceInterfaces, multifocalSuffix, nvrSuffix } from "./utils";
 import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
+import { ReolinkNativeNvrDevice } from "./nvr";
+import { batteryCameraSuffix, batteryMultifocalSuffix, cameraSuffix, extractThumbnailFromVideo, getDeviceInterfaces, handleVideoClipRequest, multifocalSuffix, nvrSuffix } from "./utils";
+
+interface ThumbnailRequest {
+    deviceId: string;
+    fileId: string;
+    rtmpUrl: string;
+    logger: Console;
+    resolve: (mo: MediaObject) => void;
+    reject: (error: Error) => void;
+}
+
+interface ThumbnailRequestInput {
+    deviceId: string;
+    fileId: string;
+    rtmpUrl: string;
+    logger: Console;
+}
 
 class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, DeviceCreator {
     devices = new Map<string, BaseBaichuanClass>();
+    mixinsMap = new Map<string, CommonCameraMixin>();
     nvrDeviceId: string;
+    private thumbnailQueue: ThumbnailRequest[] = [];
+    private thumbnailProcessing = false;
 
     constructor(nativeId: string) {
         super(nativeId);
@@ -235,6 +253,149 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
         } else {
             return new ReolinkNativeCamera(nativeId, this);
         }
+    }
+
+    async onRequest(request: HttpRequest, response: HttpResponse): Promise<void> {
+        const logger = this.console;
+        const url = new URL(`http://localhost${request.url}`);
+        
+        try {
+            // Parse webhook path: /.../webhook/{type}/{deviceId}/{fileId}
+            // The path may include prefix like /endpoint/@apocaliss92/scrypted-reolink-native/public/webhook/...
+            const pathParts = url.pathname.split('/').filter(p => p);
+            
+            // Find the index of 'webhook' in the path
+            const webhookIndex = pathParts.indexOf('webhook');
+            if (webhookIndex === -1 || pathParts.length < webhookIndex + 4) {
+                response.send('Invalid webhook path', { code: 404 });
+                return;
+            }
+            
+            // Extract type, deviceId, and fileId after 'webhook'
+            const type = pathParts[webhookIndex + 1];
+            const encodedDeviceId = pathParts[webhookIndex + 2];
+            // fileId may contain slashes, so join all remaining parts
+            const encodedFileId = pathParts.slice(webhookIndex + 3).join('/');
+            const deviceId = decodeURIComponent(encodedDeviceId);
+            let fileId = decodeURIComponent(encodedFileId);
+            
+            // Restore leading slash if the original fileId had it (we removed it during encoding)
+            // The API expects fileId with leading slash for absolute paths
+            if (!fileId.startsWith('/') && !fileId.startsWith('http')) {
+                // If it looks like an absolute path (starts with common path prefixes), add slash
+                if (fileId.startsWith('mnt/') || fileId.startsWith('var/') || fileId.startsWith('tmp/')) {
+                    fileId = `/${fileId}`;
+                }
+            }
+            
+            // logger.log(`Webhook request: type=${type}, deviceId=${deviceId}, fileId=${fileId}`);
+            
+            // Get the device
+            const device = this.mixinsMap.get(deviceId); 
+            if (!device) {
+                response.send('Device not found', { code: 404 });
+                return;
+            }
+            
+            if (type === 'video') {
+                await handleVideoClipRequest({
+                    device,
+                    deviceId,
+                    fileId,
+                    request,
+                    response,
+                    logger,
+                });
+                return;
+            } else if (type === 'thumbnail') {
+                // Get thumbnail MediaObject
+                const mo = await device.getVideoClipThumbnail(fileId);
+                
+                // Convert to buffer
+                const buffer = await sdk.mediaManager.convertMediaObjectToBuffer(mo, 'image/jpeg');
+                
+                // Send image
+                response.send(buffer, {
+                    code: 200,
+                    headers: {
+                        'Content-Type': 'image/jpeg',
+                        'Cache-Control': 'max-age=31536000',
+                    },
+                });
+                return;
+            } else {
+                response.send('Invalid webhook type', { code: 404 });
+                return;
+            }
+        } catch (e: any) {
+            logger.error('Error in onRequest', e);
+            response.send(`Error: ${e.message}`, {
+                code: 500,
+            });
+            return;
+        }
+    }
+
+    onPush(request: HttpRequest): Promise<void> {
+        return this.onRequest(request, undefined);
+    }
+
+    /**
+     * Add a thumbnail generation request to the queue
+     */
+    async generateThumbnail(request: ThumbnailRequestInput): Promise<MediaObject> {
+        const queueLength = this.thumbnailQueue.length;
+        const isProcessing = this.thumbnailProcessing;
+        request.logger.log(`[Thumbnail] Adding to queue: fileId=${request.fileId}, queueLength=${queueLength}, processing=${isProcessing}`);
+        
+        return new Promise((resolve, reject) => {
+            this.thumbnailQueue.push({
+                ...request,
+                resolve,
+                reject,
+            });
+            this.processThumbnailQueue();
+        });
+    }
+
+    /**
+     * Process the thumbnail queue sequentially
+     */
+    private async processThumbnailQueue(): Promise<void> {
+        if (this.thumbnailProcessing || this.thumbnailQueue.length === 0) {
+            return;
+        }
+
+        this.thumbnailProcessing = true;
+
+        while (this.thumbnailQueue.length > 0) {
+            const request = this.thumbnailQueue.shift()!;
+            const logger = request.logger;
+            
+            try {
+                const thumbnail = await this.extractThumbnailFromVideo(request);
+                logger.log(`[Thumbnail] Completed: fileId=${request.fileId}`);
+                request.resolve(thumbnail);
+            } catch (error) {
+                logger.error(`[Thumbnail] Error: fileId=${request.fileId}`, error);
+                request.reject(error instanceof Error ? error : new Error(String(error)));
+            }
+        }
+
+        this.thumbnailProcessing = false;
+    }
+
+    /**
+     * Extract a thumbnail frame from video using ffmpeg
+     */
+    private async extractThumbnailFromVideo(request: ThumbnailRequest): Promise<MediaObject> {
+        const { deviceId, fileId, rtmpUrl, logger } = request;
+        return extractThumbnailFromVideo({
+            rtmpUrl,
+            fileId,
+            deviceId,
+            logger,
+        });
     }
 }
 

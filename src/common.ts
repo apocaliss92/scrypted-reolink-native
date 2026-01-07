@@ -2,6 +2,9 @@ import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, Reo
 import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, Reboot, RequestMediaStreamOptions, RequestPictureOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoClip, VideoClipOptions, VideoClips, VideoClipThumbnailOptions, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
+import { spawn } from 'node:child_process';
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
 import { createBaichuanApi, normalizeUid, type BaichuanTransport } from "./connect";
@@ -545,6 +548,14 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             type: "string",
             defaultValue: path.join(process.env.SCRYPTED_PLUGIN_VOLUME, 'diagnostics', this.name),
         },
+        videoClipCacheEnabled: {
+            title: "Enable Video Clip Caching",
+            subgroup: 'Video Clips',
+            description: "Cache video clips to filesystem for faster subsequent access (default: disabled).",
+            type: "boolean",
+            defaultValue: false,
+            hide: true,
+        },
         diagnosticsRun: {
             subgroup: 'Diagnostics',
             title: 'Run Diagnostics',
@@ -604,6 +615,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         public options: CommonCameraMixinOptions
     ) {
         super(nativeId);
+        this.plugin.mixinsMap.set(this.id, this);
 
         // Store NVR device reference if provided
         this.nvrDevice = options.nvrDevice;
@@ -668,7 +680,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 httpFallback: false,
                 fetchRtmpUrls: true
             });
-            logger.log({ recordings });
 
             const clips: VideoClip[] = [];
 
@@ -677,9 +688,14 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     fallbackStart: start,
                     api,
                     logger,
+                    plugin: this,
+                    deviceId: this.id,
+                    useWebhook: true,
                 });
                 clips.push(clip);
             }
+
+            logger.debug(`Videoclips found: ${JSON.stringify(clips)}`);
 
             return clips;
         } catch (e: any) {
@@ -699,12 +715,212 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
     }
 
-    getVideoClip(videoId: string): Promise<MediaObject> {
-        throw new Error("getVideoClip is not implemented yet.");
+    /**
+     * Get the cache directory for video clips
+     */
+    private getVideoClipCacheDir(): string {
+        const pluginVolume = process.env.SCRYPTED_PLUGIN_VOLUME || '';
+        const cameraId = this.id;
+        return path.join(pluginVolume, 'snapshots', cameraId);
     }
 
-    getVideoClipThumbnail(thumbnailId: string, options?: VideoClipThumbnailOptions): Promise<MediaObject> {
-        throw new Error("getVideoClipThumbnail is not implemented yet.");
+    /**
+     * Get cache file path for a video clip
+     */
+    getVideoClipCachePath(videoId: string): string {
+        // Create a safe filename from videoId using hash
+        const hash = crypto.createHash('md5').update(videoId).digest('hex');
+        // Keep original extension if present, otherwise use .mp4
+        const ext = videoId.includes('.') ? path.extname(videoId) : '.mp4';
+        const cacheDir = this.getVideoClipCacheDir();
+        return path.join(cacheDir, `${hash}${ext}`);
+    }
+
+    async getVideoClip(videoId: string): Promise<MediaObject> {
+        const logger = this.getBaichuanLogger();
+        try {
+            const cacheEnabled = this.storageSettings.values.videoClipCacheEnabled ?? false;
+
+            // Always check cache first, even if caching is disabled (in case user enabled it before)
+            const cachePath = this.getVideoClipCachePath(videoId);
+            const cacheDir = this.getVideoClipCacheDir();
+
+            // Check if cached file exists
+            try {
+                await fs.promises.access(cachePath, fs.constants.F_OK);
+                const stats = await fs.promises.stat(cachePath);
+                logger.debug(`[VideoClip] Using cached file: fileId=${videoId}, size=${stats.size} bytes`);
+                // Return cached file as MediaObject
+                const mo = await sdk.mediaManager.createMediaObjectFromUrl(`file://${cachePath}`);
+                return mo;
+            } catch (e) {
+                // File doesn't exist or error accessing it
+                logger.debug(`[VideoClip] Cache miss: fileId=${videoId}, error=${e instanceof Error ? e.message : String(e)}`);
+                if (cacheEnabled) {
+                    logger.log(`[VideoClip] Will download and cache: fileId=${videoId}`);
+                }
+            }
+
+            // If caching is enabled, ensure cache directory exists
+            if (cacheEnabled) {
+                await fs.promises.mkdir(cacheDir, { recursive: true });
+            }
+
+            const api = await this.ensureClient();
+
+            // videoId is the fileId (fileName or id from the recording)
+            const { rtmpVodUrl } = await api.getRecordingPlaybackUrls({
+                fileName: videoId,
+            });
+
+            if (!rtmpVodUrl) {
+                throw new Error(`No playback URL found for video ${videoId}`);
+            }
+
+            // If caching is enabled, download and cache the video
+            if (cacheEnabled) {
+                const cachePath = this.getVideoClipCachePath(videoId);
+
+                // Download and convert RTMP to MP4 using ffmpeg
+                const ffmpegPath = await sdk.mediaManager.getFFmpegPath();
+                const ffmpegArgs = [
+                    '-i', rtmpVodUrl,
+                    '-c', 'copy', // Copy codecs without re-encoding
+                    '-f', 'mp4',
+                    '-movflags', 'frag_keyframe+empty_moov', // Enable streaming
+                    cachePath,
+                ];
+
+                logger.log(`Downloading video clip to cache: ${cachePath}`);
+
+                await new Promise<void>((resolve, reject) => {
+                    const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
+                        stdio: ['ignore', 'pipe', 'pipe'],
+                    });
+
+                    let errorOutput = '';
+
+                    ffmpeg.stderr.on('data', (chunk: Buffer) => {
+                        errorOutput += chunk.toString();
+                    });
+
+                    ffmpeg.on('close', (code) => {
+                        if (code !== 0) {
+                            logger.error(`ffmpeg failed to download video clip: ${errorOutput}`);
+                            reject(new Error(`ffmpeg failed with code ${code}: ${errorOutput}`));
+                            return;
+                        }
+
+                        logger.log(`Video clip cached successfully: ${cachePath}`);
+                        resolve();
+                    });
+
+                    ffmpeg.on('error', (error) => {
+                        logger.error(`ffmpeg spawn error for video clip ${videoId}`, error);
+                        reject(error);
+                    });
+
+                    // Timeout after 5 minutes
+                    const timeout = setTimeout(() => {
+                        ffmpeg.kill('SIGKILL');
+                        reject(new Error('Video clip download timeout'));
+                    }, 5 * 60 * 1000);
+
+                    ffmpeg.on('close', () => {
+                        clearTimeout(timeout);
+                    });
+                });
+
+                // Return cached file as MediaObject
+                const mo = await sdk.mediaManager.createMediaObjectFromUrl(`file://${cachePath}`);
+                return mo;
+            } else {
+                // Caching disabled, return RTMP URL directly
+                const mo = await sdk.mediaManager.createMediaObjectFromUrl(rtmpVodUrl);
+                return mo;
+            }
+        } catch (e) {
+            logger.error(`getVideoClip: failed to get video clip ${videoId}`, e);
+            throw e;
+        }
+    }
+
+    /**
+     * Get the cache directory for thumbnails
+     */
+    private getThumbnailCacheDir(): string {
+        const pluginVolume = process.env.SCRYPTED_PLUGIN_VOLUME || '';
+        const cameraId = this.id;
+        return path.join(pluginVolume, 'snapshots', cameraId, 'thumbnails');
+    }
+
+    /**
+     * Get cache file path for a thumbnail
+     */
+    private getThumbnailCachePath(fileId: string): string {
+        // Create a safe filename from fileId using hash
+        const hash = crypto.createHash('md5').update(fileId).digest('hex');
+        const cacheDir = this.getThumbnailCacheDir();
+        return path.join(cacheDir, `${hash}.jpg`);
+    }
+
+    async getVideoClipThumbnail(thumbnailId: string, options?: VideoClipThumbnailOptions): Promise<MediaObject> {
+        const logger = this.getBaichuanLogger();
+
+        try {
+            // Check cache first
+            const cachePath = this.getThumbnailCachePath(thumbnailId);
+            const cacheDir = this.getThumbnailCacheDir();
+
+            try {
+                await fs.promises.access(cachePath, fs.constants.F_OK);
+                const stats = await fs.promises.stat(cachePath);
+                logger.debug(`[Thumbnail] Using cached: fileId=${thumbnailId}, size=${stats.size} bytes`);
+                // Return cached thumbnail as MediaObject
+                const mo = await sdk.mediaManager.createMediaObjectFromUrl(`file://${cachePath}`);
+                return mo;
+            } catch {
+                // File doesn't exist, need to generate it
+                logger.debug(`[Thumbnail] Cache miss: fileId=${thumbnailId}`);
+            }
+
+            // Ensure cache directory exists
+            await fs.promises.mkdir(cacheDir, { recursive: true });
+
+            const api = await this.ensureClient();
+
+            // Get RTMP URL from fileId
+            const { rtmpVodUrl } = await api.getRecordingPlaybackUrls({
+                fileName: thumbnailId,
+            });
+
+            if (!rtmpVodUrl) {
+                throw new Error(`No playback URL found for video ${thumbnailId}`);
+            }
+
+            // Use the plugin's thumbnail generation queue with RTMP URL
+            const thumbnail = await this.plugin.generateThumbnail({
+                deviceId: this.id,
+                fileId: thumbnailId,
+                rtmpUrl: rtmpVodUrl,
+                logger: this.getBaichuanLogger(),
+            });
+
+            // Cache the thumbnail
+            try {
+                const buffer = await sdk.mediaManager.convertMediaObjectToBuffer(thumbnail, 'image/jpeg');
+                await fs.promises.writeFile(cachePath, buffer);
+                logger.log(`[Thumbnail] Cached: fileId=${thumbnailId}, size=${buffer.length} bytes`);
+            } catch (e) {
+                logger.warn(`[Thumbnail] Failed to cache: fileId=${thumbnailId}`, e);
+                // Continue even if caching fails
+            }
+
+            return thumbnail;
+        } catch (e) {
+            logger.error(`[Thumbnail] Error: fileId=${thumbnailId}`, e);
+            throw e;
+        }
     }
 
     removeVideoClips(...videoClipIds: string[]): Promise<void> {
@@ -773,6 +989,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     async withBaichuanRetry<T>(fn: () => Promise<T>): Promise<T> {
+        return await fn();
+
         if (this.isBattery) {
             return await fn();
         } else {
@@ -1488,6 +1706,10 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             this.pirSensor ||= new ReolinkCameraPirSensor(this, nativeId);
             return this.pirSensor;
         }
+    }
+
+    async release() {
+        this.plugin.mixinsMap.delete(this.id);
     }
 
     async releaseDevice(id: string, nativeId: string): Promise<void> {

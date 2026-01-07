@@ -201,7 +201,7 @@ export class StreamManager {
     }
 
     private getLogger() {
-        return this.opts.getLogger() ;
+        return this.opts.getLogger();
     }
 
     private async ensureRfcServer(
@@ -233,8 +233,8 @@ export class StreamManager {
                         port: cached.port,
                         sdp: cached.sdp,
                         audio: cached.audio,
-                        username: (cached as any).username || this.opts.credentials.username,
-                        password: (cached as any).password || this.opts.credentials.password,
+                        username: cached.username || this.opts.credentials.username,
+                        password: cached.password || this.opts.credentials.password,
                     };
                 }
             }
@@ -281,8 +281,8 @@ export class StreamManager {
                 port: created.port,
                 sdp: created.sdp,
                 audio: created.audio,
-                username: (created as any).username || this.opts.credentials.username,
-                password: (created as any).password || this.opts.credentials.password,
+                username: created.username || this.opts.credentials.username,
+                password: created.password || this.opts.credentials.password,
             };
         })();
 

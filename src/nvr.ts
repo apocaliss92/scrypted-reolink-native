@@ -222,9 +222,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                 case 'doorbell':
                     // Handle doorbell if camera supports it
                     try {
-                        if (typeof (targetCamera as any).handleDoorbellEvent === 'function') {
-                            (targetCamera as any).handleDoorbellEvent();
-                        }
+                        targetCamera.handleDoorbellEvent();
                     }
                     catch (e) {
                         logger.warn(`Error handling doorbell event for camera channel ${channel}`, e);
