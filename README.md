@@ -9,8 +9,10 @@ The plugin will automatically distinguish between:
 
 Battery cameras will be automatically set-up to disable prebuffer streams and snapshots (to preserve battery).
 
-All the devices will be offered of RTSP and RTMP streams when available, and Native streams built upon the native reolink protocolos, these might be still unstable but with less latency
+All the devices will be offered of RTSP and RTMP streams when available, and Native streams built upon the native reolink protocolos
 
-Missing features & Known bugs
-- Motion is currently missing from standalone battery cameras, looking for a solution. There is the possibility to catch it as soon as it comes but it would mean to impact the battery because of the constant session
-- Scrubbing with Native streams seems broken, working on a solution
+Videoclips are available as opt-in with auto-download possibilites to fasten the loading. Since Reolink does nto store snapshots, scrypted will generate them when the clip is requested for the first time or on a schedule (settings available for that)
+
+Multifocal cameras (such as Trackmix) will be provided with a combined stream in PIP-mode
+
+## Currently motion on standalone battery cams is not reliable, once the camera goes to sleep there is no known way (at least to me) to catch the motion events coming from PIR. The hub is able to get this informaion, will investigate further.

@@ -260,19 +260,19 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
     async onRequest(request: HttpRequest, response: HttpResponse): Promise<void> {
         const logger = this.console;
         const url = new URL(`http://localhost${request.url}`);
-        
+
         try {
             // Parse webhook path: /.../webhook/{type}/{deviceId}/{fileId}
             // The path may include prefix like /endpoint/@apocaliss92/scrypted-reolink-native/public/webhook/...
             const pathParts = url.pathname.split('/').filter(p => p);
-            
+
             // Find the index of 'webhook' in the path
             const webhookIndex = pathParts.indexOf('webhook');
             if (webhookIndex === -1 || pathParts.length < webhookIndex + 4) {
                 response.send('Invalid webhook path', { code: 404 });
                 return;
             }
-            
+
             // Extract type, deviceId, and fileId after 'webhook'
             const type = pathParts[webhookIndex + 1];
             const encodedDeviceId = pathParts[webhookIndex + 2];
@@ -280,7 +280,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             const encodedFileId = pathParts.slice(webhookIndex + 3).join('/');
             const deviceId = decodeURIComponent(encodedDeviceId);
             let fileId = decodeURIComponent(encodedFileId);
-            
+
             // Restore leading slash if the original fileId had it (we removed it during encoding)
             // The API expects fileId with leading slash for absolute paths
             if (!fileId.startsWith('/') && !fileId.startsWith('http')) {
@@ -289,16 +289,16 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                     fileId = `/${fileId}`;
                 }
             }
-            
+
             // logger.log(`Webhook request: type=${type}, deviceId=${deviceId}, fileId=${fileId}`);
-            
+
             // Get the device
-            const device = this.mixinsMap.get(deviceId); 
+            const device = this.mixinsMap.get(deviceId);
             if (!device) {
                 response.send('Device not found', { code: 404 });
                 return;
             }
-            
+
             if (type === 'video') {
                 await handleVideoClipRequest({
                     device,
@@ -312,10 +312,10 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             } else if (type === 'thumbnail') {
                 // Get thumbnail MediaObject
                 const mo = await device.getVideoClipThumbnail(fileId);
-                
+
                 // Convert to buffer
                 const buffer = await sdk.mediaManager.convertMediaObjectToBuffer(mo, 'image/jpeg');
-                
+
                 // Send image
                 response.send(buffer, {
                     code: 200,
@@ -349,7 +349,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
         const queueLength = this.thumbnailQueue.length;
         const isProcessing = this.thumbnailProcessing;
         request.logger.log(`[Thumbnail] Adding to queue: fileId=${request.fileId}, queueLength=${queueLength}, processing=${isProcessing}`);
-        
+
         return new Promise((resolve, reject) => {
             this.thumbnailQueue.push({
                 ...request,
@@ -373,15 +373,15 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
         while (this.thumbnailQueue.length > 0) {
             const request = this.thumbnailQueue.shift()!;
             const logger = request.logger;
-            
+
             try {
-                const thumbnail = await this.extractThumbnailFromVideo(request);
+                const thumbnail = await extractThumbnailFromVideo(request);
                 request.resolve(thumbnail);
             } catch (error) {
                 logger.error(`[Thumbnail] Error: fileId=${request.fileId}`, error);
                 request.reject(error instanceof Error ? error : new Error(String(error)));
             }
-            
+
             // Add 2 second delay between thumbnails (except after the last one)
             if (this.thumbnailQueue.length > 0) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
@@ -389,20 +389,6 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
         }
 
         this.thumbnailProcessing = false;
-    }
-
-    /**
-     * Extract a thumbnail frame from video using ffmpeg
-     */
-    private async extractThumbnailFromVideo(request: ThumbnailRequest): Promise<MediaObject> {
-        const { deviceId, fileId, rtmpUrl, filePath, logger } = request;
-        return extractThumbnailFromVideo({
-            rtmpUrl,
-            filePath,
-            fileId,
-            deviceId,
-            logger,
-        });
     }
 }
 

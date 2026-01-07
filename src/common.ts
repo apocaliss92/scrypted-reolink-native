@@ -548,6 +548,17 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             type: "string",
             defaultValue: path.join(process.env.SCRYPTED_PLUGIN_VOLUME, 'diagnostics', this.name),
         },
+        enableVideoclips: {
+            title: "Enable Video Clips",
+            subgroup: 'Videoclips',
+            description: "Enable video clips functionality. If disabled, getVideoClips will return empty and all other videoclip settings are ignored.",
+            type: "boolean",
+            defaultValue: false,
+            immediate: true,
+            onPut: async () => {
+                this.updateVideoClipsAutoLoad();
+            },
+        },
         loadVideoclips: {
             title: "Auto-load Video Clips",
             subgroup: 'Videoclips',
@@ -663,6 +674,11 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     async getVideoClips(options?: VideoClipOptions): Promise<VideoClip[]> {
+        // Check if videoclips are enabled
+        if (!this.storageSettings.values.enableVideoclips) {
+            return [];
+        }
+
         if (this.isBattery && this.sleeping) {
             const logger = this.getBaichuanLogger();
             logger.debug('getVideoClips: disabled for battery devices');
@@ -993,17 +1009,21 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             this.videoClipsAutoLoadInterval = undefined;
         }
 
-        const loadVideoclips = this.storageSettings.values.loadVideoclips ?? false;
-        const checkIntervalMinutes = this.storageSettings.values.videoclipsRegularChecks ?? 30;
+        // Check if videoclips are enabled at all
+        const { enableVideoclips, loadVideoclips, videoclipsRegularChecks } = this.storageSettings.values;
+        if (!enableVideoclips) {
+            return;
+        }
+
 
         if (!loadVideoclips) {
             return;
         }
 
         const logger = this.getBaichuanLogger();
-        const intervalMs = checkIntervalMinutes * 60 * 1000;
+        const intervalMs = videoclipsRegularChecks * 60 * 1000;
 
-        logger.log(`Starting video clips auto-load: checking every ${checkIntervalMinutes} minutes`);
+        logger.log(`Starting video clips auto-load: checking every ${videoclipsRegularChecks} minutes`);
 
         // Run immediately on start
         this.loadTodayVideoClipsAndThumbnails();
