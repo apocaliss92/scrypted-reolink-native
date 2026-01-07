@@ -214,9 +214,25 @@ export class StreamManager {
             compositeOptions?: CompositeStreamPipOptions;
         },
     ): Promise<RfcServerInfo> {
+        // Check for existing promise first to prevent duplicate server creation
         const existingCreate = this.nativeRfcServerCreatePromises.get(streamKey);
         if (existingCreate) {
             return await existingCreate;
+        }
+
+        // Double-check: if server already exists and is listening, return it immediately
+        const existingServer = this.nativeRfcServers.get(streamKey);
+        if (existingServer?.server?.listening) {
+            if (!expectedVideoType || existingServer.videoType === expectedVideoType) {
+                return {
+                    host: existingServer.host,
+                    port: existingServer.port,
+                    sdp: existingServer.sdp,
+                    audio: existingServer.audio,
+                    username: existingServer.username || this.opts.credentials.username,
+                    password: existingServer.password || this.opts.credentials.password,
+                };
+            }
         }
 
         const createPromise = (async () => {

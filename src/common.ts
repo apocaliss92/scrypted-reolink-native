@@ -678,7 +678,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 count,
                 streamType: 'mainStream',
                 httpFallback: false,
-                fetchRtmpUrls: false
+                fetchRtmpUrls: true
             });
 
             const clips: VideoClip[] = [];

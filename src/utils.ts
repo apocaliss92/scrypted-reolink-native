@@ -290,11 +290,19 @@ export async function getVideoClipWebhookUrls(props: {
         const cleanFileId = fileId.startsWith('/') ? fileId.substring(1) : fileId;
         const encodedFileId = encodeURIComponent(cleanFileId);
 
+        // Parse endpoint URL to extract query parameters (for authentication)
+        const endpointUrl = new URL(endpoint);
+        // Preserve query parameters (e.g., user_token for authentication)
+        const queryParams = endpointUrl.search;
+        // Remove query parameters from the base endpoint URL
+        endpointUrl.search = '';
+        
         // Ensure endpoint has trailing slash
-        const normalizedEndpoint = endpoint.endsWith('/') ? endpoint : `${endpoint}/`;
+        const normalizedEndpoint = endpointUrl.toString().endsWith('/') ? endpointUrl.toString() : `${endpointUrl.toString()}/`;
 
-        const videoUrl = `${normalizedEndpoint}webhook/video/${encodedDeviceId}/${encodedFileId}`;
-        const thumbnailUrl = `${normalizedEndpoint}webhook/thumbnail/${encodedDeviceId}/${encodedFileId}`;
+        // Build webhook URLs and append query parameters at the end
+        const videoUrl = `${normalizedEndpoint}webhook/video/${encodedDeviceId}/${encodedFileId}${queryParams}`;
+        const thumbnailUrl = `${normalizedEndpoint}webhook/thumbnail/${encodedDeviceId}/${encodedFileId}${queryParams}`;
 
         return { videoUrl, thumbnailUrl };
     } catch (e) {
