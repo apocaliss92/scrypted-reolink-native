@@ -739,12 +739,12 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     /**
-     * Get the cache directory for video clips
+     * Get the cache directory for video clips and thumbnails
      */
     private getVideoClipCacheDir(): string {
         const pluginVolume = process.env.SCRYPTED_PLUGIN_VOLUME || '';
         const cameraId = this.id;
-        return path.join(pluginVolume, 'snapshots', cameraId);
+        return path.join(pluginVolume, 'videoclips', cameraId);
     }
 
     /**
@@ -869,19 +869,18 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     /**
-     * Get the cache directory for thumbnails
+     * Get the cache directory for thumbnails (same as video clips)
      */
     private getThumbnailCacheDir(): string {
-        const pluginVolume = process.env.SCRYPTED_PLUGIN_VOLUME || '';
-        const cameraId = this.id;
-        return path.join(pluginVolume, 'snapshots', cameraId, 'thumbnails');
+        // Use the same directory as video clips
+        return this.getVideoClipCacheDir();
     }
 
     /**
      * Get cache file path for a thumbnail
      */
     private getThumbnailCachePath(fileId: string): string {
-        // Create a safe filename from fileId using hash
+        // Use the same hash and base name as video clips, but with .jpg extension
         const hash = crypto.createHash('md5').update(fileId).digest('hex');
         const cacheDir = this.getThumbnailCacheDir();
         return path.join(cacheDir, `${hash}.jpg`);
