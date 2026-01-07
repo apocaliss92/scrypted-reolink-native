@@ -10,7 +10,8 @@ import { batteryCameraSuffix, batteryMultifocalSuffix, cameraSuffix, extractThum
 interface ThumbnailRequest {
     deviceId: string;
     fileId: string;
-    rtmpUrl: string;
+    rtmpUrl?: string;
+    filePath?: string;
     logger: Console;
     resolve: (mo: MediaObject) => void;
     reject: (error: Error) => void;
@@ -19,7 +20,8 @@ interface ThumbnailRequest {
 interface ThumbnailRequestInput {
     deviceId: string;
     fileId: string;
-    rtmpUrl: string;
+    rtmpUrl?: string;
+    filePath?: string;
     logger: Console;
 }
 
@@ -374,7 +376,6 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             
             try {
                 const thumbnail = await this.extractThumbnailFromVideo(request);
-                logger.log(`[Thumbnail] Completed: fileId=${request.fileId}`);
                 request.resolve(thumbnail);
             } catch (error) {
                 logger.error(`[Thumbnail] Error: fileId=${request.fileId}`, error);
@@ -394,9 +395,10 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
      * Extract a thumbnail frame from video using ffmpeg
      */
     private async extractThumbnailFromVideo(request: ThumbnailRequest): Promise<MediaObject> {
-        const { deviceId, fileId, rtmpUrl, logger } = request;
+        const { deviceId, fileId, rtmpUrl, filePath, logger } = request;
         return extractThumbnailFromVideo({
             rtmpUrl,
+            filePath,
             fileId,
             deviceId,
             logger,

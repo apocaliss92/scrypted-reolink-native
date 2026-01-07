@@ -633,6 +633,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     isMultiFocal: boolean;
     private streamManagerRestartTimeout: NodeJS.Timeout | undefined;
     private videoClipsAutoLoadInterval: NodeJS.Timeout | undefined;
+    private videoClipsAutoLoadInProgress: boolean = false;
 
     constructor(
         nativeId: string,
@@ -780,7 +781,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 // File doesn't exist or error accessing it
                 logger.debug(`[VideoClip] Cache miss: fileId=${videoId}, error=${e instanceof Error ? e.message : String(e)}`);
                 if (cacheEnabled) {
-                    logger.log(`[VideoClip] Will download and cache: fileId=${videoId}`);
+                    logger.debug(`[VideoClip] Will download and cache: fileId=${videoId}`);
                 }
             }
 
@@ -908,42 +909,64 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
             // Ensure cache directory exists
             await fs.promises.mkdir(cacheDir, { recursive: true });
-            // return null;
 
-            // Ensure client is connected and logged in (reuses existing connection if available)
-            // This ensures no new sessions are created during thumbnail operations
-            const api = await this.ensureClient();
-
-            if (!api.client.isSocketConnected() || !api.client.loggedIn) {
-                logger.warn(`[Thumbnail] Client not ready, waiting for connection: fileId=${thumbnailId}`);
-                // ensureClient should have already handled connection, but wait a bit if needed
-                await new Promise(resolve => setTimeout(resolve, 500));
+            // Check if video clip is already cached locally - use it instead of calling camera
+            const videoCachePath = this.getVideoClipCachePath(thumbnailId);
+            let useLocalVideo = false;
+            try {
+                await fs.promises.access(videoCachePath, fs.constants.F_OK);
+                useLocalVideo = true;
+                logger.debug(`[Thumbnail] Using local video file for thumbnail extraction: fileId=${thumbnailId}`);
+            } catch {
+                // Video not cached locally, will use RTMP URL
             }
 
-            // Get RTMP URL from fileId
-            // Note: getRecordingPlaybackUrls internally calls login(), but it should be idempotent
-            // if ensureClient() already established the connection
-            const { rtmpVodUrl } = await api.getRecordingPlaybackUrls({
-                fileName: thumbnailId,
-            });
+            let thumbnail: MediaObject;
 
-            if (!rtmpVodUrl) {
-                throw new Error(`No playback URL found for video ${thumbnailId}`);
+            if (useLocalVideo) {
+                // Extract thumbnail from local video file
+                thumbnail = await this.plugin.generateThumbnail({
+                    deviceId: this.id,
+                    fileId: thumbnailId,
+                    filePath: videoCachePath,
+                    logger: this.getBaichuanLogger(),
+                });
+            } else {
+                // Ensure client is connected and logged in (reuses existing connection if available)
+                // This ensures no new sessions are created during thumbnail operations
+                const api = await this.ensureClient();
+
+                if (!api.client.isSocketConnected() || !api.client.loggedIn) {
+                    logger.warn(`[Thumbnail] Client not ready, waiting for connection: fileId=${thumbnailId}`);
+                    // ensureClient should have already handled connection, but wait a bit if needed
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+
+                // Get RTMP URL from fileId
+                // Note: getRecordingPlaybackUrls internally calls login(), but it should be idempotent
+                // if ensureClient() already established the connection
+                const { rtmpVodUrl } = await api.getRecordingPlaybackUrls({
+                    fileName: thumbnailId,
+                });
+
+                if (!rtmpVodUrl) {
+                    throw new Error(`No playback URL found for video ${thumbnailId}`);
+                }
+
+                // Use the plugin's thumbnail generation queue with RTMP URL
+                thumbnail = await this.plugin.generateThumbnail({
+                    deviceId: this.id,
+                    fileId: thumbnailId,
+                    rtmpUrl: rtmpVodUrl,
+                    logger: this.getBaichuanLogger(),
+                });
             }
-
-            // Use the plugin's thumbnail generation queue with RTMP URL
-            const thumbnail = await this.plugin.generateThumbnail({
-                deviceId: this.id,
-                fileId: thumbnailId,
-                rtmpUrl: rtmpVodUrl,
-                logger: this.getBaichuanLogger(),
-            });
 
             // Cache the thumbnail
             try {
                 const buffer = await sdk.mediaManager.convertMediaObjectToBuffer(thumbnail, 'image/jpeg');
                 await fs.promises.writeFile(cachePath, buffer);
-                logger.log(`[Thumbnail] Cached: fileId=${thumbnailId}, size=${buffer.length} bytes`);
+                logger.debug(`[Thumbnail] Cached: fileId=${thumbnailId}, size=${buffer.length} bytes`);
             } catch (e) {
                 logger.warn(`[Thumbnail] Failed to cache: fileId=${thumbnailId}`, e);
                 // Continue even if caching fails
@@ -995,11 +1018,16 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
      * Load today's video clips and download missing thumbnails
      */
     private async loadTodayVideoClipsAndThumbnails(): Promise<void> {
-        const logger = this.getBaichuanLogger();
-
-        if (this.isBattery) {
+        // Prevent concurrent executions
+        if (this.videoClipsAutoLoadInProgress) {
+            const logger = this.getBaichuanLogger();
+            logger.debug('Video clips auto-load already in progress, skipping...');
             return;
         }
+
+        const logger = this.getBaichuanLogger();
+
+        this.videoClipsAutoLoadInProgress = true;
 
         try {
             logger.log('Auto-loading today\'s video clips and thumbnails...');
@@ -1020,29 +1048,49 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
             const downloadVideoclipsLocally = this.storageSettings.values.downloadVideoclipsLocally ?? false;
 
-            // Download thumbnails and optionally videos for each clip
-            for (const clip of clips) {
-                try {
-                    // Get the thumbnail - this will cache it if not already cached
-                    await this.getVideoClipThumbnail(clip.id);
-                } catch (e) {
-                    logger.warn(`Failed to load thumbnail for clip ${clip.id}:`, e instanceof Error ? e.message : String(e));
-                }
+            // Track processed clips to avoid duplicate calls to the camera
+            const processedClips = new Set<string>();
 
-                // If downloadVideoclipsLocally is enabled, also download the video clip
-                if (downloadVideoclipsLocally) {
-                    try {
-                        // Call getVideoClip to trigger download and caching
-                        await this.getVideoClip(clip.id);
-                    } catch (e) {
-                        logger.warn(`Failed to download video clip ${clip.id}:`, e instanceof Error ? e.message : String(e));
+            // Download videos first (if enabled), then thumbnails for each clip
+            for (const clip of clips) {
+                // Skip if already processed (avoid duplicate calls)
+                if (processedClips.has(clip.id)) {
+                    logger.debug(`Skipping already processed clip: ${clip.id}`);
+                    continue;
+                }
+                processedClips.add(clip.id);
+
+                try {
+                    // If downloadVideoclipsLocally is enabled, download the video clip first
+                    // This allows the thumbnail to use the local file instead of calling the camera
+                    if (downloadVideoclipsLocally) {
+                        try {
+                            // Call getVideoClip to trigger download and caching
+                            await this.getVideoClip(clip.id);
+                            logger.debug(`Downloaded video clip: ${clip.id}`);
+                        } catch (e) {
+                            logger.warn(`Failed to download video clip ${clip.id}:`, e instanceof Error ? e.message : String(e));
+                        }
                     }
+
+                    // Then get the thumbnail - this will use the local video file if available
+                    // or call the camera if the video wasn't downloaded
+                    try {
+                        await this.getVideoClipThumbnail(clip.id);
+                        logger.debug(`Downloaded thumbnail for clip: ${clip.id}`);
+                    } catch (e) {
+                        logger.warn(`Failed to load thumbnail for clip ${clip.id}:`, e instanceof Error ? e.message : String(e));
+                    }
+                } catch (e) {
+                    logger.warn(`Error processing clip ${clip.id}:`, e instanceof Error ? e.message : String(e));
                 }
             }
 
             logger.log(`Completed auto-loading video clips and thumbnails`);
         } catch (e) {
             logger.error('Error during auto-loading video clips:', e);
+        } finally {
+            this.videoClipsAutoLoadInProgress = false;
         }
     }
 

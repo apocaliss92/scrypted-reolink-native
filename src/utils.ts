@@ -315,12 +315,19 @@ export async function getVideoClipWebhookUrls(props: {
  * Extract a thumbnail frame from video using ffmpeg
  */
 export async function extractThumbnailFromVideo(props: {
-    rtmpUrl: string;
+    rtmpUrl?: string;
+    filePath?: string;
     fileId: string;
     deviceId: string;
     logger: Console;
 }): Promise<MediaObject> {
-    const { rtmpUrl, fileId, deviceId, logger } = props;
+    const { rtmpUrl, filePath, fileId, deviceId, logger } = props;
+    
+    // Use file path if available, otherwise use RTMP URL
+    const inputSource = filePath || rtmpUrl;
+    if (!inputSource) {
+        throw new Error('Either rtmpUrl or filePath must be provided');
+    }
 
     try {
         // Get ffmpeg path
@@ -329,7 +336,7 @@ export async function extractThumbnailFromVideo(props: {
         // Build ffmpeg args to extract a frame at 2 seconds
         const ffmpegArgs = [
             '-ss', '2', // Seek to 2 seconds
-            '-i', rtmpUrl,
+            '-i', inputSource,
             '-vframes', '1', // Extract only 1 frame
             '-q:v', '2', // High quality JPEG
             '-f', 'image2', // Output format
