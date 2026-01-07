@@ -586,7 +586,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     // Abstract init method that subclasses must implement
     abstract init(): Promise<void>;
 
-    protected withBaichuanClient?<T>(fn: (api: ReolinkBaichuanApi) => Promise<T>): Promise<T>;
     motionTimeout?: NodeJS.Timeout;
     doorbellBinaryTimeout?: NodeJS.Timeout;
     initComplete?: boolean;
@@ -620,9 +619,11 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }, 2000);
     }
 
-    /**
-     * TODO: Implement video clip fetching using Baichuan/NVR recordings API.
-     */
+    protected async withBaichuanClient<T>(fn: (api: ReolinkBaichuanApi) => Promise<T>): Promise<T> {
+        const client = await this.ensureClient();
+        return fn(client);
+    }
+
     async getVideoClips(options?: VideoClipOptions): Promise<VideoClip[]> {
         throw new Error("getVideoClips is not implemented yet.");
     }

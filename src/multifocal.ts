@@ -195,15 +195,6 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
         }
     }
 
-    async getSettings(): Promise<Setting[]> {
-        const settings = await this.storageSettings.getSettings();
-        return settings;
-    }
-
-    async putSetting(key: string, value: SettingValue): Promise<void> {
-        return this.storageSettings.putSetting(key, value);
-    }
-
     async releaseDevice(id: string, nativeId: string) {
         this.cameraNativeMap.delete(nativeId);
         super.releaseDevice(id, nativeId);

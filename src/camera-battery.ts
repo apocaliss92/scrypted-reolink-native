@@ -318,10 +318,4 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
             this.getBaichuanLogger().warn(`Baichuan client reset requested: ${message}`);
         }
     }
-
-    protected async withBaichuanClient<T>(fn: (api: ReolinkBaichuanApi) => Promise<T>): Promise<T> {
-        const client = await this.ensureClient();
-        return fn(client);
-    }
-
 }

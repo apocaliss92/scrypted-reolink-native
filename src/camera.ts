@@ -103,23 +103,14 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
         await this.alignAuxDevicesState();
     }
 
-    async getDetectionInput(detectionId: string, eventId?: any): Promise<MediaObject> {
-        return null;
-    }
-
     async processEvents(events: { motion?: boolean; objects?: string[] }) {
         const logger = this.getBaichuanLogger();
 
         if (!this.isEventDispatchEnabled()) return;
 
-        if (this.storageSettings.values.dispatchEvents.includes('eventLogs')) {
+        if (this.isDebugEnabled()) {
             logger.debug(`Events received: ${JSON.stringify(events)}`);
         }
-
-        // const debugEvents = this.storageSettings.values.debugEvents;
-        // if (debugEvents) {
-        //     logger.debug(`Events received: ${JSON.stringify(events)}`);
-        // }
 
         if (this.shouldDispatchMotion() && events.motion !== this.motionDetected) {
             if (events.motion) {
@@ -146,31 +137,5 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
             }
             sdk.deviceManager.onDeviceEvent(this.nativeId, ScryptedInterface.ObjectDetector, od);
         }
-    }
-
-    protected async withBaichuanClient<T>(fn: (api: ReolinkBaichuanApi) => Promise<T>): Promise<T> {
-        const client = await this.ensureClient();
-        return fn(client);
-    }
-
-    async getPictureOptions(): Promise<ResponsePictureOptions[]> {
-        return [];
-    }
-
-    async getOtherSettings(): Promise<Setting[]> {
-        return await this.getSettings();
-    }
-
-    showRtspUrlOverride() {
-        return false;
-    }
-
-
-    async startIntercom(media: MediaObject): Promise<void> {
-        await this.intercom.start(media);
-    }
-
-    stopIntercom(): Promise<void> {
-        return this.intercom.stop();
     }
 }
