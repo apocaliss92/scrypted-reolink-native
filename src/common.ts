@@ -548,13 +548,37 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             type: "string",
             defaultValue: path.join(process.env.SCRYPTED_PLUGIN_VOLUME, 'diagnostics', this.name),
         },
-        videoClipCacheEnabled: {
-            title: "Enable Video Clip Caching",
-            subgroup: 'Video Clips',
-            description: "Cache video clips to filesystem for faster subsequent access (default: disabled).",
+        loadVideoclips: {
+            title: "Auto-load Video Clips",
+            subgroup: 'Videoclips',
+            description: "Automatically fetch today's video clips and download missing thumbnails at regular intervals.",
             type: "boolean",
             defaultValue: false,
-            hide: true,
+            immediate: true,
+            onPut: async () => {
+                this.updateVideoClipsAutoLoad();
+            },
+        },
+        videoclipsRegularChecks: {
+            title: "Video Clips Check Interval (minutes)",
+            subgroup: 'Videoclips',
+            description: "How often to check for new video clips and download thumbnails (default: 30 minutes).",
+            type: "number",
+            defaultValue: 30,
+            onPut: async () => {
+                this.updateVideoClipsAutoLoad();
+            },
+        },
+        downloadVideoclipsLocally: {
+            title: "Download Video Clips Locally",
+            subgroup: 'Videoclips',
+            description: "Automatically download and cache video clips to local filesystem during auto-load.",
+            type: "boolean",
+            defaultValue: false,
+            immediate: true,
+            onPut: async () => {
+                this.updateVideoClipsAutoLoad();
+            },
         },
         diagnosticsRun: {
             subgroup: 'Diagnostics',
@@ -608,6 +632,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     isBattery: boolean;
     isMultiFocal: boolean;
     private streamManagerRestartTimeout: NodeJS.Timeout | undefined;
+    private videoClipsAutoLoadInterval: NodeJS.Timeout | undefined;
 
     constructor(
         nativeId: string,
@@ -637,8 +662,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     async getVideoClips(options?: VideoClipOptions): Promise<VideoClip[]> {
-        // return [];
-        if (this.isBattery) {
+        if (this.isBattery && this.sleeping) {
             const logger = this.getBaichuanLogger();
             logger.debug('getVideoClips: disabled for battery devices');
             return [];
@@ -738,7 +762,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     async getVideoClip(videoId: string): Promise<MediaObject> {
         const logger = this.getBaichuanLogger();
         try {
-            const cacheEnabled = this.storageSettings.values.videoClipCacheEnabled ?? false;
+            const cacheEnabled = this.storageSettings.values.downloadVideoclipsLocally
 
             // Always check cache first, even if caching is disabled (in case user enabled it before)
             const cachePath = this.getVideoClipCachePath(videoId);
@@ -935,6 +959,92 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
     removeVideoClips(...videoClipIds: string[]): Promise<void> {
         throw new Error("removeVideoClips is not implemented yet.");
+    }
+
+    /**
+     * Update video clips auto-load timer based on settings
+     */
+    private updateVideoClipsAutoLoad(): void {
+        // Clear existing interval if any
+        if (this.videoClipsAutoLoadInterval) {
+            clearInterval(this.videoClipsAutoLoadInterval);
+            this.videoClipsAutoLoadInterval = undefined;
+        }
+
+        const loadVideoclips = this.storageSettings.values.loadVideoclips ?? false;
+        const checkIntervalMinutes = this.storageSettings.values.videoclipsRegularChecks ?? 30;
+
+        if (!loadVideoclips) {
+            return;
+        }
+
+        const logger = this.getBaichuanLogger();
+        const intervalMs = checkIntervalMinutes * 60 * 1000;
+
+        logger.log(`Starting video clips auto-load: checking every ${checkIntervalMinutes} minutes`);
+
+        // Run immediately on start
+        this.loadTodayVideoClipsAndThumbnails();
+
+        // Then run at regular intervals
+        this.videoClipsAutoLoadInterval = setInterval(() => {
+            this.loadTodayVideoClipsAndThumbnails();
+        }, intervalMs);
+    }
+
+    /**
+     * Load today's video clips and download missing thumbnails
+     */
+    private async loadTodayVideoClipsAndThumbnails(): Promise<void> {
+        const logger = this.getBaichuanLogger();
+
+        if (this.isBattery) {
+            return;
+        }
+
+        try {
+            logger.log('Auto-loading today\'s video clips and thumbnails...');
+
+            // Get today's date range (start of today to now)
+            const now = new Date();
+            const startOfToday = new Date(now);
+            startOfToday.setHours(0, 0, 0, 0);
+            startOfToday.setMinutes(0, 0, 0);
+
+            // Fetch today's video clips
+            const clips = await this.getVideoClips({
+                startTime: startOfToday.getTime(),
+                endTime: now.getTime(),
+            });
+
+            logger.log(`Found ${clips.length} video clips for today`);
+
+            const downloadVideoclipsLocally = this.storageSettings.values.downloadVideoclipsLocally ?? false;
+
+            // Download thumbnails and optionally videos for each clip
+            for (const clip of clips) {
+                try {
+                    // Get the thumbnail - this will cache it if not already cached
+                    await this.getVideoClipThumbnail(clip.id);
+                } catch (e) {
+                    logger.warn(`Failed to load thumbnail for clip ${clip.id}:`, e instanceof Error ? e.message : String(e));
+                }
+
+                // If downloadVideoclipsLocally is enabled, also download the video clip
+                if (downloadVideoclipsLocally) {
+                    try {
+                        // Call getVideoClip to trigger download and caching
+                        await this.getVideoClip(clip.id);
+                    } catch (e) {
+                        logger.warn(`Failed to download video clip ${clip.id}:`, e instanceof Error ? e.message : String(e));
+                    }
+                }
+            }
+
+            logger.log(`Completed auto-loading video clips and thumbnails`);
+        } catch (e) {
+            logger.error('Error during auto-loading video clips:', e);
+        }
     }
 
     async reboot(): Promise<void> {
@@ -2117,7 +2227,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             }
         }
 
-        const { username, password } = this.storageSettings.values;
+
+        this.storageSettings.settings.videoclipsRegularChecks.defaultValue = this.isBattery ? 120 : 30;
 
         this.storageSettings.settings.batteryUpdateIntervalMinutes.hide = !this.isBattery;
         this.storageSettings.settings.lowThresholdBatteryRecording.hide = !this.isBattery;
@@ -2191,6 +2302,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         await this.init();
 
         this.initComplete = true;
+
+        // Initialize video clips auto-load if enabled
+        this.updateVideoClipsAutoLoad();
     }
 }
 
