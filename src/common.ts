@@ -4,7 +4,7 @@ import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import path from 'path';
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
-import { normalizeUid, type BaichuanTransport } from "./connect";
+import { createBaichuanApi, normalizeUid, type BaichuanTransport } from "./connect";
 import { convertDebugLogsToApiOptions, getApiRelevantDebugLogs, getDebugLogChoices } from "./debug-options";
 import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
@@ -250,28 +250,40 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             description: 'Relative size of the PIP overlay (0.1 = 10%, 0.3 = 30%, etc.)',
             type: 'number',
             defaultValue: 0.25,
-            hide: true, // Only show for multifocal devices via getAdditionalSettings
+            hide: true,
+            onPut: async () => {
+                this.scheduleStreamManagerRestart('pipSize changed');
+            },
         },
         pipMargin: {
             title: 'PIP Margin',
             description: 'Margin from edge in pixels',
             type: 'number',
             defaultValue: 10,
-            hide: true, // Only show for multifocal devices via getAdditionalSettings
+            hide: true,
+            onPut: async () => {
+                this.scheduleStreamManagerRestart('pipMargin changed');
+            },
         },
         widerChannel: {
             title: 'Wider Channel',
             description: 'Channel number for wider lens (typically 0)',
             type: 'number',
             defaultValue: 0,
-            hide: true, // Only show for multifocal devices via getAdditionalSettings
+            hide: true,
+            onPut: async () => {
+                this.scheduleStreamManagerRestart('widerChannel changed');
+            },
         },
         teleChannel: {
             title: 'Tele Channel',
             description: 'Channel number for tele lens (typically 1)',
             type: 'number',
             defaultValue: 1,
-            hide: true, // Only show for multifocal devices via getAdditionalSettings
+            hide: true,
+            onPut: async () => {
+                this.scheduleStreamManagerRestart('teleChannel changed');
+            },
         },
         // Battery camera specific
         uid: {
@@ -585,6 +597,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     thisDevice: Settings;
     isBattery: boolean;
     isMultiFocal: boolean;
+    private streamManagerRestartTimeout: NodeJS.Timeout | undefined;
 
     constructor(
         nativeId: string,
@@ -635,9 +648,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     protected getConnectionConfig(): BaichuanConnectionConfig {
         const { ipAddress, username, password, uid } = this.storageSettings.values;
         const debugOptions = this.getBaichuanDebugOptions();
-        const normalizedUid = this.protocol === 'udp' ? normalizeUid(uid) : undefined;
+        const normalizedUid = this.isBattery ? normalizeUid(uid) : undefined;
 
-        if (this.protocol === 'udp' && !normalizedUid) {
+        if (this.isBattery && !normalizedUid) {
             throw new Error('UID is required for battery cameras (BCUDP)');
         }
 
@@ -661,8 +674,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 // For battery cameras, don't auto-resubscribe after idle disconnects
                 // (idle disconnects are normal for battery cameras to save power)
                 // Events will be resubscribed when ensureClient() is called for actual operations
-                const isBattery = this.options.type === 'battery';
-                if (!isBattery) {
+                if (!this.isBattery) {
                     // For non-battery cameras, resubscribe to events after reconnection
                     setTimeout(async () => {
                         try {
@@ -688,7 +700,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     async withBaichuanRetry<T>(fn: () => Promise<T>): Promise<T> {
-        if (this.protocol === 'udp') {
+        if (this.isBattery) {
             return await fn();
         } else {
             try {
@@ -759,8 +771,38 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
     }
 
-    createStreamClient(): Promise<ReolinkBaichuanApi> {
-        throw new Error("Method not implemented.");
+    /**
+     * Create a dedicated Baichuan API session for streaming (used by StreamManager).
+     *
+     * - For TCP devices (regular + multifocal), this creates a new TCP session with its own client.
+     * - For UDP/battery devices, this reuses the existing client via ensureClient().
+     */
+    async createStreamClient(): Promise<ReolinkBaichuanApi> {
+        // Battery / BCUDP path: reuse the main client to avoid extra wake-ups and sockets.
+        if (this.isBattery) {
+            return await this.ensureClient();
+        }
+
+        // TCP path: create a separate session for streaming (RFC4571/composite/NVR-friendly).
+        const { ipAddress, username, password } = this.storageSettings.values;
+        const logger = this.getBaichuanLogger();
+
+        const debugOptions = this.getBaichuanDebugOptions();
+        const api = await createBaichuanApi(
+            {
+                inputs: {
+                    host: ipAddress,
+                    username,
+                    password,
+                    logger,
+                    debugOptions,
+                },
+                transport: 'tcp',
+            },
+        );
+
+        await api.login();
+        return api;
     }
 
     public getAbilities(): DeviceCapabilities {
@@ -772,8 +814,85 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     getBaichuanDebugOptions(): any | undefined {
-        const debugLogs = this.storageSettings.values.debugLogs || [];
-        return convertDebugLogsToApiOptions(debugLogs);
+        const socketDebugLogs = this.storageSettings.values.socketApiDebugLogs || [];
+        return convertDebugLogsToApiOptions(socketDebugLogs);
+    }
+
+    /**
+     * Initialize or recreate the StreamManager, taking into account multifocal composite options.
+     */
+    protected initStreamManager(logger: Console, forceRecreate: boolean = false): void {
+        const { username, password } = this.storageSettings.values;
+
+        const baseOptions: any = {
+            createStreamClient: () => this.createStreamClient(),
+            getLogger: () => logger,
+            credentials: {
+                username,
+                password,
+            },
+            sharedConnection: this.isBattery,
+        };
+
+        if (this.isMultiFocal) {
+            const values: any = this.storageSettings.values;
+            const pipPosition = values.pipPosition || 'bottom-right';
+            const pipSize = values.pipSize ?? 0.25;
+            const pipMargin = values.pipMargin ?? 10;
+            const widerChannel = values.widerChannel ?? 0;
+            const teleChannel = values.teleChannel ?? 1;
+
+            baseOptions.compositeOptions = {
+                widerChannel,
+                teleChannel,
+                pipPosition,
+                pipSize,
+                pipMargin,
+            };
+        }
+
+        if (!this.streamManager || forceRecreate) {
+            this.streamManager = new StreamManager(baseOptions);
+        }
+    }
+
+    /**
+     * Debounced restart of StreamManager when PIP/composite settings change.
+     * Also notifies listeners so that active streams (prebuffer, etc.) restart cleanly.
+     */
+    protected scheduleStreamManagerRestart(reason: string): void {
+        const logger = this.getBaichuanLogger();
+        logger.log(`Scheduling StreamManager restart (${reason})`);
+
+        if (this.streamManagerRestartTimeout) {
+            clearTimeout(this.streamManagerRestartTimeout);
+            this.streamManagerRestartTimeout = undefined;
+        }
+
+        this.streamManagerRestartTimeout = setTimeout(async () => {
+            this.streamManagerRestartTimeout = undefined;
+            const restartLogger = this.getBaichuanLogger();
+            try {
+                restartLogger.log('Restarting StreamManager due to PIP/composite settings change');
+                this.initStreamManager(restartLogger, true);
+
+                // Invalidate snapshot cache for battery/multifocal-battery so that
+                // the next snapshot reflects the new PIP/composite configuration.
+                if (this.isBattery) {
+                    this.forceNewSnapshot = true;
+                    this.lastPicture = undefined;
+                }
+
+                // Notify consumers (e.g. prebuffer) that stream configuration changed.
+                try {
+                    this.onDeviceEvent(ScryptedInterface.VideoCamera, undefined);
+                } catch {
+                    // best-effort
+                }
+            } catch (e) {
+                restartLogger.warn('Failed to restart StreamManager after settings change', e);
+            }
+        }, 500);
     }
 
     isRecoverableBaichuanError(e: any): boolean {
@@ -1189,7 +1308,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     async takePicture(options?: RequestPictureOptions) {
-        if (this.protocol === 'tcp') {
+        if (!this.isBattery) {
             try {
                 return this.withBaichuanRetry(async () => {
                     const client = await this.ensureClient();
@@ -1688,22 +1807,20 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
 
         const { username, password } = this.storageSettings.values;
-        const isBattery = ['multi-focal-battery', 'battery'].includes(this.options.type);
-        const isMultiFocal = ['multi-focal', 'multi-focal'].includes(this.options.type);
 
-        this.storageSettings.settings.uid.hide = !isBattery;
-        this.storageSettings.settings.batteryUpdateIntervalMinutes.hide = !isBattery;
-        this.storageSettings.settings.lowThresholdBatteryRecording.hide = !isBattery;
-        this.storageSettings.settings.highThresholdBatteryRecording.hide = !isBattery;
+        this.storageSettings.settings.uid.hide = !this.isBattery;
+        this.storageSettings.settings.batteryUpdateIntervalMinutes.hide = !this.isBattery;
+        this.storageSettings.settings.lowThresholdBatteryRecording.hide = !this.isBattery;
+        this.storageSettings.settings.highThresholdBatteryRecording.hide = !this.isBattery;
 
         // Show PIP settings only for multifocal devices
-        this.storageSettings.settings.pipPosition.hide = !isMultiFocal;
-        this.storageSettings.settings.pipSize.hide = !isMultiFocal;
-        this.storageSettings.settings.pipMargin.hide = !isMultiFocal;
-        this.storageSettings.settings.widerChannel.hide = !isMultiFocal;
-        this.storageSettings.settings.teleChannel.hide = !isMultiFocal;
+        this.storageSettings.settings.pipPosition.hide = !this.isMultiFocal;
+        this.storageSettings.settings.pipSize.hide = !this.isMultiFocal;
+        this.storageSettings.settings.pipMargin.hide = !this.isMultiFocal;
+        this.storageSettings.settings.widerChannel.hide = !this.isMultiFocal;
+        this.storageSettings.settings.teleChannel.hide = !this.isMultiFocal;
 
-        if (isBattery && !this.storageSettings.values.mixinsSetup) {
+        if (this.isBattery && !this.storageSettings.values.mixinsSetup) {
             try {
                 const device = sdk.systemManager.getDeviceById<Settings>(this.id);
                 if (device) {
@@ -1725,15 +1842,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             logger.warn('Failed to subscribe to Baichuan events', e);
         }
 
-        this.streamManager = new StreamManager({
-            createStreamClient: () => this.createStreamClient(),
-            getLogger: () => logger,
-            credentials: {
-                username,
-                password
-            },
-            sharedConnection: isBattery,
-        });
+        // Initialize StreamManager (with composite options for multifocal devices)
+        this.initStreamManager(logger);
 
         const { hasIntercom, hasPtz } = this.getAbilities();
 

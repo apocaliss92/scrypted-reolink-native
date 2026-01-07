@@ -324,7 +324,4 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
         return fn(client);
     }
 
-    async createStreamClient(): Promise<ReolinkBaichuanApi> {
-        return await this.ensureClient();
-    }
 }

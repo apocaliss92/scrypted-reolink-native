@@ -1,12 +1,9 @@
-import type { DeviceCapabilities, DualLensChannelAnalysis, ReolinkSimpleEvent, ReolinkSupportedStream } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { Device, DeviceProvider, MediaObject, Reboot, RequestMediaStreamOptions, ScryptedDeviceType, Setting, Settings, SettingValue } from "@scrypted/sdk";
-import { type BaichuanConnectionCallbacks } from "./baichuan-base";
+import type { DeviceCapabilities, DualLensChannelAnalysis, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import sdk, { Device, DeviceProvider, Reboot, ScryptedDeviceType, Setting, Settings, SettingValue } from "@scrypted/sdk";
 import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
 import { CameraType, CommonCameraMixin } from "./common";
 import ReolinkNativePlugin from "./main";
-import { StreamManager } from "./stream-utils";
-import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { batteryCameraSuffix, cameraSuffix, getDeviceInterfaces, updateDeviceInfo } from "./utils";
 
 export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements Settings, DeviceProvider, Reboot {
@@ -34,28 +31,6 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
             hasPresets: false,
             hasIntercom: false,
         }
-    }
-
-    protected getConnectionCallbacks(): BaichuanConnectionCallbacks {
-        return {
-            onError: undefined, // Use default error handling
-            onClose: async () => {
-                // Reinit after cleanup
-                await this.reinit();
-                if (!this.isBattery) {
-                    setTimeout(async () => {
-                        try {
-                            await this.subscribeToEvents();
-                        } catch (e) {
-                            const logger = this.getBaichuanLogger();
-                            logger.warn('Failed to resubscribe to events after reconnection', e);
-                        }
-                    }, 1000);
-                }
-            },
-            onSimpleEvent: (ev) => this.forwardNativeEvent(ev),
-            getEventSubscriptionEnabled: () => true,
-        };
     }
 
     protected async onBeforeCleanup(): Promise<void> {
@@ -100,7 +75,6 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
             this.storageSettings.settings.uid.hide = !this.isBattery;
 
             await this.ensureBaichuanClient();
-            await this.updateDeviceInfo();
             await this.reportDevices();
             await this.subscribeToEvents();
         } catch (e) {
@@ -111,23 +85,6 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
             } else {
                 logger.error(`Error details: ${JSON.stringify(e)}`);
             }
-        }
-    }
-
-    async updateDeviceInfo(): Promise<void> {
-        const logger = this.getBaichuanLogger();
-        try {
-            const api = await this.ensureBaichuanClient();
-            const deviceData = await api.getInfo();
-
-            await updateDeviceInfo({
-                device: this,
-                deviceData,
-                ipAddress: this.storageSettings.values.ipAddress,
-                logger,
-            });
-        } catch (e) {
-            logger.warn('Failed to fetch device info', e);
         }
     }
 
@@ -220,53 +177,6 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
         }
 
         await super.reportDevices();
-
-        // Initialize StreamManager with composite options for multifocal device
-        // Use saved settings or defaults
-        const values = this.storageSettings.values as any;
-        const pipPosition = (values.pipPosition || 'bottom-right') as any;
-        const pipSize = values.pipSize ?? 0.25;
-        const pipMargin = values.pipMargin ?? 10;
-        const widerChannel = values.widerChannel ?? 0;
-        const teleChannel = values.teleChannel ?? 1;
-
-        if (!this.streamManager) {
-            this.streamManager = new StreamManager({
-                createStreamClient: () => this.createStreamClient(),
-                getLogger: () => logger,
-                credentials: {
-                    username,
-                    password
-                },
-                sharedConnection: this.isBattery,
-                compositeOptions: {
-                    widerChannel,
-                    teleChannel,
-                    pipPosition: pipPosition as any,
-                    pipSize,
-                    pipMargin,
-                },
-            });
-        } else {
-            // Recreate StreamManager with new settings if they changed
-            // StreamManager doesn't expose opts, so we need to recreate it
-            this.streamManager = new StreamManager({
-                createStreamClient: () => this.createStreamClient(),
-                getLogger: () => logger,
-                credentials: {
-                    username,
-                    password
-                },
-                sharedConnection: this.isBattery,
-                compositeOptions: {
-                    widerChannel,
-                    teleChannel,
-                    pipPosition: pipPosition as any,
-                    pipSize,
-                    pipMargin,
-                },
-            });
-        }
     }
 
     async getDevice(nativeId: string) {

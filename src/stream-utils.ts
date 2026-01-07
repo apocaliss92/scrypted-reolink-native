@@ -113,11 +113,15 @@ export async function createRfc4571MediaObjectFromStreamManager(params: {
         mso.audio.sampleRate = audio.sampleRate;
         mso.audio.channels = audio.channels;
     }
-    const url = new URL(host);
+
+    const url = new URL(`tcp://${host}`);
     url.port = port.toString();
-    url.protocol = 'tcp';
-    url.username = username;
-    url.password = password;
+    if (username) {
+        url.username = username;
+    }
+    if (password) {
+        url.password = password;
+    }
 
     const rfc = {
         url,
@@ -200,11 +204,14 @@ export class StreamManager {
         return this.opts.getLogger() ;
     }
 
-    private async ensureNativeRfcServer(
+    private async ensureRfcServer(
         streamKey: string,
-        channel: number,
         profile: StreamProfile,
-        expectedVideoType?: 'H264' | 'H265',
+        expectedVideoType: 'H264' | 'H265' | undefined,
+        options: {
+            channel?: number;
+            compositeOptions?: CompositeStreamPipOptions;
+        },
     ): Promise<RfcServerInfo> {
         const existingCreate = this.nativeRfcServerCreatePromises.get(streamKey);
         if (existingCreate) {
@@ -215,8 +222,9 @@ export class StreamManager {
             const cached = this.nativeRfcServers.get(streamKey);
             if (cached?.server?.listening) {
                 if (expectedVideoType && cached.videoType !== expectedVideoType) {
+                    const kind = options.channel === undefined ? 'composite' : 'native';
                     this.getLogger().warn(
-                        `Native RFC cache codec mismatch for ${streamKey}: cached=${cached.videoType} expected=${expectedVideoType}; recreating server.`,
+                        `Native RFC ${kind} cache codec mismatch for ${streamKey}: cached=${cached.videoType} expected=${expectedVideoType}; recreating server.`,
                     );
                 }
                 else {
@@ -252,13 +260,14 @@ export class StreamManager {
 
             const created = await createRfc4571TcpServer({
                 api,
-                channel,
+                channel: options.channel,
                 profile,
                 logger: this.getLogger(),
                 expectedVideoType: expectedVideoType as VideoType | undefined,
                 closeApiOnTeardown,
                 username,
                 password,
+                ...(options.compositeOptions ? { compositeOptions: options.compositeOptions } : {}),
             });
 
             this.nativeRfcServers.set(streamKey, created);
@@ -292,7 +301,9 @@ export class StreamManager {
         streamKey: string,
         expectedVideoType?: 'H264' | 'H265',
     ): Promise<RfcServerInfo> {
-        return await this.ensureNativeRfcServer(streamKey, channel, profile, expectedVideoType);
+        return await this.ensureRfcServer(streamKey, profile, expectedVideoType, {
+            channel,
+        });
     }
 
     async getRfcCompositeStream(
@@ -300,85 +311,10 @@ export class StreamManager {
         streamKey: string,
         expectedVideoType?: 'H264' | 'H265',
     ): Promise<RfcServerInfo> {
-        const existingCreate = this.nativeRfcServerCreatePromises.get(streamKey);
-        if (existingCreate) {
-            return await existingCreate;
-        }
-
-        const createPromise = (async () => {
-            const cached = this.nativeRfcServers.get(streamKey);
-            if (cached?.server?.listening) {
-                if (expectedVideoType && cached.videoType !== expectedVideoType) {
-                    this.getLogger().warn(
-                        `Native RFC composite cache codec mismatch for ${streamKey}: cached=${cached.videoType} expected=${expectedVideoType}; recreating server.`,
-                    );
-                }
-                else {
-                    return {
-                        host: cached.host,
-                        port: cached.port,
-                        sdp: cached.sdp,
-                        audio: cached.audio,
-                        username: (cached as any).username || this.opts.credentials.username,
-                        password: (cached as any).password || this.opts.credentials.password,
-                    };
-                }
-            }
-
-            if (cached) {
-                try {
-                    await cached.close('recreate');
-                }
-                catch {
-                    // ignore
-                }
-                this.nativeRfcServers.delete(streamKey);
-            }
-
-            const api = await this.opts.createStreamClient();
-            const { createRfc4571TcpServer } = await import('@apocaliss92/reolink-baichuan-js');
-
-            // Use the same credentials as the main connection
-            const { username, password } = this.opts.credentials;
-
-            // If connection is shared, don't close it when stream teardown happens
-            const closeApiOnTeardown = !(this.opts.sharedConnection ?? false);
-
-            const created = await createRfc4571TcpServer({
-                api,
-                channel: undefined, // Undefined channel indicates composite stream
-                profile,
-                logger: this.getLogger(),
-                expectedVideoType: expectedVideoType as VideoType | undefined,
-                closeApiOnTeardown,
-                username,
-                password,
-                compositeOptions: this.opts.compositeOptions,
-            });
-
-            this.nativeRfcServers.set(streamKey, created);
-            created.server.once('close', () => {
-                const current = this.nativeRfcServers.get(streamKey);
-                if (current?.server === created.server) this.nativeRfcServers.delete(streamKey);
-            });
-
-            return {
-                host: created.host,
-                port: created.port,
-                sdp: created.sdp,
-                audio: created.audio,
-                username: (created as any).username || this.opts.credentials.username,
-                password: (created as any).password || this.opts.credentials.password,
-            };
-        })();
-
-        this.nativeRfcServerCreatePromises.set(streamKey, createPromise);
-        try {
-            return await createPromise;
-        }
-        finally {
-            this.nativeRfcServerCreatePromises.delete(streamKey);
-        }
+        return await this.ensureRfcServer(streamKey, profile, expectedVideoType, {
+            channel: undefined, // Undefined channel indicates composite stream
+            compositeOptions: this.opts.compositeOptions,
+        });
     }
 
     /**

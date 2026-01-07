@@ -74,28 +74,6 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
     }
 
 
-    async createStreamClient(): Promise<ReolinkBaichuanApi> {
-        const { ipAddress, username, password } = this.storageSettings.values;
-        const logger = this.getBaichuanLogger();
-
-        const debugOptions = this.getBaichuanDebugOptions();
-        const api = await createBaichuanApi(
-            {
-                inputs: {
-                    host: ipAddress,
-                    username: username,
-                    password: password,
-                    logger,
-                    debugOptions
-                },
-                transport: 'tcp',
-            },
-        );
-        await api.login();
-
-        return api;
-    }
-
     private passiveRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 
     async release() {
