@@ -44,6 +44,7 @@ export const getDeviceInterfaces = (props: {
         ScryptedInterface.AudioSensor,
         ScryptedInterface.MotionSensor,
         ScryptedInterface.VideoTextOverlays,
+        ScryptedInterface.VideoClips,
     ];
 
     try {

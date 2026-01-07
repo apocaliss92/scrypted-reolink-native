@@ -1,5 +1,5 @@
 import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent, ReolinkSupportedStream, StreamSamplingSelection } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, Reboot, RequestMediaStreamOptions, RequestPictureOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
+import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, Reboot, RequestMediaStreamOptions, RequestPictureOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoClip, VideoClipOptions, VideoClips, VideoClipThumbnailOptions, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import path from 'path';
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
@@ -189,7 +189,7 @@ class ReolinkCameraPirSensor extends ScryptedDeviceBase implements OnOff, Settin
     }
 }
 
-export abstract class CommonCameraMixin extends BaseBaichuanClass implements VideoCamera, Camera, Settings, DeviceProvider, ObjectDetector, PanTiltZoom, VideoTextOverlays, BinarySensor, Intercom, Reboot {
+export abstract class CommonCameraMixin extends BaseBaichuanClass implements VideoCamera, Camera, Settings, DeviceProvider, ObjectDetector, PanTiltZoom, VideoTextOverlays, BinarySensor, Intercom, Reboot, VideoClips {
     storageSettings = new StorageSettings(this, {
         // Basic connection settings
         ipAddress: {
@@ -582,7 +582,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
     protected nvrDevice?: ReolinkNativeNvrDevice;
     protected multiFocalDevice?: ReolinkNativeMultiFocalDevice;
-    thisDevice: Settings
+    thisDevice: Settings;
+    isBattery: boolean;
+    isMultiFocal: boolean;
 
     constructor(
         nativeId: string,
@@ -596,12 +598,32 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         this.multiFocalDevice = options.multiFocalDevice;
         this.thisDevice = sdk.systemManager.getDeviceById<Settings>(this.id);
 
-        const isBattery = options.type === 'battery' || options.type === 'multi-focal-battery';
-        this.protocol = isBattery ? 'udp' : 'tcp';
+        this.isBattery = options.type === 'battery' || options.type === 'multi-focal-battery';
+        this.isMultiFocal = options.type === 'multi-focal' || options.type === 'multi-focal-battery';
+        this.protocol = this.isBattery ? 'udp' : 'tcp';
 
         setTimeout(async () => {
             await this.parentInit();
         }, 2000);
+    }
+
+    /**
+     * TODO: Implement video clip fetching using Baichuan/NVR recordings API.
+     */
+    async getVideoClips(options?: VideoClipOptions): Promise<VideoClip[]> {
+        throw new Error("getVideoClips is not implemented yet.");
+    }
+
+    getVideoClip(videoId: string): Promise<MediaObject> {
+        throw new Error("getVideoClip is not implemented yet.");
+    }
+
+    getVideoClipThumbnail(thumbnailId: string, options?: VideoClipThumbnailOptions): Promise<MediaObject> {
+        throw new Error("getVideoClipThumbnail is not implemented yet.");
+    }
+
+    removeVideoClips(...videoClipIds: string[]): Promise<void> {
+        throw new Error("removeVideoClips is not implemented yet.");
     }
 
     async reboot(): Promise<void> {
