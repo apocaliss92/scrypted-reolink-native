@@ -24,7 +24,7 @@ import {
     selectStreamOption,
     StreamManager
 } from "./stream-utils";
-import { floodlightSuffix, getDeviceInterfaces, getVideoClipWebhookUrls, pirSuffix, recordingFileToVideoClip, sanitizeFfmpegOutput, sirenSuffix, updateDeviceInfo, vodSearchResultsToVideoClips } from "./utils";
+import { floodlightSuffix, getDeviceInterfaces, getVideoClipWebhookUrls, pirSuffix, recordingsToVideoClips, sanitizeFfmpegOutput, sirenSuffix, updateDeviceInfo, vodSearchResultsToVideoClips } from "./utils";
 
 export type CameraType = 'battery' | 'regular' | 'multi-focal' | 'multi-focal-battery';
 
@@ -730,8 +730,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         const start = new Date(startMs);
         const end = new Date(endMs);
-        // Use UTC to match API's dateToReolinkTime conversion
-        start.setUTCHours(0, 0, 0, 0);
+        start.setHours(0, 0, 0, 0);
 
         try {
             const { clipsSource } = this.storageSettings.values;
@@ -755,68 +754,19 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
                 logger.debug(`[NVR VOD] Found ${enrichedRecordings.length} enriched recordings from NVR`);
 
-                // Log sample of enriched recordings to see what the library returned
-                if (enrichedRecordings.length > 0) {
-                    const sampleSize = Math.min(3, enrichedRecordings.length);
-                    for (let i = 0; i < sampleSize; i++) {
-                        const rec = enrichedRecordings[i];
-                        logger.debug(`[NVR VOD] Sample enriched recording ${i + 1}/${enrichedRecordings.length}:`, {
-                            fileName: rec.fileName,
-                            startTimeMs: rec.startTimeMs,
-                            endTimeMs: rec.endTimeMs,
-                            durationMs: rec.durationMs,
-                            hasPerson: rec.hasPerson,
-                            hasVehicle: rec.hasVehicle,
-                            hasAnimal: rec.hasAnimal,
-                            hasFace: rec.hasFace,
-                            hasMotion: rec.hasMotion,
-                            hasDoorbell: rec.hasDoorbell,
-                            hasPackage: rec.hasPackage,
-                            recordType: rec.recordType,
-                            parsedFileName: rec.parsedFileName ? {
-                                start: rec.parsedFileName.start?.toISOString(),
-                                end: rec.parsedFileName.end?.toISOString(),
-                                flags: rec.parsedFileName.flags,
-                            } : null,
-                        });
-                    }
-                }
+                // Convert enriched recordings to VideoClip array using the shared parser
+                const clips = await recordingsToVideoClips(enrichedRecordings, {
+                    fallbackStart: start,
+                    logger,
+                    plugin: this,
+                    deviceId: this.id,
+                    useWebhook: true,
+                    count,
+                });
 
-                // Convert enriched recordings to VideoClip array
-                const clips: VideoClip[] = [];
+                logger.debug(`[NVR VOD] Converted ${clips.length} video clips (limit: ${count || 'none'})`);
 
-                for (const rec of enrichedRecordings) {
-                    // Log detection flags before conversion
-                    const flags = {
-                        hasPerson: 'hasPerson' in rec ? rec.hasPerson : false,
-                        hasVehicle: 'hasVehicle' in rec ? rec.hasVehicle : false,
-                        hasAnimal: 'hasAnimal' in rec ? rec.hasAnimal : false,
-                        hasFace: 'hasFace' in rec ? rec.hasFace : false,
-                        hasMotion: 'hasMotion' in rec ? rec.hasMotion : false,
-                        hasDoorbell: 'hasDoorbell' in rec ? rec.hasDoorbell : false,
-                        hasPackage: 'hasPackage' in rec ? rec.hasPackage : false,
-                        recordType: rec.recordType || 'none',
-                    };
-                    logger.debug(`[NVR VOD] Processing recording: fileName=${rec.fileName}, flags=${JSON.stringify(flags)}`);
-
-                    const clip = await recordingFileToVideoClip(rec, {
-                        fallbackStart: start,
-                        logger,
-                        plugin: this,
-                        deviceId: this.id,
-                        useWebhook: true,
-                    });
-
-                    // Log detection classes in the final clip
-                    logger.debug(`[NVR VOD] Generated clip: id=${clip.id}, detectionClasses=${clip.detectionClasses?.join(',') || 'none'}`);
-                    clips.push(clip);
-                }
-
-                // Apply count limit if specified
-                const finalClips = count ? clips.slice(0, count) : clips;
-                logger.debug(`[NVR VOD] Converted ${finalClips.length} video clips (limit: ${count || 'none'})`);
-
-                return finalClips;
+                return clips;
             } else {
                 const recordings = await api.listDeviceRecordings({
                     start,
@@ -828,19 +778,16 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     fetchRtmpUrls: false
                 });
 
-                const clips: VideoClip[] = [];
-
-                for (const rec of recordings) {
-                    const clip = await recordingFileToVideoClip(rec, {
-                        fallbackStart: start,
-                        api,
-                        logger,
-                        plugin: this,
-                        deviceId: this.id,
-                        useWebhook: true,
-                    });
-                    clips.push(clip);
-                }
+                // Convert recordings to VideoClip array using the shared parser
+                const clips = await recordingsToVideoClips(recordings, {
+                    fallbackStart: start,
+                    api,
+                    logger,
+                    plugin: this,
+                    deviceId: this.id,
+                    useWebhook: true,
+                    count,
+                });
 
                 logger.debug(`Videoclips found: ${clips.length}`);
 
@@ -1334,14 +1281,12 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             throw new Error('UID is required for battery cameras (BCUDP)');
         }
 
-        const logger = this.getBaichuanLogger();
         return {
             host: ipAddress,
             username,
             password,
             uid: normalizedUid,
             transport: this.protocol,
-            logger,
             debugOptions,
         };
     }
@@ -2498,6 +2443,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 logger.warn('Failed to connect/refresh during init', e);
             }
         }
+        this.storageSettings.settings.socketApiDebugLogs.hide = !!this.nvrDevice;
         this.storageSettings.settings.clipsSource.hide = !this.nvrDevice;
         this.storageSettings.settings.clipsSource.defaultValue = this.nvrDevice ? "NVR" : "Device";
 

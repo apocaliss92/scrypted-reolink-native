@@ -4,6 +4,7 @@ import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
 import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
+import { convertDebugLogsToApiOptions, getApiRelevantDebugLogs, getDebugLogChoices } from "./debug-options";
 import { normalizeUid } from "./connect";
 import ReolinkNativePlugin from "./main";
 import { getDeviceInterfaces, updateDeviceInfo } from "./utils";
@@ -53,6 +54,47 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                 await this.runNvrDiagnostics();
             },
         },
+        socketApiDebugLogs: {
+            subgroup: 'Advanced',
+            title: 'Socket API Debug Logs',
+            description: 'Enable specific debug logs.',
+            multiple: true,
+            combobox: true,
+            immediate: true,
+            defaultValue: [],
+            choices: getDebugLogChoices(),
+            onPut: async (ov, value) => {
+                const logger = this.getBaichuanLogger();
+                const oldApiOptions = getApiRelevantDebugLogs(ov || []);
+                const newApiOptions = getApiRelevantDebugLogs(value || []);
+
+                const oldSel = new Set(oldApiOptions);
+                const newSel = new Set(newApiOptions);
+
+                const changed = oldSel.size !== newSel.size || Array.from(oldSel).some((k) => !newSel.has(k));
+                if (changed) {
+                    // Clear any existing timeout
+                    if (this.debugLogsResetTimeout) {
+                        clearTimeout(this.debugLogsResetTimeout);
+                        this.debugLogsResetTimeout = undefined;
+                    }
+
+                    // Defer reset by 2 seconds to allow settings to settle
+                    this.debugLogsResetTimeout = setTimeout(async () => {
+                        this.debugLogsResetTimeout = undefined;
+                        try {
+                            // Force reconnection with new debug options
+                            this.baichuanApi = undefined;
+                            this.ensureClientPromise = undefined;
+                            // Trigger reconnection
+                            await this.ensureBaichuanClient();
+                        } catch (e) {
+                            logger.warn('Failed to reset client after debug logs change', e);
+                        }
+                    }, 2000);
+                }
+            },
+        },
     });
     plugin: ReolinkNativePlugin;
     nvrApi: ReolinkCgiApi | undefined;
@@ -71,6 +113,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     private discoverDevicesPromise: Promise<DiscoveredDevice[]> | undefined;
     processing = false;
     private initReinitTimeout: NodeJS.Timeout | undefined;
+    private debugLogsResetTimeout: NodeJS.Timeout | undefined;
 
     constructor(nativeId: string, plugin: ReolinkNativePlugin) {
         super(nativeId);
@@ -84,20 +127,26 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         await api.reboot();
     }
 
-    // BaseBaichuanClass abstract methods implementation
     protected getConnectionConfig(): BaichuanConnectionConfig {
         const { ipAddress, username, password } = this.storageSettings.values;
         if (!ipAddress || !username || !password) {
             throw new Error('Missing NVR credentials');
         }
 
+        const debugOptions = this.getBaichuanDebugOptions();
+
         return {
             host: ipAddress,
             username,
             password,
             transport: 'tcp',
-            logger: this.console,
+            debugOptions,
         };
+    }
+
+    getBaichuanDebugOptions(): any | undefined {
+        const socketDebugLogs = this.storageSettings.values.socketApiDebugLogs || [];
+        return convertDebugLogsToApiOptions(socketDebugLogs);
     }
 
     protected getConnectionCallbacks(): BaichuanConnectionCallbacks {

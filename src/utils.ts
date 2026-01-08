@@ -330,6 +330,53 @@ export async function recordingFileToVideoClip(
 }
 
 /**
+ * Convert an array of RecordingFile or EnrichedRecordingFile to VideoClip array
+ * Uses recordingFileToVideoClip for each recording
+ * Handles both NVR (EnrichedRecordingFile) and device standalone (RecordingFile) cases
+ */
+export async function recordingsToVideoClips(
+    recordings: (RecordingFile | EnrichedRecordingFile)[],
+    options: {
+        /** Fallback start date if recording doesn't have one */
+        fallbackStart: Date;
+        /** API instance to get playback URLs (optional, for device standalone recordings) */
+        api?: ReolinkBaichuanApi;
+        /** Logger for debug messages */
+        logger?: Console;
+        /** Plugin instance for generating webhook URLs */
+        plugin?: ScryptedDeviceBase;
+        /** Device ID for webhook URLs */
+        deviceId?: string;
+        /** Use webhook URLs instead of direct RTMP URLs */
+        useWebhook?: boolean;
+        /** Maximum number of clips to return (optional) */
+        count?: number;
+    }
+): Promise<VideoClip[]> {
+    const { fallbackStart, api, logger, plugin, deviceId, useWebhook, count } = options;
+    const clips: VideoClip[] = [];
+
+    for (const rec of recordings) {
+        try {
+            const clip = await recordingFileToVideoClip(rec, {
+                fallbackStart,
+                api,
+                logger,
+                plugin,
+                deviceId,
+                useWebhook,
+            });
+            clips.push(clip);
+        } catch (e) {
+            logger?.warn(`Failed to convert recording to video clip: fileName=${rec.fileName}`, e);
+        }
+    }
+
+    // Apply count limit if specified
+    return count ? clips.slice(0, count) : clips;
+}
+
+/**
  * Generate webhook URLs for video clips
  */
 export async function getVideoClipWebhookUrls(props: {

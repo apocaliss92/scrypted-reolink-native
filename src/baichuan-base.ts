@@ -8,7 +8,6 @@ export interface BaichuanConnectionConfig {
     password: string;
     uid?: string;
     transport: BaichuanTransport;
-    logger: Console;
     debugOptions?: any;
 }
 
