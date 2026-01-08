@@ -22,7 +22,7 @@ import {
     selectStreamOption,
     StreamManager
 } from "./stream-utils";
-import { floodlightSuffix, getDeviceInterfaces, pirSuffix, recordingFileToVideoClip, sirenSuffix, updateDeviceInfo } from "./utils";
+import { floodlightSuffix, getDeviceInterfaces, getVideoClipWebhookUrls, pirSuffix, recordingFileToVideoClip, sirenSuffix, updateDeviceInfo, vodSearchResultsToVideoClips } from "./utils";
 
 export type CameraType = 'battery' | 'regular' | 'multi-focal' | 'multi-focal-battery';
 
@@ -559,6 +559,14 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 this.updateVideoClipsAutoLoad();
             },
         },
+        clipsSource: {
+            title: "Clips Source",
+            subgroup: 'Videoclips',
+            description: "Source for fetching video clips: NVR (fetch from NVR device) or Device (fetch directly from camera).",
+            type: "string",
+            choices: ["NVR", "Device"],
+            immediate: true,
+        },
         loadVideoclips: {
             title: "Auto-load Video Clips",
             subgroup: 'Videoclips',
@@ -709,36 +717,126 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         const start = new Date(startMs);
         const end = new Date(endMs);
-        start.setHours(0, 0, 0, 0);
+        // Use UTC to match API's dateToReolinkTime conversion
+        start.setUTCHours(0, 0, 0, 0);
 
         try {
-            const api = await this.ensureClient();
-            const recordings = await api.listEnrichedRecordingsByTime({
-                start,
-                end,
-                count,
-                streamType: 'mainStream',
-                httpFallback: false,
-                fetchRtmpUrls: true
-            });
+            const { clipsSource } = this.storageSettings.values;
+            const useNvr = clipsSource === "NVR" && this.nvrDevice;
 
-            const clips: VideoClip[] = [];
+            if (useNvr) {
+                // Fetch from NVR using listEnrichedVodFiles (library handles parsing correctly)
+                const channel = this.storageSettings.values.rtspChannel ?? 0;
+                logger.debug(`Fetching video clips from NVR for channel ${channel}`);
 
-            for (const rec of recordings) {
-                const clip = await recordingFileToVideoClip(rec, {
-                    fallbackStart: start,
-                    api,
-                    logger,
-                    plugin: this,
-                    deviceId: this.id,
-                    useWebhook: true,
+                // Use listEnrichedVodFiles which properly parses filenames and extracts detection info
+                logger.log(`[NVR VOD] Searching for video clips: channel=${channel}, start=${start.toISOString()}, end=${end.toISOString()}`);
+                // Filter to only include recordings within the requested time window
+                const enrichedRecordings = await this.nvrDevice.listEnrichedVodFiles({
+                    channel,
+                    start,
+                    end,
+                    streamType: "main",
+                    autoSearchByDay: false, // Disable autoSearchByDay to avoid searching past days
+                    bypassCache: false,
                 });
-                clips.push(clip);
+
+                logger.log(`[NVR VOD] Found ${enrichedRecordings.length} enriched recordings from NVR`);
+
+                // Log sample of enriched recordings to see what the library returned
+                if (enrichedRecordings.length > 0) {
+                    const sampleSize = Math.min(3, enrichedRecordings.length);
+                    for (let i = 0; i < sampleSize; i++) {
+                        const rec = enrichedRecordings[i];
+                        logger.log(`[NVR VOD] Sample enriched recording ${i + 1}/${enrichedRecordings.length}:`, {
+                            fileName: rec.fileName,
+                            startTimeMs: rec.startTimeMs,
+                            endTimeMs: rec.endTimeMs,
+                            durationMs: rec.durationMs,
+                            hasPerson: rec.hasPerson,
+                            hasVehicle: rec.hasVehicle,
+                            hasAnimal: rec.hasAnimal,
+                            hasFace: rec.hasFace,
+                            hasMotion: rec.hasMotion,
+                            hasDoorbell: rec.hasDoorbell,
+                            hasPackage: rec.hasPackage,
+                            recordType: rec.recordType,
+                            parsedFileName: rec.parsedFileName ? {
+                                start: rec.parsedFileName.start?.toISOString(),
+                                end: rec.parsedFileName.end?.toISOString(),
+                                flags: rec.parsedFileName.flags,
+                            } : null,
+                        });
+                    }
+                }
+
+                // Convert enriched recordings to VideoClip array
+                const clips: VideoClip[] = [];
+
+                for (const rec of enrichedRecordings) {
+                    // Log detection flags before conversion
+                    const flags = {
+                        hasPerson: 'hasPerson' in rec ? rec.hasPerson : false,
+                        hasVehicle: 'hasVehicle' in rec ? rec.hasVehicle : false,
+                        hasAnimal: 'hasAnimal' in rec ? rec.hasAnimal : false,
+                        hasFace: 'hasFace' in rec ? rec.hasFace : false,
+                        hasMotion: 'hasMotion' in rec ? rec.hasMotion : false,
+                        hasDoorbell: 'hasDoorbell' in rec ? rec.hasDoorbell : false,
+                        hasPackage: 'hasPackage' in rec ? rec.hasPackage : false,
+                        recordType: rec.recordType || 'none',
+                    };
+                    logger.debug(`[NVR VOD] Processing recording: fileName=${rec.fileName}, flags=${JSON.stringify(flags)}`);
+
+                    const clip = await recordingFileToVideoClip(rec, {
+                        fallbackStart: start,
+                        logger,
+                        plugin: this,
+                        deviceId: this.id,
+                        useWebhook: true,
+                    });
+                    
+                    // Log detection classes in the final clip
+                    logger.debug(`[NVR VOD] Generated clip: id=${clip.id}, detectionClasses=${clip.detectionClasses?.join(',') || 'none'}`);
+                    clips.push(clip);
+                }
+
+                // Apply count limit if specified
+                const finalClips = count ? clips.slice(0, count) : clips;
+                logger.log(`[NVR VOD] Converted ${finalClips.length} video clips (limit: ${count || 'none'})`);
+
+                return finalClips;
+            } else {
+                // Fetch directly from device using Baichuan API
+                const api = await this.ensureClient();
+
+                const recordings = await api.listEnrichedRecordingsByTime({
+                    start,
+                    end,
+                    count,
+                    channel: this.storageSettings.values.rtspChannel,
+                    streamType: 'mainStream',
+                    httpFallback: false,
+                    fetchRtmpUrls: true
+                });
+
+                const clips: VideoClip[] = [];
+
+                for (const rec of recordings) {
+                    const clip = await recordingFileToVideoClip(rec, {
+                        fallbackStart: start,
+                        api,
+                        logger,
+                        plugin: this,
+                        deviceId: this.id,
+                        useWebhook: true,
+                    });
+                    clips.push(clip);
+                }
+
+                logger.debug(`Videoclips found: ${clips.length}`);
+
+                return clips;
             }
-
-            logger.debug(`Videoclips found: ${JSON.stringify(clips)}`);
-
-            return clips;
         } catch (e: any) {
             const message = e instanceof Error ? e.message : String(e);
 
@@ -948,26 +1046,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     logger: this.getBaichuanLogger(),
                 });
             } else {
-                // Ensure client is connected and logged in (reuses existing connection if available)
-                // This ensures no new sessions are created during thumbnail operations
-                const api = await this.ensureClient();
-
-                if (!api.client.isSocketConnected() || !api.client.loggedIn) {
-                    logger.warn(`[Thumbnail] Client not ready, waiting for connection: fileId=${thumbnailId}`);
-                    // ensureClient should have already handled connection, but wait a bit if needed
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                }
-
-                // Get RTMP URL from fileId
-                // Note: getRecordingPlaybackUrls internally calls login(), but it should be idempotent
-                // if ensureClient() already established the connection
-                const { rtmpVodUrl } = await api.getRecordingPlaybackUrls({
-                    fileName: thumbnailId,
-                });
-
-                if (!rtmpVodUrl) {
-                    throw new Error(`No playback URL found for video ${thumbnailId}`);
-                }
+                // Get RTMP URL using the appropriate API (NVR or Baichuan)
+                const rtmpVodUrl = await this.getVideoClipRtmpUrl(thumbnailId);
 
                 // Use the plugin's thumbnail generation queue with RTMP URL
                 thumbnail = await this.plugin.generateThumbnail({
@@ -992,6 +1072,83 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         } catch (e) {
             logger.error(`[Thumbnail] Error: fileId=${thumbnailId}`, e);
             throw e;
+        }
+    }
+
+    /**
+     * Get RTMP URL for a video clip file
+     * Handles both NVR source (full path) and Device source (filename only)
+     */
+    async getVideoClipRtmpUrl(fileId: string): Promise<string> {
+        const logger = this.getBaichuanLogger();
+        const { clipsSource } = this.storageSettings.values;
+        const useNvr = clipsSource === "NVR" && this.nvrDevice && fileId.includes('/');
+
+        if (useNvr) {
+            // Use NVR API to get streaming URL from full file path
+            logger.log(`[getVideoClipRtmpUrl] Using NVR API for fileId="${fileId}"`);
+            const nvrApi = await this.nvrDevice.ensureClient();
+            const channel = this.storageSettings.values.rtspChannel ?? 0;
+            
+            // Try getVodUrl with FLV first (as used in tests), then getVodStreamUrl with FLV, then Playback, then RTMP
+            let url: string | undefined;
+            
+            try {
+                logger.log(`[getVideoClipRtmpUrl] Trying getVodUrl with FLV requestType...`);
+                url = await nvrApi.getVodUrl(fileId, channel, {
+                    requestType: "FLV",
+                    streamType: "main",
+                });
+                logger.log(`[getVideoClipRtmpUrl] NVR getVodUrl FLV URL received: url="${url || 'none'}"`);
+            } catch (e1) {
+                logger.warn(`[getVideoClipRtmpUrl] getVodUrl FLV failed, trying getVodStreamUrl FLV: ${e1}`);
+                try {
+                    logger.log(`[getVideoClipRtmpUrl] Trying getVodStreamUrl with FLV streamType...`);
+                    const streamInfo = await nvrApi.getVodStreamUrl(fileId, channel, {
+                        streamType: "FLV",
+                        videoStreamType: "main",
+                    });
+                    url = streamInfo.url;
+                    logger.log(`[getVideoClipRtmpUrl] NVR getVodStreamUrl FLV URL received: url="${url || 'none'}", mimeType="${streamInfo.mimeType || 'none'}"`);
+                } catch (e2) {
+                    logger.warn(`[getVideoClipRtmpUrl] getVodStreamUrl FLV failed, trying Playback: ${e2}`);
+                    try {
+                        logger.log(`[getVideoClipRtmpUrl] Trying getVodStreamUrl with Playback streamType...`);
+                        const streamInfo = await nvrApi.getVodStreamUrl(fileId, channel, {
+                            streamType: "Playback",
+                            videoStreamType: "main",
+                        });
+                        url = streamInfo.url;
+                        logger.log(`[getVideoClipRtmpUrl] NVR getVodStreamUrl Playback URL received: url="${url || 'none'}", mimeType="${streamInfo.mimeType || 'none'}"`);
+                    } catch (e3) {
+                        logger.warn(`[getVideoClipRtmpUrl] Playback failed, trying RTMP: ${e3}`);
+                        logger.log(`[getVideoClipRtmpUrl] Trying getVodStreamUrl with RTMP streamType...`);
+                        const streamInfo = await nvrApi.getVodStreamUrl(fileId, channel, {
+                            streamType: "RTMP",
+                            videoStreamType: "main",
+                        });
+                        url = streamInfo.url;
+                        logger.log(`[getVideoClipRtmpUrl] NVR getVodStreamUrl RTMP URL received: url="${url || 'none'}", mimeType="${streamInfo.mimeType || 'none'}"`);
+                    }
+                }
+            }
+            
+            if (!url) {
+                throw new Error(`No streaming URL found from NVR for file ${fileId}`);
+            }
+            return url;
+        } else {
+            // Use Baichuan API (for direct camera access)
+            logger.log(`[getVideoClipRtmpUrl] Getting RTMP URL from Baichuan API for fileId="${fileId}"`);
+            const api = await this.ensureClient();
+            const result = await api.getRecordingPlaybackUrls({
+                fileName: fileId,
+            });
+            logger.log(`[getVideoClipRtmpUrl] Baichuan RTMP URL received: rtmpVodUrl="${result.rtmpVodUrl || 'none'}"`);
+            if (!result.rtmpVodUrl) {
+                throw new Error(`No RTMP URL found from Baichuan API for file ${fileId}`);
+            }
+            return result.rtmpVodUrl;
         }
     }
 
@@ -1055,8 +1212,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             // Get today's date range (start of today to now)
             const now = new Date();
             const startOfToday = new Date(now);
-            startOfToday.setHours(0, 0, 0, 0);
-            startOfToday.setMinutes(0, 0, 0);
+            startOfToday.setUTCHours(0, 0, 0, 0);
+            startOfToday.setUTCMinutes(0, 0, 0);
 
             // Fetch today's video clips
             const clips = await this.getVideoClips({
@@ -2293,7 +2450,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 logger.warn('Failed to connect/refresh during init', e);
             }
         }
-
+        this.storageSettings.settings.clipsSource.hide = !this.nvrDevice;
+        this.storageSettings.settings.clipsSource.defaultValue = this.nvrDevice ? "NVR" : "Device";
 
         this.storageSettings.settings.videoclipsRegularChecks.defaultValue = this.isBattery ? 120 : 30;
 

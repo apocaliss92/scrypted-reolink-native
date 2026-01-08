@@ -1,7 +1,7 @@
-import type { DeviceInfoResponse, DeviceInputData, EventsResponse, ReolinkBaichuanApi, ReolinkCgiApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, { AdoptDevice, Device, DeviceDiscovery, DeviceProvider, DiscoveredDevice, Reboot, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, Setting, Settings, SettingValue } from "@scrypted/sdk";
+import type { DeviceInfoResponse, EnrichedRecordingFile, EventsResponse, ReolinkBaichuanApi, ReolinkCgiApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import sdk, { AdoptDevice, Device, DeviceDiscovery, DeviceProvider, DiscoveredDevice, Reboot, ScryptedDeviceType, ScryptedInterface, Setting, Settings, SettingValue } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
-import { BaseBaichuanClass, type BaichuanConnectionConfig, type BaichuanConnectionCallbacks } from "./baichuan-base";
+import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
 import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
 import { normalizeUid } from "./connect";
@@ -80,8 +80,8 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     }
 
     async reboot(): Promise<void> {
-        const api = await this.ensureClient();
-        await api.Reboot();
+        const api = await this.ensureBaichuanClient();
+        await api.reboot();
     }
 
     // BaseBaichuanClass abstract methods implementation
@@ -175,14 +175,39 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         }
 
         const { ReolinkCgiApi } = await import("@apocaliss92/reolink-baichuan-js");
+        const logger = this.getBaichuanLogger();
         this.nvrApi = new ReolinkCgiApi({
             host: ipAddress,
             username,
             password,
+            logger,
         });
 
         await this.nvrApi.login();
         return this.nvrApi;
+    }
+
+    /**
+     * List enriched VOD files (with proper parsing and detection info)
+     * This uses the library's enrichVodFile which handles all parsing correctly
+     */
+    async listEnrichedVodFiles(params: {
+        channel: number;
+        start: Date;
+        end: Date;
+        streamType?: "main" | "sub";
+        autoSearchByDay?: boolean;
+        bypassCache?: boolean;
+    }): Promise<Array<EnrichedRecordingFile>> {
+        const api = await this.ensureClient();
+        return await api.listEnrichedVodFiles({
+            channel: params.channel,
+            start: params.start,
+            end: params.end,
+            streamType: params.streamType,
+            autoSearchByDay: params.autoSearchByDay,
+            bypassCache: params.bypassCache,
+        });
     }
 
     private forwardNativeEvent(ev: ReolinkSimpleEvent): void {
@@ -467,33 +492,15 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     async syncEntitiesFromRemote() {
         const logger = this.getBaichuanLogger();
 
-        // Ensure both APIs are ready before syncing
-        const api = await this.ensureClient();
-        const baichuanApi = await this.ensureBaichuanClient();
+        const cgiApi = await this.ensureClient();
+        const { devicesData, channels } = await cgiApi.getDevicesInfo();
 
-        // Wait for Baichuan connection to be fully established
-        if (baichuanApi?.client) {
-            // Check if already connected
-            if (!baichuanApi.client.isSocketConnected()) {
-                logger.debug('Waiting for Baichuan connection to be established...');
-                // Wait up to 5 seconds for connection
-                let attempts = 0;
-                while (!baichuanApi.client.isSocketConnected() && attempts < 50) {
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                    attempts++;
-                }
-                if (!baichuanApi.client.isSocketConnected()) {
-                    logger.warn('Baichuan connection not established after waiting, proceeding anyway');
-                } else {
-                    logger.debug('Baichuan connection established');
-                }
-            }
-        }
-
-        const { devicesData, channels } = await api.getDevicesInfo();
+        // const api = await this.ensureBaichuanClient();
+        // const devicesMap = api.getDevicesInfo();
+        // const deviceEntries = Object.entries(devicesMap);
 
         if (!channels.length) {
-            logger.debug(`No channels found, ${JSON.stringify({ devicesData, channels })}`);
+            logger.debug(`No channels found, ${JSON.stringify({ channels, devicesData })}`);
             return;
         }
 

@@ -219,9 +219,9 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             
             // Only reuse if both conditions are true
             if (isConnected && isLoggedIn) {
-                return this.baichuanApi;
-            }
-            
+            return this.baichuanApi;
+        }
+
             // If socket is not connected or not logged in, cleanup the stale client
             // This prevents leaking connections when the socket appears connected but isn't
             const logger = this.getBaichuanLogger();
@@ -358,7 +358,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                 // Only cleanup if this is still the current API instance
                 // This prevents cleanup of a new connection that was created
                 // while the old one was closing
-                await this.cleanupBaichuanApi();
+            await this.cleanupBaichuanApi();
             }
 
             // Call custom close handler if provided
