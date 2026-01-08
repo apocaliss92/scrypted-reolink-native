@@ -2465,6 +2465,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         this.storageSettings.settings.widerChannel.hide = !this.isMultiFocal;
         this.storageSettings.settings.teleChannel.hide = !this.isMultiFocal;
 
+        this.storageSettings.settings.uid.hide = !this.isBattery;
+
         if (this.isBattery && !this.storageSettings.values.mixinsSetup) {
             try {
                 const device = sdk.systemManager.getDeviceById<Settings>(this.id);
