@@ -1,4 +1,4 @@
-import type { DeviceInfoResponse, EnrichedRecordingFile, EventsResponse, ReolinkBaichuanApi, ReolinkCgiApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { DeviceInfoResponse, EnrichedRecordingFile, EventsResponse, ListNvrRecordingsParams, ReolinkBaichuanApi, ReolinkCgiApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { AdoptDevice, Device, DeviceDiscovery, DeviceProvider, DiscoveredDevice, Reboot, ScryptedDeviceType, ScryptedInterface, Setting, Settings, SettingValue } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
@@ -185,29 +185,6 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
         await this.nvrApi.login();
         return this.nvrApi;
-    }
-
-    /**
-     * List enriched VOD files (with proper parsing and detection info)
-     * This uses the library's enrichVodFile which handles all parsing correctly
-     */
-    async listEnrichedVodFiles(params: {
-        channel: number;
-        start: Date;
-        end: Date;
-        streamType?: "main" | "sub";
-        autoSearchByDay?: boolean;
-        bypassCache?: boolean;
-    }): Promise<Array<EnrichedRecordingFile>> {
-        const api = await this.ensureClient();
-        return await api.listEnrichedVodFiles({
-            channel: params.channel,
-            start: params.start,
-            end: params.end,
-            streamType: params.streamType,
-            autoSearchByDay: params.autoSearchByDay,
-            bypassCache: params.bypassCache,
-        });
     }
 
     private forwardNativeEvent(ev: ReolinkSimpleEvent): void {
@@ -427,7 +404,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
         const { ipAddress } = this.storageSettings.values;
         try {
-            const api = await this.ensureClient();
+            const api = await this.ensureBaichuanClient();
             const deviceData = await api.getInfo();
 
             await updateDeviceInfo({

@@ -664,6 +664,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     private streamManagerRestartTimeout: NodeJS.Timeout | undefined;
     private videoClipsAutoLoadInterval: NodeJS.Timeout | undefined;
     private videoClipsAutoLoadInProgress: boolean = false;
+    private videoClipsAutoLoadMode: boolean = false;
 
     constructor(
         nativeId: string,
@@ -698,7 +699,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             return [];
         }
 
-        if (this.isBattery && this.sleeping) {
+        // Skip sleeping check during auto-load to allow auto-load to start for battery cameras
+        if (!this.videoClipsAutoLoadMode && this.isBattery && this.sleeping) {
             const logger = this.getBaichuanLogger();
             logger.debug('getVideoClips: disabled for battery devices');
             return [];
@@ -735,6 +737,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             const { clipsSource } = this.storageSettings.values;
             const useNvr = clipsSource === "NVR" && this.nvrDevice;
 
+            const api = await this.ensureClient();
+
             if (useNvr) {
                 // Fetch from NVR using listEnrichedVodFiles (library handles parsing correctly)
                 const channel = this.storageSettings.values.rtspChannel ?? 0;
@@ -742,13 +746,11 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 // Use listEnrichedVodFiles which properly parses filenames and extracts detection info
                 logger.debug(`[NVR VOD] Searching for video clips: channel=${channel}, start=${start.toISOString()}, end=${end.toISOString()}`);
                 // Filter to only include recordings within the requested time window
-                const enrichedRecordings = await this.nvrDevice.listEnrichedVodFiles({
+                const enrichedRecordings = await api.listNvrRecordings({
                     channel,
                     start,
                     end,
                     streamType: "main",
-                    autoSearchByDay: false, // Disable autoSearchByDay to avoid searching past days
-                    bypassCache: false,
                 });
 
                 logger.debug(`[NVR VOD] Found ${enrichedRecordings.length} enriched recordings from NVR`);
@@ -816,17 +818,14 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
                 return finalClips;
             } else {
-                // Fetch directly from device using Baichuan API
-                const api = await this.ensureClient();
-
-                const recordings = await api.listEnrichedRecordingsByTime({
+                const recordings = await api.listDeviceRecordings({
                     start,
                     end,
                     count,
                     channel: this.storageSettings.values.rtspChannel,
                     streamType: 'mainStream',
                     httpFallback: false,
-                    fetchRtmpUrls: true
+                    fetchRtmpUrls: false
                 });
 
                 const clips: VideoClip[] = [];
@@ -1166,12 +1165,12 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         if (useNvr) {
             logger.debug(`[getVideoClipRtmpUrl] Using NVR API for fileId="${fileId}", forThumbnail=${forThumbnail}`);
-            const nvrApi = await this.nvrDevice.ensureClient();
+            const api = await this.ensureClient();
             const channel = this.storageSettings.values.rtspChannel ?? 0;
 
             try {
                 logger.debug(`[getVideoClipRtmpUrl] Trying getVodUrl with Download requestType...`);
-                const url = await nvrApi.getVodUrl(fileId, channel, {
+                const url = await api.getVodUrl(fileId, channel, {
                     requestType: "Download",
                     streamType: "main",
                 });
@@ -1250,6 +1249,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         const logger = this.getBaichuanLogger();
 
         this.videoClipsAutoLoadInProgress = true;
+        this.videoClipsAutoLoadMode = true;
 
         try {
             const daysToPreload = this.storageSettings.values.videoclipsDaysToPreload ?? 1;
@@ -1315,6 +1315,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             logger.error('Error during auto-loading video clips:', e);
         } finally {
             this.videoClipsAutoLoadInProgress = false;
+            this.videoClipsAutoLoadMode = false;
         }
     }
 
