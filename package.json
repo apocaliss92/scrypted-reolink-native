@@ -1,6 +1,6 @@
 {
    "name": "@apocaliss92/scrypted-reolink-native",
-   "version": "0.1.35",
+   "version": "0.1.36",
    "description": "Use any reolink camera with Scrypted, even older/unsupported models without HTTP protocol support",
    "author": "@apocaliss92",
    "license": "Apache",

@@ -8,6 +8,25 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { CommonCameraMixin } from "./common";
+/**
+ * Sanitize FFmpeg output or URLs to avoid leaking credentials
+ */
+export function sanitizeFfmpegOutput(text: string): string {
+    if (!text)
+        return text;
+
+    let sanitized = text;
+
+    // Remove user/password query parameters from URLs: ?user=xxx&password=yyy
+    sanitized = sanitized.replace(/(\buser=)[^&\s]*/gi, '$1***');
+    sanitized = sanitized.replace(/(\bpassword=)[^&\s]*/gi, '$1***');
+
+    // Remove credentials from URLs like rtmp://user:pass@host/...
+    sanitized = sanitized.replace(/(rtmp:\/\/)([^:@\/\s]+):([^@\/\s]+)@/gi, '$1$2:***@');
+
+    return sanitized;
+}
+
 
 /**
  * Enumeration of operation types that may require specific channel assignments
@@ -186,6 +205,7 @@ export async function recordingFileToVideoClip(
                 deviceId,
                 fileId: id,
                 plugin,
+                logger,
             });
             videoHref = videoUrl;
             thumbnailHref = thumbnailUrl;
@@ -316,10 +336,12 @@ export async function getVideoClipWebhookUrls(props: {
     deviceId: string;
     fileId: string;
     plugin: ScryptedDeviceBase;
+    logger?: Console;
 }): Promise<{ videoUrl: string; thumbnailUrl: string }> {
-    const { deviceId, fileId, plugin } = props;
+    const { deviceId, fileId, plugin, logger } = props;
+    const log = logger || plugin.console;
 
-    plugin.console.debug(`[getVideoClipWebhookUrls] Starting URL generation: deviceId=${deviceId}, fileId=${fileId}`);
+    // log.debug?.(`[getVideoClipWebhookUrls] Starting URL generation: deviceId=${deviceId}, fileId=${fileId}`);
 
     try {
         let endpoint: string;
@@ -327,21 +349,19 @@ export async function getVideoClipWebhookUrls(props: {
         try {
             endpoint = await sdk.endpointManager.getCloudEndpoint(undefined, { public: true });
             endpointSource = 'cloud';
-            plugin.console.debug(`[getVideoClipWebhookUrls] Using cloud endpoint: ${endpoint}`);
+            // log.debug?.(`[getVideoClipWebhookUrls] Using cloud endpoint: ${endpoint}`);
         } catch (e) {
             // Fallback to local endpoint if cloud is not available (e.g., not logged in)
-            plugin.console.debug(`[getVideoClipWebhookUrls] Cloud endpoint not available, using local endpoint: ${e instanceof Error ? e.message : String(e)}`);
+            log.debug?.(`[getVideoClipWebhookUrls] Cloud endpoint not available, using local endpoint: ${e instanceof Error ? e.message : String(e)}`);
             endpoint = await sdk.endpointManager.getLocalEndpoint(undefined, { public: true });
             endpointSource = 'local';
-            plugin.console.debug(`[getVideoClipWebhookUrls] Using local endpoint: ${endpoint}`);
+            // log.debug?.(`[getVideoClipWebhookUrls] Using local endpoint: ${endpoint}`);
         }
 
         const encodedDeviceId = encodeURIComponent(deviceId);
         // Remove leading slash from fileId if present, as it causes invalid paths when encoded
         const cleanFileId = fileId.startsWith('/') ? fileId.substring(1) : fileId;
         const encodedFileId = encodeURIComponent(cleanFileId);
-
-        plugin.console.debug(`[getVideoClipWebhookUrls] Encoding: deviceId="${deviceId}" -> "${encodedDeviceId}", fileId="${fileId}" -> cleanFileId="${cleanFileId}" -> encodedFileId="${encodedFileId}"`);
 
         // Parse endpoint URL to extract query parameters (for authentication)
         const endpointUrl = new URL(endpoint);
@@ -350,22 +370,19 @@ export async function getVideoClipWebhookUrls(props: {
         // Remove query parameters from the base endpoint URL
         endpointUrl.search = '';
 
-        plugin.console.debug(`[getVideoClipWebhookUrls] Parsed endpoint URL: base="${endpointUrl.toString()}", queryParams="${queryParams}"`);
-
         // Ensure endpoint has trailing slash
         const normalizedEndpoint = endpointUrl.toString().endsWith('/') ? endpointUrl.toString() : `${endpointUrl.toString()}/`;
-
-        plugin.console.debug(`[getVideoClipWebhookUrls] Normalized endpoint: "${normalizedEndpoint}"`);
 
         // Build webhook URLs and append query parameters at the end
         const videoUrl = `${normalizedEndpoint}webhook/video/${encodedDeviceId}/${encodedFileId}${queryParams}`;
         const thumbnailUrl = `${normalizedEndpoint}webhook/thumbnail/${encodedDeviceId}/${encodedFileId}${queryParams}`;
 
-        plugin.console.debug(`[getVideoClipWebhookUrls] Generated URLs: videoUrl="${videoUrl}", thumbnailUrl="${thumbnailUrl}"`);
-
         return { videoUrl, thumbnailUrl };
     } catch (e) {
-        plugin.console.error(`[getVideoClipWebhookUrls] Failed to generate webhook URLs: deviceId=${deviceId}, fileId=${fileId}`, e);
+        log.error?.(
+            `[getVideoClipWebhookUrls] Failed to generate webhook URLs: deviceId=${deviceId}, fileId=${fileId}`,
+            e
+        );
         throw e;
     }
 }
@@ -378,9 +395,12 @@ export async function extractThumbnailFromVideo(props: {
     filePath?: string;
     fileId: string;
     deviceId: string;
-    logger: Console;
+    logger?: Console;
+    device?: CommonCameraMixin;
 }): Promise<MediaObject> {
-    const { rtmpUrl, filePath, fileId, deviceId, logger } = props;
+    const { rtmpUrl, filePath, fileId, deviceId, device } = props;
+    // Use device logger if available, otherwise fallback to provided logger
+    const logger = device?.getBaichuanLogger?.() || props.logger || console;
 
     // Use file path if available, otherwise use RTMP URL
     const inputSource = filePath || rtmpUrl;
@@ -427,18 +447,31 @@ export async function handleVideoClipRequest(props: {
     fileId: string;
     request: HttpRequest;
     response: HttpResponse;
-    logger: Console;
+    logger?: Console;
 }): Promise<void> {
-    const { device, deviceId, fileId, request, response, logger } = props;
+    const { device, deviceId, fileId, request, response } = props;
+    const logger = device.getBaichuanLogger?.() || props.logger || console;
 
     // Check if file is cached
     const cachePath = getVideoClipCachePath(deviceId, fileId);
+    const MIN_VIDEO_CACHE_BYTES = 16 * 1024; // 16KB, evita file quasi vuoti/corrotti
 
     try {
         // Check if cached file exists
         const stat = await fs.promises.stat(cachePath);
         const fileSize = stat.size;
         const range = request.headers.range;
+
+        if (fileSize < MIN_VIDEO_CACHE_BYTES) {
+            logger.warn(`Cached video clip too small, deleting and reloading: fileId=${fileId}, size=${fileSize} bytes`);
+            try {
+                await fs.promises.unlink(cachePath);
+            } catch (unlinkErr) {
+                logger.warn(`Failed to delete small cached video clip: fileId=${fileId}`, unlinkErr);
+            }
+            // Force cache miss path below
+            throw new Error('Cached video too small, deleted');
+        }
 
         logger.log(`Serving cached video clip: fileId=${fileId}, size=${fileSize}, range=${range}`);
 
@@ -503,12 +536,12 @@ export async function handleVideoClipRequest(props: {
 
         if (isHttpUrl) {
             // For HTTP URLs (Playback/Download from NVR), do direct HTTP proxy with ranged headers support
-            logger.log(`Proxying HTTP URL directly: fileId=${fileId}, url=${rtmpVodUrl}`);
+            logger.debug(`Proxying HTTP URL directly: fileId=${fileId}, url=${rtmpVodUrl}`);
 
             const sendVideo = async () => {
                 // Pre-fetch ffmpeg path in case we need it for FLV conversion
                 const ffmpegPathPromise = sdk.mediaManager.getFFmpegPath();
-                
+
                 return new Promise<void>(async (resolve, reject) => {
                     const urlObj = new URL(rtmpVodUrl);
                     const httpModule = urlObj.protocol === 'https:' ? https : http;
@@ -531,7 +564,7 @@ export async function handleVideoClipRequest(props: {
                         headers: requestHeaders,
                     };
 
-                    logger.log(`Starting HTTP request: ${rtmpVodUrl}, headers: ${JSON.stringify(requestHeaders)}`);
+                    logger.debug(`Starting HTTP request: ${rtmpVodUrl}, headers: ${JSON.stringify(requestHeaders)}`);
 
                     httpModule.get(options, async (httpResponse) => {
                         if (httpResponse.statusCode && httpResponse.statusCode >= 400) {
@@ -547,9 +580,9 @@ export async function handleVideoClipRequest(props: {
 
                         // Check if we need to convert FLV to MP4
                         const isFlv = typeof contentType === 'string' && (contentType === 'video/x-flv' || contentType === 'video/flv');
-                        
+
                         if (isFlv) {
-                            logger.log(`Content-Type is FLV (${contentType}), will convert to MP4 using ffmpeg`);
+                            logger.debug(`Content-Type is FLV (${contentType}), will convert to MP4 using ffmpeg`);
                         }
 
                         const responseHeaders: Record<string, string> = {
@@ -568,11 +601,11 @@ export async function handleVideoClipRequest(props: {
 
                         const statusCode = httpResponse.statusCode || 200;
 
-                        logger.log(`HTTP response received: status=${statusCode}, contentType=${contentType}, contentLength=${contentLength || 'unknown'}`);
+                        logger.debug(`HTTP response received: status=${statusCode}, contentType=${contentType}, contentLength=${contentLength || 'unknown'}`);
 
                         try {
-                        if (isFlv) {
-                            // Convert FLV to MP4 using ffmpeg
+                            if (isFlv) {
+                                // Convert FLV to MP4 using ffmpeg
                                 const ffmpegPath = await ffmpegPathPromise;
                                 // Re-encode instead of copy because FLV codec might not be supported
                                 const ffmpegArgs: string[] = [
@@ -648,10 +681,11 @@ export async function handleVideoClipRequest(props: {
                                 // Handle ffmpeg errors
                                 ffmpeg.on('close', (code) => {
                                     if (code !== 0 && code !== null && !streamStarted) {
-                                        logger.error(`FFmpeg conversion failed: fileId=${fileId}, code=${code}, error=${ffmpegError}`);
+                                        const sanitized = sanitizeFfmpegOutput(ffmpegError);
+                                        logger.error(`FFmpeg conversion failed: fileId=${fileId}, code=${code}, error=${sanitized}`);
                                         reject(new Error(`FFmpeg conversion failed: ${code}`));
                                     } else {
-                                        logger.log(`FFmpeg conversion completed: fileId=${fileId}, code=${code}`);
+                                        logger.debug(`FFmpeg conversion completed: fileId=${fileId}, code=${code}`);
                                         resolve();
                                     }
                                 });
@@ -661,7 +695,7 @@ export async function handleVideoClipRequest(props: {
                                     reject(error);
                                 });
 
-                                logger.log(`FFmpeg conversion started: fileId=${fileId}`);
+                                logger.debug(`FFmpeg conversion started: fileId=${fileId}`);
                             } else {
                                 // Direct proxy for non-FLV content (should be MP4 already)
                                 // Stream directly without buffering - yield chunks as they arrive
@@ -757,7 +791,8 @@ export async function handleVideoClipRequest(props: {
         // Handle ffmpeg errors
         ffmpeg.on('close', (code) => {
             if (code !== 0 && code !== null && !streamStarted) {
-                logger.error(`FFmpeg proxy failed for video: fileId=${fileId}, code=${code}, error=${ffmpegError}`);
+                const sanitized = sanitizeFfmpegOutput(ffmpegError);
+                logger.error(`FFmpeg proxy failed for video: fileId=${fileId}, code=${code}, error=${sanitized}`);
             }
         });
 
@@ -953,6 +988,7 @@ export async function vodSearchResultsToVideoClips(
                         deviceId,
                         fileId: fileName,
                         plugin,
+                        logger,
                     });
                     videoHref = videoUrl;
                     thumbnailHref = thumbnailUrl;

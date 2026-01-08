@@ -12,7 +12,8 @@ interface ThumbnailRequest {
     fileId: string;
     rtmpUrl?: string;
     filePath?: string;
-    logger: Console;
+    logger?: Console;
+    device?: CommonCameraMixin;
     resolve: (mo: MediaObject) => void;
     reject: (error: Error) => void;
 }
@@ -22,7 +23,8 @@ interface ThumbnailRequestInput {
     fileId: string;
     rtmpUrl?: string;
     filePath?: string;
-    logger: Console;
+    logger?: Console;
+    device?: CommonCameraMixin;
 }
 
 class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, DeviceCreator {
@@ -347,7 +349,9 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
      */
     async generateThumbnail(request: ThumbnailRequestInput): Promise<MediaObject> {
         const queueLength = this.thumbnailQueue.length;
-        request.logger.log(`[Thumbnail] Download start: fileId=${request.fileId}, queuePosition=${queueLength + 1}`);
+        // Use device logger if available, otherwise fallback to provided logger
+        const logger = request.device?.getBaichuanLogger?.() || request.logger || console;
+        logger.log(`[Thumbnail] Download start: fileId=${request.fileId}, queuePosition=${queueLength + 1}`);
 
         return new Promise((resolve, reject) => {
             this.thumbnailQueue.push({
@@ -371,11 +375,11 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
         while (this.thumbnailQueue.length > 0) {
             const request = this.thumbnailQueue.shift()!;
-            const logger = request.logger;
+            const logger = request.device?.getBaichuanLogger?.() || request.logger || console;
 
             try {
                 const thumbnail = await extractThumbnailFromVideo(request);
-                logger.log(`[Thumbnail] OK: fileId=${request.fileId}`);
+                logger.log(`[Thumbnail] Download completed: fileId=${request.fileId}`);
                 request.resolve(thumbnail);
             } catch (error) {
                 logger.error(`[Thumbnail] Error: fileId=${request.fileId}`, error);

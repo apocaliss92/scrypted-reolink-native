@@ -5,6 +5,8 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { spawn } from 'node:child_process';
+import http from 'http';
+import https from 'https';
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
 import { createBaichuanApi, normalizeUid, type BaichuanTransport } from "./connect";
@@ -22,7 +24,7 @@ import {
     selectStreamOption,
     StreamManager
 } from "./stream-utils";
-import { floodlightSuffix, getDeviceInterfaces, getVideoClipWebhookUrls, pirSuffix, recordingFileToVideoClip, sirenSuffix, updateDeviceInfo, vodSearchResultsToVideoClips } from "./utils";
+import { floodlightSuffix, getDeviceInterfaces, getVideoClipWebhookUrls, pirSuffix, recordingFileToVideoClip, sanitizeFfmpegOutput, sirenSuffix, updateDeviceInfo, vodSearchResultsToVideoClips } from "./utils";
 
 export type CameraType = 'battery' | 'regular' | 'multi-focal' | 'multi-focal-battery';
 
@@ -550,7 +552,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         },
         enableVideoclips: {
             title: "Enable Video Clips",
-            subgroup: 'Videoclips',
             description: "Enable video clips functionality. If disabled, getVideoClips will return empty and all other videoclip settings are ignored.",
             type: "boolean",
             defaultValue: false,
@@ -595,6 +596,16 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             type: "boolean",
             defaultValue: false,
             immediate: true,
+            onPut: async () => {
+                this.updateVideoClipsAutoLoad();
+            },
+        },
+        videoclipsDaysToPreload: {
+            title: "Days to Preload",
+            subgroup: 'Videoclips',
+            description: "Number of days to preload video clips and thumbnails (default: 1, only today).",
+            type: "number",
+            defaultValue: 3,
             onPut: async () => {
                 this.updateVideoClipsAutoLoad();
             },
@@ -727,10 +738,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             if (useNvr) {
                 // Fetch from NVR using listEnrichedVodFiles (library handles parsing correctly)
                 const channel = this.storageSettings.values.rtspChannel ?? 0;
-                logger.debug(`Fetching video clips from NVR for channel ${channel}`);
 
                 // Use listEnrichedVodFiles which properly parses filenames and extracts detection info
-                logger.log(`[NVR VOD] Searching for video clips: channel=${channel}, start=${start.toISOString()}, end=${end.toISOString()}`);
+                logger.debug(`[NVR VOD] Searching for video clips: channel=${channel}, start=${start.toISOString()}, end=${end.toISOString()}`);
                 // Filter to only include recordings within the requested time window
                 const enrichedRecordings = await this.nvrDevice.listEnrichedVodFiles({
                     channel,
@@ -741,14 +751,14 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     bypassCache: false,
                 });
 
-                logger.log(`[NVR VOD] Found ${enrichedRecordings.length} enriched recordings from NVR`);
+                logger.debug(`[NVR VOD] Found ${enrichedRecordings.length} enriched recordings from NVR`);
 
                 // Log sample of enriched recordings to see what the library returned
                 if (enrichedRecordings.length > 0) {
                     const sampleSize = Math.min(3, enrichedRecordings.length);
                     for (let i = 0; i < sampleSize; i++) {
                         const rec = enrichedRecordings[i];
-                        logger.log(`[NVR VOD] Sample enriched recording ${i + 1}/${enrichedRecordings.length}:`, {
+                        logger.debug(`[NVR VOD] Sample enriched recording ${i + 1}/${enrichedRecordings.length}:`, {
                             fileName: rec.fileName,
                             startTimeMs: rec.startTimeMs,
                             endTimeMs: rec.endTimeMs,
@@ -794,7 +804,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                         deviceId: this.id,
                         useWebhook: true,
                     });
-                    
+
                     // Log detection classes in the final clip
                     logger.debug(`[NVR VOD] Generated clip: id=${clip.id}, detectionClasses=${clip.detectionClasses?.join(',') || 'none'}`);
                     clips.push(clip);
@@ -802,7 +812,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
                 // Apply count limit if specified
                 const finalClips = count ? clips.slice(0, count) : clips;
-                logger.log(`[NVR VOD] Converted ${finalClips.length} video clips (limit: ${count || 'none'})`);
+                logger.debug(`[NVR VOD] Converted ${finalClips.length} video clips (limit: ${count || 'none'})`);
 
                 return finalClips;
             } else {
@@ -877,7 +887,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     async getVideoClip(videoId: string): Promise<MediaObject> {
         const logger = this.getBaichuanLogger();
         try {
-            const cacheEnabled = this.storageSettings.values.downloadVideoclipsLocally
+            const cacheEnabled = this.storageSettings.values.downloadVideoclipsLocally;
+            const MIN_VIDEO_CACHE_BYTES = 16 * 1024;
 
             // Always check cache first, even if caching is disabled (in case user enabled it before)
             const cachePath = this.getVideoClipCachePath(videoId);
@@ -887,10 +898,19 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             try {
                 await fs.promises.access(cachePath, fs.constants.F_OK);
                 const stats = await fs.promises.stat(cachePath);
-                logger.debug(`[VideoClip] Using cached file: fileId=${videoId}, size=${stats.size} bytes`);
-                // Return cached file as MediaObject
-                const mo = await sdk.mediaManager.createMediaObjectFromUrl(`file://${cachePath}`);
-                return mo;
+                if (stats.size < MIN_VIDEO_CACHE_BYTES) {
+                    logger.warn(`[VideoClip] Cached file too small, deleting and re-downloading: fileId=${videoId}, size=${stats.size} bytes`);
+                    try {
+                        await fs.promises.unlink(cachePath);
+                    } catch (unlinkErr) {
+                        logger.warn(`[VideoClip] Failed to delete small cached file: fileId=${videoId}`, unlinkErr);
+                    }
+                } else {
+                    logger.debug(`[VideoClip] Using cached file: fileId=${videoId}, size=${stats.size} bytes`);
+                    // Return cached file as MediaObject
+                    const mo = await sdk.mediaManager.createMediaObjectFromUrl(`file://${cachePath}`);
+                    return mo;
+                }
             } catch (e) {
                 // File doesn't exist or error accessing it
                 logger.debug(`[VideoClip] Cache miss: fileId=${videoId}, error=${e instanceof Error ? e.message : String(e)}`);
@@ -904,25 +924,71 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 await fs.promises.mkdir(cacheDir, { recursive: true });
             }
 
-            const api = await this.ensureClient();
+            const { clipsSource } = this.storageSettings.values;
+            const useNvr = clipsSource === "NVR" && this.nvrDevice && videoId.includes('/');
 
-            // videoId is the fileId (fileName or id from the recording)
-            const { rtmpVodUrl } = await api.getRecordingPlaybackUrls({
-                fileName: videoId,
-            });
+            // NVR/HUB case: prefer Download endpoint (HTTP) instead of RTMP
+            if (useNvr && this.nvrDevice) {
+                // Reuse centralized logic for NVR VOD URL (Download)
+                const downloadUrl = await this.getVideoClipRtmpUrl(videoId);
 
-            if (!rtmpVodUrl) {
-                throw new Error(`No playback URL found for video ${videoId}`);
+                // If caching is enabled, download via HTTP and cache as file
+                if (cacheEnabled) {
+                    const cachePath = this.getVideoClipCachePath(videoId);
+                    logger.log(`Downloading video clip from NVR to cache: fileId=${videoId}, path=${cachePath}`);
+
+                    await new Promise<void>((resolve, reject) => {
+                        const urlObj = new URL(downloadUrl);
+                        const httpModule = urlObj.protocol === 'https:' ? https : http;
+
+                        const fileStream = fs.createWriteStream(cachePath);
+
+                        const req = httpModule.get(downloadUrl, (res) => {
+                            if (!res.statusCode || res.statusCode >= 400) {
+                                reject(new Error(`NVR download failed: ${res.statusCode} ${res.statusMessage}`));
+                                return;
+                            }
+
+                            res.pipe(fileStream);
+
+                            res.on('error', (err) => {
+                                reject(err);
+                            });
+
+                            fileStream.on('finish', () => {
+                                resolve();
+                            });
+
+                            fileStream.on('error', (err) => {
+                                reject(err);
+                            });
+                        });
+
+                        req.on('error', (err) => {
+                            reject(err);
+                        });
+                    });
+
+                    const mo = await sdk.mediaManager.createMediaObjectFromUrl(`file://${cachePath}`);
+                    return mo;
+                } else {
+                    // Caching disabled: return HTTP Download URL directly
+                    const mo = await sdk.mediaManager.createMediaObjectFromUrl(downloadUrl);
+                    return mo;
+                }
             }
 
-            // If caching is enabled, download and cache the video
+            // Standalone camera (or fallback): reuse getVideoClipRtmpUrl (Baichuan RTMP)
+            const playbackUrl = await this.getVideoClipRtmpUrl(videoId);
+
+            // If caching is enabled, download and cache the video via ffmpeg
             if (cacheEnabled) {
                 const cachePath = this.getVideoClipCachePath(videoId);
 
                 // Download and convert RTMP to MP4 using ffmpeg
                 const ffmpegPath = await sdk.mediaManager.getFFmpegPath();
                 const ffmpegArgs = [
-                    '-i', rtmpVodUrl,
+                    '-i', playbackUrl,
                     '-c', 'copy', // Copy codecs without re-encoding
                     '-f', 'mp4',
                     '-movflags', 'frag_keyframe+empty_moov', // Enable streaming
@@ -944,8 +1010,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
                     ffmpeg.on('close', (code) => {
                         if (code !== 0) {
-                            logger.error(`ffmpeg failed to download video clip: ${errorOutput}`);
-                            reject(new Error(`ffmpeg failed with code ${code}: ${errorOutput}`));
+                            const sanitized = sanitizeFfmpegOutput(errorOutput);
+                            logger.error(`ffmpeg failed to download video clip: ${sanitized}`);
+                            reject(new Error(`ffmpeg failed with code ${code}: ${sanitized}`));
                             return;
                         }
 
@@ -973,8 +1040,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 const mo = await sdk.mediaManager.createMediaObjectFromUrl(`file://${cachePath}`);
                 return mo;
             } else {
-                // Caching disabled, return RTMP URL directly
-                const mo = await sdk.mediaManager.createMediaObjectFromUrl(rtmpVodUrl);
+                // Caching disabled, return playback URL directly (RTMP for standalone camera)
+                const mo = await sdk.mediaManager.createMediaObjectFromUrl(playbackUrl);
                 return mo;
             }
         } catch (e) {
@@ -1008,14 +1075,24 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             // Check cache first
             const cachePath = this.getThumbnailCachePath(thumbnailId);
             const cacheDir = this.getThumbnailCacheDir();
+            const MIN_THUMB_CACHE_BYTES = 512; // 0.5KB, evita file vuoti o quasi
 
             try {
                 await fs.promises.access(cachePath, fs.constants.F_OK);
                 const stats = await fs.promises.stat(cachePath);
-                logger.debug(`[Thumbnail] Using cached: fileId=${thumbnailId}, size=${stats.size} bytes`);
-                // Return cached thumbnail as MediaObject
-                const mo = await sdk.mediaManager.createMediaObjectFromUrl(`file://${cachePath}`);
-                return mo;
+                if (stats.size < MIN_THUMB_CACHE_BYTES) {
+                    logger.warn(`[Thumbnail] Cached thumbnail too small, deleting and regenerating: fileId=${thumbnailId}, size=${stats.size} bytes`);
+                    try {
+                        await fs.promises.unlink(cachePath);
+                    } catch (unlinkErr) {
+                        logger.warn(`[Thumbnail] Failed to delete small cached thumbnail: fileId=${thumbnailId}`, unlinkErr);
+                    }
+                } else {
+                    logger.debug(`[Thumbnail] Using cached: fileId=${thumbnailId}, size=${stats.size} bytes`);
+                    // Return cached thumbnail as MediaObject
+                    const mo = await sdk.mediaManager.createMediaObjectFromUrl(`file://${cachePath}`);
+                    return mo;
+                }
             } catch {
                 // File doesn't exist, need to generate it
                 logger.debug(`[Thumbnail] Cache miss: fileId=${thumbnailId}`);
@@ -1043,7 +1120,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     deviceId: this.id,
                     fileId: thumbnailId,
                     filePath: videoCachePath,
-                    logger: this.getBaichuanLogger(),
+                    device: this,
                 });
             } else {
                 // Get RTMP URL using the appropriate API (NVR or Baichuan)
@@ -1055,7 +1132,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     deviceId: this.id,
                     fileId: thumbnailId,
                     rtmpUrl: rtmpVodUrl,
-                    logger: this.getBaichuanLogger(),
+                    device: this,
                 });
             }
 
@@ -1088,37 +1165,31 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         const useNvr = clipsSource === "NVR" && this.nvrDevice && fileId.includes('/');
 
         if (useNvr) {
-            logger.log(`[getVideoClipRtmpUrl] Using NVR API for fileId="${fileId}", forThumbnail=${forThumbnail}`);
+            logger.debug(`[getVideoClipRtmpUrl] Using NVR API for fileId="${fileId}", forThumbnail=${forThumbnail}`);
             const nvrApi = await this.nvrDevice.ensureClient();
             const channel = this.storageSettings.values.rtspChannel ?? 0;
-            
-            // For both thumbnails and video streaming, try Download first
-            // Download might return MP4 format which is better supported than FLV from Playback
-            const requestTypes = ["Download", "Playback"];
-            
-            for (const requestType of requestTypes) {
-                try {
-                    logger.log(`[getVideoClipRtmpUrl] Trying getVodUrl with ${requestType} requestType...`);
-                    const url = await nvrApi.getVodUrl(fileId, channel, {
-                        requestType: requestType as "Playback" | "Download",
-                        streamType: "main",
-                    });
-                    logger.log(`[getVideoClipRtmpUrl] NVR getVodUrl ${requestType} URL received: url="${url || 'none'}"`);
-                    if (url) return url;
-                } catch (e: any) {
-                    logger.debug(`[getVideoClipRtmpUrl] getVodUrl ${requestType} failed: ${e.message}`);
-                }
+
+            try {
+                logger.debug(`[getVideoClipRtmpUrl] Trying getVodUrl with Download requestType...`);
+                const url = await nvrApi.getVodUrl(fileId, channel, {
+                    requestType: "Download",
+                    streamType: "main",
+                });
+                logger.debug(`[getVideoClipRtmpUrl] NVR getVodUrl Download URL received: url="${url || 'none'}"`);
+                if (url) return url;
+            } catch (e: any) {
+                logger.error(`[getVideoClipRtmpUrl] getVodUrl Download failed: ${e.message}`);
             }
-            
+
             throw new Error(`No streaming URL found from NVR for file ${fileId} after trying Playback and Download methods`);
         } else {
             // Camera standalone: DEVE usare RTMP da Baichuan API
-            logger.log(`[getVideoClipRtmpUrl] Getting RTMP URL from Baichuan API for fileId="${fileId}" (camera standalone)`);
+            logger.debug(`[getVideoClipRtmpUrl] Getting RTMP URL from Baichuan API for fileId="${fileId}" (camera standalone)`);
             const api = await this.ensureClient();
             const result = await api.getRecordingPlaybackUrls({
                 fileName: fileId,
             });
-            logger.log(`[getVideoClipRtmpUrl] Baichuan RTMP URL received: rtmpVodUrl="${result.rtmpVodUrl || 'none'}"`);
+            logger.debug(`[getVideoClipRtmpUrl] Baichuan RTMP URL received: rtmpVodUrl="${result.rtmpVodUrl || 'none'}"`);
             if (!result.rtmpVodUrl) {
                 throw new Error(`No RTMP URL found from Baichuan API for file ${fileId}`);
             }
@@ -1181,21 +1252,23 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         this.videoClipsAutoLoadInProgress = true;
 
         try {
-            logger.log('Auto-loading today\'s video clips and thumbnails...');
+            const daysToPreload = this.storageSettings.values.videoclipsDaysToPreload ?? 1;
+            logger.log(`Auto-loading video clips and thumbnails for the last ${daysToPreload} day(s)...`);
 
-            // Get today's date range (start of today to now)
+            // Get date range (start of N days ago to now)
             const now = new Date();
-            const startOfToday = new Date(now);
-            startOfToday.setUTCHours(0, 0, 0, 0);
-            startOfToday.setUTCMinutes(0, 0, 0);
+            const startDate = new Date(now);
+            startDate.setUTCDate(startDate.getUTCDate() - (daysToPreload - 1));
+            startDate.setUTCHours(0, 0, 0, 0);
+            startDate.setUTCMinutes(0, 0, 0);
 
-            // Fetch today's video clips
+            // Fetch video clips for the specified number of days
             const clips = await this.getVideoClips({
-                startTime: startOfToday.getTime(),
+                startTime: startDate.getTime(),
                 endTime: now.getTime(),
             });
 
-            logger.log(`Found ${clips.length} video clips for today`);
+            logger.log(`Found ${clips.length} video clips for the last ${daysToPreload} day(s)`);
 
             const downloadVideoclipsLocally = this.storageSettings.values.downloadVideoclipsLocally ?? false;
 
@@ -2213,11 +2286,11 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
             let supportedStreams: ReolinkSupportedStream[] = [];
             // Homehub RTMP is not efficient, crashes, offers native streams to not overload the hub
-            if (this.nvrDevice && this.nvrDevice.info.model === 'HOMEHUB') {
-                supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
-            } else {
-                supportedStreams = [...rtspStreams, ...rtmpStreams, ...nativeStreams];
-            }
+            // if (this.nvrDevice && this.nvrDevice.info.model === 'HOMEHUB') {
+            supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
+            // } else {
+            //     supportedStreams = [...rtspStreams, ...rtmpStreams, ...nativeStreams];
+            // }
 
             for (const supportedStream of supportedStreams) {
                 const { id, metadata, url, name, container } = supportedStream;
