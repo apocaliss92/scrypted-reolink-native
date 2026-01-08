@@ -45,8 +45,8 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             onPut: async () => await this.reinit()
         },
         diagnosticsRun: {
-            subgroup: 'Diagnostics',
-            title: 'Run NVR Diagnostics',
+            subgroup: 'Advanced',
+            title: 'Run Diagnostics',
             description: 'Collect NVR diagnostics and display results in logs.',
             type: 'button',
             immediate: true,
@@ -324,15 +324,13 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         logger.log(`Starting NVR diagnostics...`);
 
         try {
-            const cgiApi = await this.ensureClient();
+            const cgiApi = await this.ensureBaichuanClient();
 
             const diagnostics = await cgiApi.collectNvrDiagnostics({
                 logger: this.console,
             });
 
             logger.log(`NVR diagnostics completed successfully.`);
-
-            cgiApi.printNvrDiagnostics(diagnostics, this.console);
         } catch (e) {
             logger.error('Failed to run NVR diagnostics', e);
             throw e;

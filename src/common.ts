@@ -1370,12 +1370,17 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         try {
             const api = await this.ensureClient();
+            const { ipAddress, username, password } = this.storageSettings.values;
 
             const result = await api.runAllDiagnosticsConsecutively({
+                host: ipAddress,
+                username,
+                password,
                 outDir: outputPath,
                 channel,
                 durationSeconds,
                 selection,
+                api,
             });
 
             logger.log(`Diagnostics completed successfully. Output directory: ${result.runDir}`);
