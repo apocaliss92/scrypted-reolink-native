@@ -347,8 +347,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
      */
     async generateThumbnail(request: ThumbnailRequestInput): Promise<MediaObject> {
         const queueLength = this.thumbnailQueue.length;
-        const isProcessing = this.thumbnailProcessing;
-        request.logger.log(`[Thumbnail] Adding to queue: fileId=${request.fileId}, queueLength=${queueLength}, processing=${isProcessing}`);
+        request.logger.log(`[Thumbnail] Download start: fileId=${request.fileId}, queuePosition=${queueLength + 1}`);
 
         return new Promise((resolve, reject) => {
             this.thumbnailQueue.push({
@@ -376,6 +375,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
             try {
                 const thumbnail = await extractThumbnailFromVideo(request);
+                logger.log(`[Thumbnail] OK: fileId=${request.fileId}`);
                 request.resolve(thumbnail);
             } catch (error) {
                 logger.error(`[Thumbnail] Error: fileId=${request.fileId}`, error);

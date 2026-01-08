@@ -1,6 +1,9 @@
 import type { DeviceCapabilities, EnrichedRecordingFile, ParsedRecordingFileName, RecordingFile, ReolinkBaichuanApi, ReolinkDeviceInfo, VodFile, VodSearchResponse } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { DeviceBase, HttpRequest, HttpResponse, MediaObject, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, VideoClip, VideoClips } from "@scrypted/sdk";
 import { spawn } from "node:child_process";
+import { Readable } from "stream";
+import http from "http";
+import https from "https";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
@@ -173,11 +176,11 @@ export async function recordingFileToVideoClip(
     let videoHref: string | undefined = providedVideoHref;
     let thumbnailHref: string | undefined;
 
-    logger?.log(`[recordingFileToVideoClip] URL generation: useWebhook=${useWebhook}, hasPlugin=${!!plugin}, deviceId=${deviceId}, providedVideoHref=${providedVideoHref || 'none'}, hasApi=${!!api}`);
+    logger?.debug(`[recordingFileToVideoClip] URL generation: useWebhook=${useWebhook}, hasPlugin=${!!plugin}, deviceId=${deviceId}, providedVideoHref=${providedVideoHref || 'none'}, hasApi=${!!api}`);
 
     // If webhook is enabled, generate webhook URLs
     if (useWebhook && plugin && deviceId) {
-        logger?.log(`[recordingFileToVideoClip] Generating webhook URLs for fileId=${id}`);
+        logger?.debug(`[recordingFileToVideoClip] Generating webhook URLs for fileId=${id}`);
         try {
             const { videoUrl, thumbnailUrl } = await getVideoClipWebhookUrls({
                 deviceId,
@@ -186,31 +189,31 @@ export async function recordingFileToVideoClip(
             });
             videoHref = videoUrl;
             thumbnailHref = thumbnailUrl;
-            logger?.log(`[recordingFileToVideoClip] Webhook URLs generated successfully: videoHref="${videoHref}", thumbnailHref="${thumbnailHref}"`);
+            logger?.debug(`[recordingFileToVideoClip] Webhook URLs generated successfully: videoHref="${videoHref}", thumbnailHref="${thumbnailHref}"`);
         } catch (e) {
             logger?.error(`[recordingFileToVideoClip] Failed to generate webhook URLs for fileId=${id}:`, e);
         }
     } else if (!videoHref && api) {
         // Fallback to direct RTMP URL if webhook is not used
-        logger?.log(`[recordingFileToVideoClip] Fetching RTMP playback URL for fileName=${rec.fileName}`);
+        logger?.debug(`[recordingFileToVideoClip] Fetching RTMP playback URL for fileName=${rec.fileName}`);
         try {
             const { rtmpVodUrl } = await api.getRecordingPlaybackUrls({
                 fileName: rec.fileName,
             });
             videoHref = rtmpVodUrl;
-            logger?.log(`[recordingFileToVideoClip] RTMP URL fetched successfully: videoHref="${videoHref}"`);
+            logger?.debug(`[recordingFileToVideoClip] RTMP URL fetched successfully: videoHref="${videoHref}"`);
         } catch (e) {
             logger?.debug(`[recordingFileToVideoClip] Failed to build playback URL for recording fileName=${rec.fileName}:`, e);
         }
     } else {
-        logger?.log(`[recordingFileToVideoClip] No URL generation: useWebhook=${useWebhook}, hasPlugin=${!!plugin}, deviceId=${deviceId}, providedVideoHref=${providedVideoHref || 'none'}, hasApi=${!!api}`);
+        logger?.debug(`[recordingFileToVideoClip] No URL generation: useWebhook=${useWebhook}, hasPlugin=${!!plugin}, deviceId=${deviceId}, providedVideoHref=${providedVideoHref || 'none'}, hasApi=${!!api}`);
     }
 
     const description = ('name' in rec && typeof rec.name === 'string' && rec.name) ? rec.name : (rec.fileName ?? rec.id ?? '');
 
     // Build detectionClasses from flags or recordType
     const detectionClasses: string[] = [];
-    
+
     // Check for EnrichedRecordingFile flags first (most accurate)
     let hasAnyDetection = false;
     if ('hasPerson' in rec && rec.hasPerson) {
@@ -241,7 +244,7 @@ export async function recordingFileToVideoClip(
         detectionClasses.push('Package');
         hasAnyDetection = true;
     }
-    
+
     // Log detection flags for debugging
     if (logger) {
         const flags = {
@@ -254,12 +257,10 @@ export async function recordingFileToVideoClip(
             hasPackage: 'hasPackage' in rec ? rec.hasPackage : undefined,
             recordType: rec.recordType || 'none',
         };
-        logger.debug(`[recordingFileToVideoClip] Detection flags for ${rec.fileName}: ${JSON.stringify(flags)}`);
     }
 
     // Fallback: parse recordType string if flags are not available
     if (!hasAnyDetection && rec.recordType) {
-        logger?.debug(`[recordingFileToVideoClip] No flags found, parsing recordType: ${rec.recordType}`);
         const recordTypeLower = rec.recordType.toLowerCase();
         if (recordTypeLower.includes('people') || recordTypeLower.includes('person')) {
             detectionClasses.push('Person');
@@ -283,16 +284,10 @@ export async function recordingFileToVideoClip(
             detectionClasses.push('Package');
         }
     }
-    
+
     // Always include Motion if no other detections found
     if (detectionClasses.length === 0) {
         detectionClasses.push('Motion');
-        logger?.debug(`[recordingFileToVideoClip] No detections found, defaulting to Motion`);
-    }
-    
-    // Log final detection classes
-    if (logger) {
-        logger.debug(`[recordingFileToVideoClip] Final detectionClasses for ${rec.fileName}: ${detectionClasses.join(', ')}`);
     }
 
     const resources = videoHref || thumbnailHref
@@ -302,7 +297,6 @@ export async function recordingFileToVideoClip(
         }
         : undefined;
 
-    logger?.log(`[recordingFileToVideoClip] Final VideoClip resources: video.href="${resources?.video?.href || 'none'}", thumbnail.href="${resources?.thumbnail?.href || 'none'}"`);
 
     return {
         id,
@@ -325,7 +319,7 @@ export async function getVideoClipWebhookUrls(props: {
 }): Promise<{ videoUrl: string; thumbnailUrl: string }> {
     const { deviceId, fileId, plugin } = props;
 
-    plugin.console.log(`[getVideoClipWebhookUrls] Starting URL generation: deviceId=${deviceId}, fileId=${fileId}`);
+    plugin.console.debug(`[getVideoClipWebhookUrls] Starting URL generation: deviceId=${deviceId}, fileId=${fileId}`);
 
     try {
         let endpoint: string;
@@ -333,13 +327,13 @@ export async function getVideoClipWebhookUrls(props: {
         try {
             endpoint = await sdk.endpointManager.getCloudEndpoint(undefined, { public: true });
             endpointSource = 'cloud';
-            plugin.console.log(`[getVideoClipWebhookUrls] Using cloud endpoint: ${endpoint}`);
+            plugin.console.debug(`[getVideoClipWebhookUrls] Using cloud endpoint: ${endpoint}`);
         } catch (e) {
             // Fallback to local endpoint if cloud is not available (e.g., not logged in)
-            plugin.console.log(`[getVideoClipWebhookUrls] Cloud endpoint not available, using local endpoint: ${e instanceof Error ? e.message : String(e)}`);
+            plugin.console.debug(`[getVideoClipWebhookUrls] Cloud endpoint not available, using local endpoint: ${e instanceof Error ? e.message : String(e)}`);
             endpoint = await sdk.endpointManager.getLocalEndpoint(undefined, { public: true });
             endpointSource = 'local';
-            plugin.console.log(`[getVideoClipWebhookUrls] Using local endpoint: ${endpoint}`);
+            plugin.console.debug(`[getVideoClipWebhookUrls] Using local endpoint: ${endpoint}`);
         }
 
         const encodedDeviceId = encodeURIComponent(deviceId);
@@ -347,7 +341,7 @@ export async function getVideoClipWebhookUrls(props: {
         const cleanFileId = fileId.startsWith('/') ? fileId.substring(1) : fileId;
         const encodedFileId = encodeURIComponent(cleanFileId);
 
-        plugin.console.log(`[getVideoClipWebhookUrls] Encoding: deviceId="${deviceId}" -> "${encodedDeviceId}", fileId="${fileId}" -> cleanFileId="${cleanFileId}" -> encodedFileId="${encodedFileId}"`);
+        plugin.console.debug(`[getVideoClipWebhookUrls] Encoding: deviceId="${deviceId}" -> "${encodedDeviceId}", fileId="${fileId}" -> cleanFileId="${cleanFileId}" -> encodedFileId="${encodedFileId}"`);
 
         // Parse endpoint URL to extract query parameters (for authentication)
         const endpointUrl = new URL(endpoint);
@@ -355,19 +349,19 @@ export async function getVideoClipWebhookUrls(props: {
         const queryParams = endpointUrl.search;
         // Remove query parameters from the base endpoint URL
         endpointUrl.search = '';
-        
-        plugin.console.log(`[getVideoClipWebhookUrls] Parsed endpoint URL: base="${endpointUrl.toString()}", queryParams="${queryParams}"`);
-        
+
+        plugin.console.debug(`[getVideoClipWebhookUrls] Parsed endpoint URL: base="${endpointUrl.toString()}", queryParams="${queryParams}"`);
+
         // Ensure endpoint has trailing slash
         const normalizedEndpoint = endpointUrl.toString().endsWith('/') ? endpointUrl.toString() : `${endpointUrl.toString()}/`;
 
-        plugin.console.log(`[getVideoClipWebhookUrls] Normalized endpoint: "${normalizedEndpoint}"`);
+        plugin.console.debug(`[getVideoClipWebhookUrls] Normalized endpoint: "${normalizedEndpoint}"`);
 
         // Build webhook URLs and append query parameters at the end
         const videoUrl = `${normalizedEndpoint}webhook/video/${encodedDeviceId}/${encodedFileId}${queryParams}`;
         const thumbnailUrl = `${normalizedEndpoint}webhook/thumbnail/${encodedDeviceId}/${encodedFileId}${queryParams}`;
 
-        plugin.console.log(`[getVideoClipWebhookUrls] Generated URLs: videoUrl="${videoUrl}", thumbnailUrl="${thumbnailUrl}"`);
+        plugin.console.debug(`[getVideoClipWebhookUrls] Generated URLs: videoUrl="${videoUrl}", thumbnailUrl="${thumbnailUrl}"`);
 
         return { videoUrl, thumbnailUrl };
     } catch (e) {
@@ -387,7 +381,7 @@ export async function extractThumbnailFromVideo(props: {
     logger: Console;
 }): Promise<MediaObject> {
     const { rtmpUrl, filePath, fileId, deviceId, logger } = props;
-    
+
     // Use file path if available, otherwise use RTMP URL
     const inputSource = filePath || rtmpUrl;
     if (!inputSource) {
@@ -395,89 +389,17 @@ export async function extractThumbnailFromVideo(props: {
     }
 
     try {
-        // Get ffmpeg path
-        const ffmpegPath = await sdk.mediaManager.getFFmpegPath();
-
-        // Build ffmpeg args to extract a frame at 2 seconds
-        const ffmpegArgs = [
-            '-ss', '2', // Seek to 2 seconds
-            '-i', inputSource,
-            '-vframes', '1', // Extract only 1 frame
-            '-q:v', '2', // High quality JPEG
-            '-f', 'image2', // Output format
-            'pipe:1', // Output to stdout
-        ];
-
-        return new Promise<MediaObject>((resolve, reject) => {
-            const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
-                stdio: ['ignore', 'pipe', 'pipe'],
-            });
-
-            const chunks: Buffer[] = [];
-            let errorOutput = '';
-
-            ffmpeg.stdout.on('data', (chunk: Buffer) => {
-                chunks.push(chunk);
-            });
-
-            ffmpeg.stderr.on('data', (chunk: Buffer) => {
-                errorOutput += chunk.toString();
-            });
-
-            let resolved = false;
-
-            ffmpeg.on('close', async (code) => {
-                if (resolved) return;
-                resolved = true;
-
-                if (code !== 0) {
-                    logger.error(`[Thumbnail] Error: fileId=${fileId}`, new Error(`ffmpeg failed with code ${code}: ${errorOutput}`));
-                    reject(new Error(`ffmpeg failed with code ${code}: ${errorOutput}`));
-                    return;
-                }
-
-                try {
-                    const imageBuffer = Buffer.concat(chunks);
-                    if (imageBuffer.length === 0) {
-                        logger.error(`[Thumbnail] Error: fileId=${fileId}`, new Error('No image data received from ffmpeg'));
-                        reject(new Error('No image data received from ffmpeg'));
-                        return;
-                    }
-
-                    const mo = await sdk.mediaManager.createMediaObject(imageBuffer, 'image/jpeg');
-                    logger.log(`[Thumbnail] Completed: fileId=${fileId}, size=${imageBuffer.length} bytes`);
-                    resolve(mo);
-                } catch (e) {
-                    logger.error(`[Thumbnail] Error: fileId=${fileId}`, e);
-                    reject(e);
-                }
-            });
-
-            ffmpeg.on('error', (error) => {
-                if (resolved) return;
-                resolved = true;
-                logger.error(`[Thumbnail] Error: fileId=${fileId}`, error);
-                reject(error);
-            });
-
-            // Timeout after 30 seconds
-            const timeout = setTimeout(() => {
-                if (resolved) return;
-                resolved = true;
-                try {
-                    ffmpeg.kill('SIGKILL');
-                } catch (e) {
-                    // Ignore
-                }
-                reject(new Error('Thumbnail extraction timeout'));
-            }, 30000);
-
-            ffmpeg.on('close', () => {
-                clearTimeout(timeout);
-            });
+        // Use createFFmpegMediaObject which handles codec detection better
+        // For Download URLs from NVR, they might return only a short segment, so use 1 second instead of 5
+        const mo = await sdk.mediaManager.createFFmpegMediaObject({
+            inputArguments: [
+                '-ss', '00:00:01', // Seek to 1 second (safer for short segments from NVR Download URLs)
+                '-i', inputSource,
+            ],
         });
+        return mo;
     } catch (e) {
-        logger.error(`[Thumbnail] Error: fileId=${fileId}`, e);
+        // Error already logged in main.ts
         throw e;
     }
 }
@@ -491,7 +413,7 @@ function getVideoClipCachePath(deviceId: string, fileId: string): string {
     const hash = crypto.createHash('md5').update(fileId).digest('hex');
     // Keep original extension if present, otherwise use .mp4
     const ext = fileId.includes('.') ? path.extname(fileId) : '.mp4';
-    const cacheDir = path.join(pluginVolume, 'snapshots', deviceId);
+    const cacheDir = path.join(pluginVolume, 'videoclips', deviceId);
     return path.join(cacheDir, `${hash}${ext}`);
 }
 
@@ -558,27 +480,230 @@ export async function handleVideoClipRequest(props: {
         }
     } catch (e) {
         // File not cached, need to proxy RTMP stream
-        logger.log(`Cache miss, proxying RTMP stream: fileId=${fileId}`);
+        logger.log(`[VideoClip] Stream start: fileId=${fileId}`);
 
         // Get RTMP URL using the appropriate API (NVR or Baichuan)
         let rtmpVodUrl: string | undefined;
         try {
             rtmpVodUrl = await device.getVideoClipRtmpUrl(fileId);
         } catch (e2) {
-            logger.error(`[VideoClip] Failed to get RTMP URL: fileId=${fileId}`, e2);
+            logger.error(`[VideoClip] Stream error: fileId=${fileId}`, e2);
             response.send('Failed to get RTMP playback URL', { code: 500 });
             return;
         }
 
         if (!rtmpVodUrl) {
-            logger.error(`No RTMP URL found for video: fileId=${fileId}`);
+            logger.error(`[VideoClip] Stream error: fileId=${fileId} - No URL found`);
             response.send('No RTMP playback URL found for video', { code: 404 });
             return;
         }
 
-        // logger.log(`Got RTMP URL for proxy: fileId=${fileId}`);
+        // Check if URL is HTTP (Playback/Download) or RTMP
+        const isHttpUrl = rtmpVodUrl.startsWith('http://') || rtmpVodUrl.startsWith('https://');
 
-        // Use ffmpeg to proxy the RTMP stream
+        if (isHttpUrl) {
+            // For HTTP URLs (Playback/Download from NVR), do direct HTTP proxy with ranged headers support
+            logger.log(`Proxying HTTP URL directly: fileId=${fileId}, url=${rtmpVodUrl}`);
+
+            const sendVideo = async () => {
+                // Pre-fetch ffmpeg path in case we need it for FLV conversion
+                const ffmpegPathPromise = sdk.mediaManager.getFFmpegPath();
+                
+                return new Promise<void>(async (resolve, reject) => {
+                    const urlObj = new URL(rtmpVodUrl);
+                    const httpModule = urlObj.protocol === 'https:' ? https : http;
+
+                    // Filter and prepare headers (remove host, connection, etc. that shouldn't be forwarded)
+                    const requestHeaders: Record<string, string> = {};
+                    if (request.headers.range) {
+                        requestHeaders['Range'] = request.headers.range;
+                    }
+                    // Add other headers that might be needed
+                    if (request.headers['user-agent']) {
+                        requestHeaders['User-Agent'] = request.headers['user-agent'];
+                    }
+
+                    const options = {
+                        hostname: urlObj.hostname,
+                        port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+                        path: urlObj.pathname + urlObj.search,
+                        method: 'GET',
+                        headers: requestHeaders,
+                    };
+
+                    logger.log(`Starting HTTP request: ${rtmpVodUrl}, headers: ${JSON.stringify(requestHeaders)}`);
+
+                    httpModule.get(options, async (httpResponse) => {
+                        if (httpResponse.statusCode && httpResponse.statusCode >= 400) {
+                            logger.error(`HTTP error: status=${httpResponse.statusCode}, message=${httpResponse.statusMessage}`);
+                            reject(new Error(`Error loading the video: ${httpResponse.statusCode} - ${httpResponse.statusMessage}`));
+                            return;
+                        }
+
+                        let contentType = httpResponse.headers['content-type'] || 'video/mp4';
+                        const contentLength = httpResponse.headers['content-length'];
+                        const contentRange = httpResponse.headers['content-range'];
+                        const acceptRanges = httpResponse.headers['accept-ranges'] || 'bytes';
+
+                        // Check if we need to convert FLV to MP4
+                        const isFlv = typeof contentType === 'string' && (contentType === 'video/x-flv' || contentType === 'video/flv');
+                        
+                        if (isFlv) {
+                            logger.log(`Content-Type is FLV (${contentType}), will convert to MP4 using ffmpeg`);
+                        }
+
+                        const responseHeaders: Record<string, string> = {
+                            'Content-Type': typeof contentType === 'string' ? contentType : 'video/mp4',
+                            'Accept-Ranges': typeof acceptRanges === 'string' ? acceptRanges : 'bytes',
+                            'Cache-Control': 'no-cache',
+                        };
+
+                        if (contentLength) {
+                            responseHeaders['Content-Length'] = typeof contentLength === 'string' ? contentLength : String(contentLength);
+                        }
+
+                        if (contentRange) {
+                            responseHeaders['Content-Range'] = typeof contentRange === 'string' ? contentRange : String(contentRange);
+                        }
+
+                        const statusCode = httpResponse.statusCode || 200;
+
+                        logger.log(`HTTP response received: status=${statusCode}, contentType=${contentType}, contentLength=${contentLength || 'unknown'}`);
+
+                        try {
+                        if (isFlv) {
+                            // Convert FLV to MP4 using ffmpeg
+                                const ffmpegPath = await ffmpegPathPromise;
+                                // Re-encode instead of copy because FLV codec might not be supported
+                                const ffmpegArgs: string[] = [
+                                    '-i', 'pipe:0', // Read from stdin (httpResponse)
+                                    '-c:v', 'libx264', // Re-encode video to H.264
+                                    '-preset', 'ultrafast', // Fast encoding for streaming
+                                    '-tune', 'zerolatency', // Low latency
+                                    '-c:a', 'aac', // Re-encode audio to AAC
+                                    '-f', 'mp4',
+                                    '-movflags', 'frag_keyframe+empty_moov', // Enable streaming
+                                    'pipe:1', // Output to stdout
+                                ];
+
+                                const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
+                                    stdio: ['pipe', 'pipe', 'pipe'],
+                                });
+
+                                let ffmpegError = '';
+                                ffmpeg.stderr.on('data', (chunk: Buffer) => {
+                                    ffmpegError += chunk.toString();
+                                });
+
+                                // Pipe httpResponse to ffmpeg stdin
+                                httpResponse.pipe(ffmpeg.stdin);
+
+                                ffmpeg.stdin.on('error', (err) => {
+                                    // Ignore EPIPE errors when ffmpeg closes
+                                    if ((err as any).code !== 'EPIPE') {
+                                        logger.error(`FFmpeg stdin error: fileId=${fileId}`, err);
+                                    }
+                                });
+
+                                httpResponse.on('error', (err) => {
+                                    logger.error(`HTTP response error before ffmpeg: fileId=${fileId}`, err);
+                                    try {
+                                        ffmpeg.kill('SIGKILL');
+                                    } catch (e) {
+                                        // Ignore
+                                    }
+                                });
+
+                                let streamStarted = false;
+
+                                // Stream ffmpeg output
+                                response.sendStream((async function* () {
+                                    try {
+                                        for await (const chunk of ffmpeg.stdout) {
+                                            if (!streamStarted) {
+                                                streamStarted = true;
+                                            }
+                                            yield chunk;
+                                        }
+                                    } catch (e) {
+                                        logger.error(`Error streaming ffmpeg output: fileId=${fileId}`, e);
+                                        throw e;
+                                    } finally {
+                                        // Clean up ffmpeg process
+                                        try {
+                                            ffmpeg.kill('SIGKILL');
+                                        } catch (e) {
+                                            // Ignore
+                                        }
+                                    }
+                                })(), {
+                                    code: 200,
+                                    headers: {
+                                        'Content-Type': 'video/mp4',
+                                        'Accept-Ranges': 'bytes',
+                                        'Cache-Control': 'no-cache',
+                                    },
+                                });
+
+                                // Handle ffmpeg errors
+                                ffmpeg.on('close', (code) => {
+                                    if (code !== 0 && code !== null && !streamStarted) {
+                                        logger.error(`FFmpeg conversion failed: fileId=${fileId}, code=${code}, error=${ffmpegError}`);
+                                        reject(new Error(`FFmpeg conversion failed: ${code}`));
+                                    } else {
+                                        logger.log(`FFmpeg conversion completed: fileId=${fileId}, code=${code}`);
+                                        resolve();
+                                    }
+                                });
+
+                                ffmpeg.on('error', (error) => {
+                                    logger.error(`FFmpeg spawn error: fileId=${fileId}`, error);
+                                    reject(error);
+                                });
+
+                                logger.log(`FFmpeg conversion started: fileId=${fileId}`);
+                            } else {
+                                // Direct proxy for non-FLV content (should be MP4 already)
+                                // Stream directly without buffering - yield chunks as they arrive
+                                response.sendStream((async function* () {
+                                    try {
+                                        for await (const chunk of Readable.from(httpResponse)) {
+                                            yield chunk;
+                                        }
+                                        logger.log(`[VideoClip] Stream end: fileId=${fileId}`);
+                                    } catch (streamErr) {
+                                        logger.error(`[VideoClip] Stream error: fileId=${fileId}`, streamErr);
+                                        throw streamErr;
+                                    }
+                                })(), {
+                                    code: statusCode,
+                                    headers: responseHeaders,
+                                });
+
+                                resolve();
+                            }
+                        } catch (err) {
+                            logger.error(`Error sending stream: fileId=${fileId}`, err);
+                            reject(err);
+                        }
+                    }).on('error', (e) => {
+                        logger.error(`Error fetching videoclip: fileId=${fileId}`, e);
+                        reject(e);
+                    });
+                });
+            };
+
+            try {
+                await sendVideo();
+                return;
+            } catch (e) {
+                logger.error(`HTTP proxy error: fileId=${fileId}`, e);
+                response.send('Failed to proxy HTTP stream', { code: 500 });
+                return;
+            }
+        }
+
+        // For RTMP URLs (camera standalone), use ffmpeg
         const ffmpegPath = await sdk.mediaManager.getFFmpegPath();
         const ffmpegArgs: string[] = [
             '-i', rtmpVodUrl,
@@ -608,8 +733,9 @@ export async function handleVideoClipRequest(props: {
                     }
                     yield chunk;
                 }
+                logger.log(`[VideoClip] Stream end: fileId=${fileId}`);
             } catch (e) {
-                logger.error(`Error streaming video: fileId=${fileId}`, e);
+                logger.error(`[VideoClip] Stream error: fileId=${fileId}`, e);
                 throw e;
             } finally {
                 // Clean up ffmpeg process
@@ -649,16 +775,16 @@ export async function handleVideoClipRequest(props: {
  */
 function parseRecordTypeToDetectionClasses(recordType?: string): string[] {
     const detectionClasses: string[] = [];
-    
+
     if (!recordType) {
         return ['Motion']; // Default to Motion if no type specified
     }
-    
+
     // Split by comma or whitespace and process each type
     const types = recordType.toLowerCase().split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
-    
+
     let hasMotion = false;
-    
+
     for (const t of types) {
         if (t === "people" || t === "person") {
             detectionClasses.push('Person');
@@ -676,12 +802,12 @@ function parseRecordTypeToDetectionClasses(recordType?: string): string[] {
             detectionClasses.push('Package');
         }
     }
-    
+
     // Always include Motion as base (if not already added or if no other detections)
     if (hasMotion || detectionClasses.length === 0) {
         detectionClasses.unshift('Motion');
     }
-    
+
     return detectionClasses;
 }
 
@@ -691,11 +817,11 @@ function parseRecordTypeToDetectionClasses(recordType?: string): string[] {
 function parseFilenameFlagsToDetectionClasses(parsed?: ParsedRecordingFileName): string[] {
     const detectionClasses: string[] = [];
     const flags = parsed?.flags;
-    
+
     if (!flags) {
         return [];
     }
-    
+
     // Extract detection types from hex flags (same logic as enrichVodFile)
     if (flags.aiPerson) {
         detectionClasses.push('Person');
@@ -718,7 +844,7 @@ function parseFilenameFlagsToDetectionClasses(parsed?: ParsedRecordingFileName):
     if (flags.package) {
         detectionClasses.push('Package');
     }
-    
+
     return detectionClasses;
 }
 
@@ -772,7 +898,7 @@ export async function vodSearchResultsToVideoClips(
             try {
                 // Parse filename to extract flags (like enrichVodFile does)
                 const parsed = parseRecordingFileName(file.name);
-                
+
                 // Get times from parsed filename or from StartTime/EndTime
                 // Camera times in StartTime/EndTime are in local timezone (not UTC)
                 // Use local time constructor to preserve the timezone
@@ -792,24 +918,24 @@ export async function vodSearchResultsToVideoClips(
                     file.EndTime.min,
                     file.EndTime.sec
                 );
-                
+
                 const duration = fileEnd.getTime() - fileStart.getTime();
                 const fileName = file.name || '';
 
                 // Extract detection classes from both filename flags (hex) and file.type
                 const filenameFlags = parseFilenameFlagsToDetectionClasses(parsed);
                 const typeFlags = parseRecordTypeToDetectionClasses(file.type);
-                
+
                 // Debug: log file.type to see what we're parsing
                 if (logger && file.type) {
                     logger.debug(`[VOD] Parsing file.type="${file.type}" for file=${fileName}, filenameFlags=${filenameFlags.join(',')}, typeFlags=${typeFlags.join(',')}`);
                 }
-                
+
                 // Merge both sources (OR them together, like enrichVodFile does)
                 // Remove duplicates and ensure Motion is included if any detection is found
                 const allDetections = [...filenameFlags, ...typeFlags];
                 const detectionClasses = [...new Set(allDetections)];
-                
+
                 // If we have detections from filename flags, use those (they're more accurate)
                 // Otherwise use type flags, or default to Motion
                 if (detectionClasses.length === 0) {

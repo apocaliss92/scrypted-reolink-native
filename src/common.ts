@@ -1047,7 +1047,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 });
             } else {
                 // Get RTMP URL using the appropriate API (NVR or Baichuan)
-                const rtmpVodUrl = await this.getVideoClipRtmpUrl(thumbnailId);
+                // Use forThumbnail=true to prefer Download over Playback (better for ffmpeg)
+                const rtmpVodUrl = await this.getVideoClipRtmpUrl(thumbnailId, true);
 
                 // Use the plugin's thumbnail generation queue with RTMP URL
                 thumbnail = await this.plugin.generateThumbnail({
@@ -1078,68 +1079,41 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     /**
      * Get RTMP URL for a video clip file
      * Handles both NVR source (full path) and Device source (filename only)
+     * @param fileId - The file ID or full path
+     * @param forThumbnail - If true, prefer Download over Playback (better for ffmpeg thumbnail extraction)
      */
-    async getVideoClipRtmpUrl(fileId: string): Promise<string> {
+    async getVideoClipRtmpUrl(fileId: string, forThumbnail: boolean = false): Promise<string> {
         const logger = this.getBaichuanLogger();
         const { clipsSource } = this.storageSettings.values;
         const useNvr = clipsSource === "NVR" && this.nvrDevice && fileId.includes('/');
 
         if (useNvr) {
-            // Use NVR API to get streaming URL from full file path
-            logger.log(`[getVideoClipRtmpUrl] Using NVR API for fileId="${fileId}"`);
+            logger.log(`[getVideoClipRtmpUrl] Using NVR API for fileId="${fileId}", forThumbnail=${forThumbnail}`);
             const nvrApi = await this.nvrDevice.ensureClient();
             const channel = this.storageSettings.values.rtspChannel ?? 0;
             
-            // Try getVodUrl with FLV first (as used in tests), then getVodStreamUrl with FLV, then Playback, then RTMP
-            let url: string | undefined;
+            // For both thumbnails and video streaming, try Download first
+            // Download might return MP4 format which is better supported than FLV from Playback
+            const requestTypes = ["Download", "Playback"];
             
-            try {
-                logger.log(`[getVideoClipRtmpUrl] Trying getVodUrl with FLV requestType...`);
-                url = await nvrApi.getVodUrl(fileId, channel, {
-                    requestType: "FLV",
-                    streamType: "main",
-                });
-                logger.log(`[getVideoClipRtmpUrl] NVR getVodUrl FLV URL received: url="${url || 'none'}"`);
-            } catch (e1) {
-                logger.warn(`[getVideoClipRtmpUrl] getVodUrl FLV failed, trying getVodStreamUrl FLV: ${e1}`);
+            for (const requestType of requestTypes) {
                 try {
-                    logger.log(`[getVideoClipRtmpUrl] Trying getVodStreamUrl with FLV streamType...`);
-                    const streamInfo = await nvrApi.getVodStreamUrl(fileId, channel, {
-                        streamType: "FLV",
-                        videoStreamType: "main",
+                    logger.log(`[getVideoClipRtmpUrl] Trying getVodUrl with ${requestType} requestType...`);
+                    const url = await nvrApi.getVodUrl(fileId, channel, {
+                        requestType: requestType as "Playback" | "Download",
+                        streamType: "main",
                     });
-                    url = streamInfo.url;
-                    logger.log(`[getVideoClipRtmpUrl] NVR getVodStreamUrl FLV URL received: url="${url || 'none'}", mimeType="${streamInfo.mimeType || 'none'}"`);
-                } catch (e2) {
-                    logger.warn(`[getVideoClipRtmpUrl] getVodStreamUrl FLV failed, trying Playback: ${e2}`);
-                    try {
-                        logger.log(`[getVideoClipRtmpUrl] Trying getVodStreamUrl with Playback streamType...`);
-                        const streamInfo = await nvrApi.getVodStreamUrl(fileId, channel, {
-                            streamType: "Playback",
-                            videoStreamType: "main",
-                        });
-                        url = streamInfo.url;
-                        logger.log(`[getVideoClipRtmpUrl] NVR getVodStreamUrl Playback URL received: url="${url || 'none'}", mimeType="${streamInfo.mimeType || 'none'}"`);
-                    } catch (e3) {
-                        logger.warn(`[getVideoClipRtmpUrl] Playback failed, trying RTMP: ${e3}`);
-                        logger.log(`[getVideoClipRtmpUrl] Trying getVodStreamUrl with RTMP streamType...`);
-                        const streamInfo = await nvrApi.getVodStreamUrl(fileId, channel, {
-                            streamType: "RTMP",
-                            videoStreamType: "main",
-                        });
-                        url = streamInfo.url;
-                        logger.log(`[getVideoClipRtmpUrl] NVR getVodStreamUrl RTMP URL received: url="${url || 'none'}", mimeType="${streamInfo.mimeType || 'none'}"`);
-                    }
+                    logger.log(`[getVideoClipRtmpUrl] NVR getVodUrl ${requestType} URL received: url="${url || 'none'}"`);
+                    if (url) return url;
+                } catch (e: any) {
+                    logger.debug(`[getVideoClipRtmpUrl] getVodUrl ${requestType} failed: ${e.message}`);
                 }
             }
             
-            if (!url) {
-                throw new Error(`No streaming URL found from NVR for file ${fileId}`);
-            }
-            return url;
+            throw new Error(`No streaming URL found from NVR for file ${fileId} after trying Playback and Download methods`);
         } else {
-            // Use Baichuan API (for direct camera access)
-            logger.log(`[getVideoClipRtmpUrl] Getting RTMP URL from Baichuan API for fileId="${fileId}"`);
+            // Camera standalone: DEVE usare RTMP da Baichuan API
+            logger.log(`[getVideoClipRtmpUrl] Getting RTMP URL from Baichuan API for fileId="${fileId}" (camera standalone)`);
             const api = await this.ensureClient();
             const result = await api.getRecordingPlaybackUrls({
                 fileName: fileId,
