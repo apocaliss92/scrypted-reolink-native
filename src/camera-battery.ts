@@ -128,7 +128,22 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
             }
         } catch (e) {
             // Silently ignore errors in sleep check to avoid spam
-            this.getBaichuanLogger().debug('Error in checkSleepingState:', e);
+            this.getBaichuanLogger().debug('Error in updateSleepingState:', e);
+        }
+    }
+
+    async updateOnlineState(isOnline: boolean): Promise<void> {
+        try {
+            if (this.isDebugEnabled()) {
+                this.getBaichuanLogger().debug('updateOnlineState result:', isOnline);
+            }
+
+            if (isOnline !== this.online) {
+                this.online = isOnline;
+            }
+        } catch (e) {
+            // Silently ignore errors in sleep check to avoid spam
+            this.getBaichuanLogger().debug('Error in updateOnlineState:', e);
         }
     }
 
