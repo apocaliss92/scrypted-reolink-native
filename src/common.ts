@@ -1,4 +1,4 @@
-import type { DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent, ReolinkSupportedStream, StreamProfile, StreamSamplingSelection } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { BaichuanClientOptions, DeviceCapabilities, PtzCommand, PtzPreset, ReolinkBaichuanApi, ReolinkSimpleEvent, ReolinkSupportedStream, StreamProfile, StreamSamplingSelection } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { BinarySensor, Brightness, Camera, Device, DeviceProvider, Intercom, MediaObject, MediaStreamUrl, ObjectDetectionTypes, ObjectDetector, ObjectsDetected, OnOff, PanTiltZoom, PanTiltZoomCommand, Reboot, RequestMediaStreamOptions, RequestPictureOptions, ResponsePictureOptions, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, Setting, Settings, SettingValue, VideoCamera, VideoClip, VideoClipOptions, VideoClips, VideoClipThumbnailOptions, VideoTextOverlay, VideoTextOverlays } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import path from 'path';
@@ -295,6 +295,17 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             title: 'UID',
             description: 'Reolink UID (required for battery cameras / BCUDP).',
             type: 'string',
+            hide: true,
+            onPut: async () => {
+                await this.credentialsChanged();
+            }
+        },
+        discoveryMethod: {
+            title: 'Discovery Method',
+            description: 'UDP discovery method for battery cameras (BCUDP).',
+            type: 'string',
+            choices: ['local', 'remote', 'map', 'relay'],
+            defaultValue: 'local',
             hide: true,
             onPut: async () => {
                 await this.credentialsChanged();
@@ -1273,7 +1284,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
     // BaseBaichuanClass abstract methods implementation
     protected getConnectionConfig(): BaichuanConnectionConfig {
-        const { ipAddress, username, password, uid } = this.storageSettings.values;
+        const { ipAddress, username, password, uid, discoveryMethod } = this.storageSettings.values;
         const debugOptions = this.getBaichuanDebugOptions();
         const normalizedUid = this.isBattery ? normalizeUid(uid) : undefined;
 
@@ -1288,6 +1299,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             uid: normalizedUid,
             transport: this.protocol,
             debugOptions,
+            udpDiscoveryMethod: discoveryMethod as BaichuanClientOptions["udpDiscoveryMethod"],
         };
     }
 
@@ -2466,6 +2478,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         this.storageSettings.settings.teleChannel.hide = !this.isMultiFocal;
 
         this.storageSettings.settings.uid.hide = !this.isBattery;
+        this.storageSettings.settings.discoveryMethod.hide = !this.isBattery;
 
         if (this.isBattery && !this.storageSettings.values.mixinsSetup) {
             try {

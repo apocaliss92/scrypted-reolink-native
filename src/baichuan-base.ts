@@ -1,4 +1,4 @@
-import type { ReolinkBaichuanApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { BaichuanClientOptions, ReolinkBaichuanApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import { ScryptedDeviceBase } from "@scrypted/sdk";
 import { createBaichuanApi, type BaichuanTransport } from "./connect";
 
@@ -9,6 +9,7 @@ export interface BaichuanConnectionConfig {
     uid?: string;
     transport: BaichuanTransport;
     debugOptions?: any;
+    udpDiscoveryMethod?: BaichuanClientOptions["udpDiscoveryMethod"];
 }
 
 export interface BaichuanConnectionCallbacks {
@@ -258,6 +259,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                     uid: config.uid,
                     logger,
                     debugOptions: config.debugOptions,
+                    udpDiscoveryMethod: config.udpDiscoveryMethod,
                 },
                 transport: config.transport,
             });

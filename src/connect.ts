@@ -9,6 +9,7 @@ export type BaichuanConnectInputs = {
     uid?: string;
     logger?: Console;
     debugOptions?: BaichuanClientOptions['debugOptions'];
+    udpDiscoveryMethod?: "local" | "remote" | "map" | "relay";
 };
 
 export function normalizeUid(uid?: string): string | undefined {
@@ -81,6 +82,7 @@ export async function createBaichuanApi(props: {
         transport: "udp",
         uid,
         idleDisconnect: true,
+        udpDiscoveryMethod: inputs.udpDiscoveryMethod,
     });
     attachErrorHandler(api);
     return api;

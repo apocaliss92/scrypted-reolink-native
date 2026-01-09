@@ -200,6 +200,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             device.storageSettings.values.ipAddress = ipAddress;
             device.storageSettings.values.capabilities = capabilities;
             device.storageSettings.values.uid = uid;
+            device.storageSettings.values.discoveryMethod = detection.udpDiscoveryMethod;
 
             return nativeId;
         }
