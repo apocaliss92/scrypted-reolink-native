@@ -533,7 +533,10 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
                 this.channelToNativeIdMap.set(channel, nativeId);
 
-                if (sdk.deviceManager.getNativeIds().includes(nativeId)) {
+                const allNativeIds = sdk.deviceManager.getNativeIds().filter(nid => !!nid);
+
+                if (allNativeIds.some(nid => nid.includes(uid)) ||
+                    allNativeIds.includes(nativeId)) {
                     continue;
                 }
 
