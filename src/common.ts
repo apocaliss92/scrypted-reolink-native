@@ -304,8 +304,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             title: 'Discovery Method',
             description: 'UDP discovery method for battery cameras (BCUDP).',
             type: 'string',
-            choices: ['local', 'remote', 'map', 'relay'],
-            defaultValue: 'local',
+            choices: ['local-direct', 'local-broadcast', 'remote', 'map', 'relay'],
+            defaultValue: 'local-direct',
             hide: true,
             onPut: async () => {
                 await this.credentialsChanged();
@@ -2479,7 +2479,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         this.storageSettings.settings.teleChannel.hide = !this.isMultiFocal;
 
         this.storageSettings.settings.uid.hide = !this.isBattery;
-        this.storageSettings.settings.discoveryMethod.hide = !this.isBattery;
+        this.storageSettings.settings.discoveryMethod.hide = !this.isBattery && !this.nvrDevice;
 
         if (this.isBattery && !this.storageSettings.values.mixinsSetup) {
             try {

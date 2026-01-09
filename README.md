@@ -1,4 +1,4 @@
-# Reolink Native - BETA
+# Reolink Native
 
 This plugin aims to use reolink cameras with the only native API to allow a wider range of unsupported cameras + battery ones without hub.
 

@@ -9,7 +9,7 @@ export type BaichuanConnectInputs = {
     uid?: string;
     logger?: Console;
     debugOptions?: BaichuanClientOptions['debugOptions'];
-    udpDiscoveryMethod?: "local" | "remote" | "map" | "relay";
+    udpDiscoveryMethod?: BaichuanClientOptions["udpDiscoveryMethod"];
 };
 
 export function normalizeUid(uid?: string): string | undefined {
