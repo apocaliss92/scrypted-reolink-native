@@ -761,6 +761,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     start,
                     end,
                     streamType: "main",
+                    source: "baichuan"
                 });
 
                 logger.debug(`[NVR VOD] Found ${enrichedRecordings.length} enriched recordings from NVR`);
