@@ -709,6 +709,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         this.isMultiFocal = options.type === 'multi-focal' || options.type === 'multi-focal-battery';
         this.protocol = this.isBattery || !!this.nvrDevice ? 'udp' : 'tcp';
         this.isOnNvr = !!this.nvrDevice || !!this.multiFocalDevice?.nvrDevice;
+
         setTimeout(async () => {
             await this.parentInit();
         }, 2000);
@@ -1326,9 +1327,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 // The base class already handles cleanup
                 // For battery cameras, don't auto-resubscribe after idle disconnects
                 // (idle disconnects are normal for battery cameras to save power)
-                // Events will be resubscribed when ensureClient() is called for actual operations
                 if (!this.isBattery) {
-                    // For non-battery cameras, resubscribe to events after reconnection
                     setTimeout(async () => {
                         try {
                             await this.subscribeToEvents();
@@ -1487,34 +1486,36 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     /**
      * Initialize or recreate the StreamManager, taking into account multifocal composite options.
      */
-    protected initStreamManager(forceRecreate: boolean = false): void {
+    protected initStreamManager(logger?: Console, forceRecreate: boolean = false): void {
         const { username, password } = this.storageSettings.values;
-        const logger = this.getBaichuanLogger();
+        // Ensure logger is always valid - use provided logger or get from device, fallback to console
+        const validLogger = logger || this.getBaichuanLogger() || console;
 
         const baseOptions: StreamManagerOptions = {
             createStreamClient: (profile?: StreamProfile) => this.createStreamClient(profile),
-            logger,
+            logger: validLogger,
             credentials: {
                 username,
                 password,
             },
-            sharedConnection: this.isBattery || !!this.nvrDevice || !!this.multiFocalDevice,
+            sharedConnection: this.isBattery || !!this.nvrDevice,
         };
 
         if (this.isMultiFocal) {
-            const values: any = this.storageSettings.values;
-            const pipPosition = values.pipPosition || 'bottom-right';
-            const pipSize = values.pipSize ?? 0.25;
-            const pipMargin = values.pipMargin ?? 10;
-            const widerChannel = values.widerChannel ?? 0;
-            const teleChannel = values.teleChannel ?? 1;
+            const { widerChannel, teleChannel, pipPosition, pipSize, pipMargin, rtspChannel } = this.storageSettings.values;
+
+            // On NVR/Hub, TrackMix lenses are selected via stream variant, not via a separate channel.
+            // Use rtspChannel for BOTH wide and tele so the library can request tele via streamType/variant.
+            const wider = this.isOnNvr ? rtspChannel : widerChannel;
+            const tele = this.isOnNvr ? rtspChannel : teleChannel;
 
             baseOptions.compositeOptions = {
-                widerChannel,
-                teleChannel,
+                widerChannel: wider,
+                teleChannel: tele,
                 pipPosition,
                 pipSize,
                 pipMargin,
+                onNvr: this.isOnNvr,
             };
         }
 
@@ -1541,7 +1542,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             const logger = this.getBaichuanLogger();
             try {
                 logger.log('Restarting StreamManager due to PIP/composite settings change');
-                this.initStreamManager(true);
+                this.initStreamManager(logger, true);
 
                 // Invalidate snapshot cache for battery/multifocal-battery so that
                 // the next snapshot reflects the new PIP/composite configuration.
@@ -1974,21 +1975,42 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         await this.storageSettings.putSetting(key, value);
     }
 
+    async takePictureInternal(client: ReolinkBaichuanApi) {
+        const { rtspChannel, variantType } = this.storageSettings.values;
+        const logger = this.getBaichuanLogger();
+        logger.log(`Taking new snapshot from camera: forceNewSnapshot=${this.forceNewSnapshot} channel=${rtspChannel} variant=${variantType}`);
+
+        const compositeOptions = this.isMultiFocal ? {
+            widerChannel: this.isOnNvr ? rtspChannel : (this.storageSettings.values.widerChannel ?? 0),
+            teleChannel: this.isOnNvr ? rtspChannel : (this.storageSettings.values.teleChannel ?? 1),
+            pipPosition: this.storageSettings.values.pipPosition || 'bottom-right',
+            pipSize: this.storageSettings.values.pipSize ?? 0.25,
+            pipMargin: this.storageSettings.values.pipMargin ?? 10,
+            onNvr: this.isOnNvr,
+        } : undefined;
+
+        // For multifocal devices, request a composite snapshot by passing channel=undefined.
+        const channelArg = this.isMultiFocal ? undefined : rtspChannel;
+
+        const snapshotBuffer = await client.getSnapshot(
+            channelArg,
+            {
+                onNvr: this.isOnNvr,
+                variant: variantType,
+                ...(compositeOptions ? { compositeOptions } : {}),
+            }
+        );
+        const mo = await this.createMediaObject(snapshotBuffer, 'image/jpeg');
+
+        return mo;
+    }
+
     async takePicture(options?: RequestPictureOptions) {
         if (!this.isBattery) {
             try {
                 return this.withBaichuanRetry(async () => {
                     const client = await this.ensureClient();
-                    const snapshotBuffer = await client.getSnapshot(
-                        this.storageSettings.values.rtspChannel,
-                        {
-                            onNvr: this.isOnNvr,
-                            variant: this.storageSettings.values.variantType ?? 'default'
-                        }
-                    );
-                    const mo = await this.createMediaObject(snapshotBuffer, 'image/jpeg');
-
-                    return mo;
+                    return await this.takePictureInternal(client);
                 });
             } catch (e) {
                 this.getBaichuanLogger().error('Error taking snapshot', e);
@@ -2006,16 +2028,11 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             if (this.takePictureInFlight) {
                 return await this.takePictureInFlight;
             }
-
-            logger.log(`Taking new snapshot from camera (forceNewSnapshot: ${this.forceNewSnapshot})`);
             this.forceNewSnapshot = false;
 
             this.takePictureInFlight = (async () => {
-                const channel = this.storageSettings.values.rtspChannel;
-                const snapshotBuffer = await this.withBaichuanClient(async (api) => {
-                    return await api.getSnapshot(channel);
-                });
-                const mo = await sdk.mediaManager.createMediaObject(snapshotBuffer, 'image/jpeg');
+                const client = await this.ensureClient();
+                const mo = await this.takePictureInternal(client);
                 this.lastPicture = { mo, atMs: Date.now() };
                 logger.log(`Snapshot taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
                 return mo;
@@ -2267,24 +2284,22 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 const { rtspChannel, variantType } = this.storageSettings.values;
 
                 try {
-                    // For NVR, telephoto lens typically uses autotrack variant
-                    // Map telephoto to autotrack when on NVR to match the actual stream IDs
-                    let lensParam: NativeVideoStreamVariant = variantType ?? 'default';
-                    if (lensParam === 'telephoto' && this.isOnNvr) {
-                        lensParam = 'autotrack';
-                        logger.debug(`Mapping telephoto to autotrack for NVR context`);
-                    }
+                    // Lens-scoped behavior: request streams only for the current lens/variant.
+                    // This keeps a single native_main and native_sub for the device.
+                    const lensParam: NativeVideoStreamVariant | undefined = variantType as any;
 
                     const { nativeStreams, rtmpStreams, rtspStreams } = await client.buildVideoStreamOptions({
                         onNvr: this.isOnNvr,
                         channel: rtspChannel,
                         compositeOnly: this.isMultiFocal,
-                        lens: lensParam
+                        ...(lensParam !== undefined ? { lens: lensParam } : {})
                     });
-                    logger.log({ variantType, lensParam, rtspChannel, onNvr: this.isOnNvr, nativeStreams: nativeStreams.map(s => ({ id: s.id, nativeVariant: s.nativeVariant, lens: s.lens })), rtspStreams: rtspStreams.map(s => ({ id: s.id, lens: s.lens })), rtmpStreams: rtmpStreams.map(s => ({ id: s.id, lens: s.lens })) });
 
-                    let supportedStreams: ReolinkSupportedStream[] = [];
-                    supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
+                    // const urls = client.getRtspUrl(rtspChannel);
+
+                    // let supportedStreams: ReolinkSupportedStream[] = [];
+                    const supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
+                    // logger.log({ supportedStreams, variantType, lensParam, rtspChannel, onNvr: this.isOnNvr, nativeStreams: nativeStreams.map(s => ({ id: s.id, nativeVariant: s.nativeVariant, lens: s.lens })), rtspStreams: rtspStreams.map(s => ({ id: s.id, lens: s.lens })), rtmpStreams: rtmpStreams.map(s => ({ id: s.id, lens: s.lens })) });
 
                     for (const supportedStream of supportedStreams) {
                         const { id, metadata, url, name, container, nativeVariant, lens } = supportedStream;
@@ -2295,26 +2310,18 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                                 ? "h265"
                                 : String(metadata.videoEncType || "").toLowerCase();
 
-                        // Preserve variant information: if nativeVariant is set, use it; otherwise use lens info
-                        // Store it in the stream metadata via a custom property or ensure URL contains it
+                        // Preserve variant information for native RTP streams by ensuring the URL contains it.
                         let finalUrl = url;
-                        if (nativeVariant && nativeVariant !== 'default' && container === 'rtp') {
-                            // Ensure URL contains variant parameter for native streams
+                        const variantFromIdOrUrl = extractVariantFromStreamId(id, url);
+                        const variantToInject = (nativeVariant && nativeVariant !== 'default')
+                            ? nativeVariant
+                            : variantFromIdOrUrl;
+
+                        if (variantToInject && container === 'rtp') {
                             try {
                                 const urlObj = new URL(url);
                                 if (!urlObj.searchParams.has('variant')) {
-                                    urlObj.searchParams.set('variant', nativeVariant);
-                                    finalUrl = urlObj.toString();
-                                }
-                            } catch {
-                                // Invalid URL, use original
-                            }
-                        } else if (lens === 'telephoto' && container === 'rtp') {
-                            // For telephoto lens, map to autotrack variant (common for TrackMix on NVR)
-                            try {
-                                const urlObj = new URL(url);
-                                if (!urlObj.searchParams.has('variant')) {
-                                    urlObj.searchParams.set('variant', 'autotrack');
+                                    urlObj.searchParams.set('variant', variantToInject);
                                     finalUrl = urlObj.toString();
                                 }
                             } catch {
@@ -2365,26 +2372,43 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         let selected = selectStreamOption(vsos, vso);
 
+        // If the request explicitly asks for a variant (e.g. native_telephoto_main),
+        // never override it with the device's variantType preference.
+        const requestedVariant = vso?.id ? extractVariantFromStreamId(vso.id, undefined) : undefined;
+        if (requestedVariant) {
+            logger.log(`Explicit variant requested: '${requestedVariant}'. Skipping variantType preference.`);
+        }
+
         // If we have variantType set and the selected stream doesn't have the variant,
         // try to find a stream with the correct variant that matches the profile
         const variantType = this.storageSettings.values.variantType;
-        if (variantType && variantType !== 'default') {
+        if (!requestedVariant && variantType && variantType !== 'default') {
             const profile = parseStreamProfileFromId(selected.id) || 'main';
-            // Map telephoto to autotrack for NVR context (as done in buildVideoStreamOptions)
-            const normalizedVariant = (variantType === 'telephoto' && this.isOnNvr) ? 'autotrack' : variantType;
-            const variantId = `native_${normalizedVariant}_${profile}`;
-            const variantStream = vsos?.find(s => s.id === variantId);
 
-            if (variantStream) {
-                const extractedVariant = extractVariantFromStreamId(selected.id, selected.url);
+            // On NVR, firmwares vary: some expose the tele lens as 'autotrack', others as 'telephoto'.
+            // When variantType is set, prefer that variant but fall back to the other tele variant if present.
+            const preferred = variantType as 'autotrack' | 'telephoto';
+            const fallbacks: Array<'autotrack' | 'telephoto'> = this.isOnNvr && preferred === 'telephoto'
+                ? ['telephoto', 'autotrack']
+                : this.isOnNvr && preferred === 'autotrack'
+                    ? ['autotrack', 'telephoto']
+                    : [preferred];
+
+            const extractedVariant = extractVariantFromStreamId(selected.id, selected.url);
+            for (const v of fallbacks) {
+                const variantId = `native_${v}_${profile}`;
+                const variantStream = vsos?.find(s => s.id === variantId);
+                if (!variantStream) {
+                    logger.debug(`Variant stream '${variantId}' not found in available streams`);
+                    continue;
+                }
                 // Only use variant stream if the selected one doesn't already have a variant,
-                // or if the selected one has a different variant than what we want
-                if (!extractedVariant || extractedVariant !== normalizedVariant) {
+                // or if the selected one has a different variant than what we want.
+                if (!extractedVariant || extractedVariant !== v) {
                     logger.log(`Preferring variant stream: '${variantId}' over '${selected.id}' (variantType='${variantType}')`);
                     selected = variantStream;
                 }
-            } else {
-                logger.debug(`Variant stream '${variantId}' not found in available streams`);
+                break;
             }
         }
 
@@ -2445,15 +2469,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         const expectedVideoType = expectedVideoTypeFromUrlMediaStreamOptions(selected);
 
         const createStreamFn = async () => {
-            // Normalize variant: for TrackMix on NVR, telephoto lens uses autotrack variant
-            let normalizedVariant: 'default' | 'autotrack' | 'telephoto' | undefined = variant;
-            if (variant === 'telephoto' && this.isOnNvr) {
-                // On NVR, telephoto lens typically uses autotrack variant
-                normalizedVariant = 'autotrack';
-                logger.log(`Normalizing variant: telephoto -> autotrack (NVR context)`);
-            }
-
-            logger.log(`Creating RFC4571 stream: channel=${channel}, profile=${profile}, variant=${normalizedVariant || 'default'}, streamKey=${streamKey}`);
+            // Honor the requested variant. Some NVR firmwares label the tele lens as either
+            // 'autotrack' or 'telephoto', and the library exposes both when available.
+            logger.log(`Creating RFC4571 stream: channel=${channel}, profile=${profile}, variant=${variant || 'default'}, streamKey=${streamKey}`);
 
             return await createRfc4571MediaObjectFromStreamManager({
                 streamManager: this.streamManager!,
@@ -2461,7 +2479,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 profile,
                 streamKey,
                 expectedVideoType,
-                variant: normalizedVariant,
+                variant,
                 selected,
                 sourceId: this.id,
                 // onDetectedCodec: (detectedCodec) => {
@@ -2580,6 +2598,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 logger.warn('Failed to connect/refresh during init', e?.message || String(e));
             }
         }
+
         this.storageSettings.settings.socketApiDebugLogs.hide = !!this.nvrDevice;
         this.storageSettings.settings.clipsSource.hide = !this.nvrDevice;
         this.storageSettings.settings.clipsSource.defaultValue = this.nvrDevice ? "NVR" : "Device";
@@ -2622,8 +2641,12 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             logger.warn('Failed to subscribe to Baichuan events', e);
         }
 
-        // Initialize StreamManager (with composite options for multifocal devices)
-        this.initStreamManager();
+        try {
+            this.initStreamManager();
+        }
+        catch (e) {
+            logger.warn('Failed to initialize StreamManager', e);
+        }
 
         const { hasIntercom, hasPtz } = this.getAbilities();
 

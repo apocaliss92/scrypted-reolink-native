@@ -18,45 +18,8 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
 
     constructor(nativeId: string, plugin: ReolinkNativePlugin, type: CameraType, nvrDevice?: ReolinkNativeNvrDevice) {
         super(nativeId, plugin, { type, nvrDevice });
+
         this.plugin = plugin;
-    }
-
-    async parentInit(): Promise<void> {
-        // Set up settings visibility first (synchronously)
-        this.storageSettings.settings.socketApiDebugLogs.hide = !!this.nvrDevice;
-        this.storageSettings.settings.clipsSource.hide = !this.nvrDevice;
-        this.storageSettings.settings.clipsSource.defaultValue = this.nvrDevice ? "NVR" : "Device";
-        this.storageSettings.settings.videoclipsRegularChecks.defaultValue = this.isBattery ? 120 : 30;
-        this.storageSettings.settings.batteryUpdateIntervalMinutes.hide = !this.isBattery;
-        this.storageSettings.settings.lowThresholdBatteryRecording.hide = !this.isBattery;
-        this.storageSettings.settings.highThresholdBatteryRecording.hide = !this.isBattery;
-        this.storageSettings.settings.pipPosition.hide = !this.isMultiFocal;
-        this.storageSettings.settings.pipSize.hide = !this.isMultiFocal;
-        this.storageSettings.settings.pipMargin.hide = !this.isMultiFocal;
-        this.storageSettings.settings.widerChannel.hide = !this.isMultiFocal;
-        this.storageSettings.settings.teleChannel.hide = !this.isMultiFocal;
-        this.storageSettings.settings.uid.hide = !this.isBattery;
-        this.storageSettings.settings.discoveryMethod.hide = !this.isBattery && !this.nvrDevice;
-
-        // Handle battery camera mixins setup
-        if (this.isBattery && !this.storageSettings.values.mixinsSetup) {
-            const logger = this.getBaichuanLogger();
-            try {
-                const device = sdk.systemManager.getDeviceById<Settings>(this.id);
-                if (device) {
-                    logger.log('Disabling prebuffer and snapshots from prebuffer');
-                    await device.putSetting('prebuffer:enabledStreams', '[]');
-                    await device.putSetting('snapshot:snapshotsFromPrebuffer', 'Disabled');
-                    this.storageSettings.values.mixinsSetup = true;
-                }
-            } catch (e) {
-                logger.warn('Failed to setup mixins during parentInit', e?.message || String(e));
-            }
-        }
-
-        // Call our init() method which handles the actual initialization
-        // This includes ensureClient(), reportDevices(), and subscribeToEvents()
-        await this.init();
     }
 
     getAbilities(): DeviceCapabilities {
@@ -133,21 +96,28 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
     getInterfaces(channel: number) {
         const logger = this.getBaichuanLogger();
         const { capabilities: caps, multifocalInfo } = this.storageSettings.values;
-        const channelInfo = (multifocalInfo as DualLensChannelAnalysis).channels.find(c => c.channel === channel);
 
-        const capabilities: DeviceCapabilities = {
-            ...caps,
-            hasPan: channelInfo.hasPan,
-            hasTilt: channelInfo.hasTilt,
-            hasZoom: channelInfo.hasZoom,
-            hasPresets: channelInfo.hasPresets,
-            hasIntercom: channelInfo.hasIntercom,
-        };
+        let capabilities: DeviceCapabilities = { ...caps };
+
+        if (!this.nvrDevice) {
+            const channelInfo = (multifocalInfo as DualLensChannelAnalysis).channels.find(c => c.channel === channel);
+
+            capabilities = {
+                ...capabilities,
+                hasPan: channelInfo.hasPan,
+                hasTilt: channelInfo.hasTilt,
+                hasZoom: channelInfo?.hasZoom,
+                hasPresets: channelInfo?.hasPresets,
+                hasIntercom: channelInfo?.hasIntercom,
+            };
+        }
 
         const { interfaces } = getDeviceInterfaces({
             capabilities,
             logger,
         });
+
+        logger.log(`Interfaces found for channel ${channel}: ${JSON.stringify({ interfaces, capabilities, multifocalInfo })}`);
 
         return { interfaces, capabilities };
     }

@@ -89,10 +89,10 @@ export function parseStreamProfileFromId(id: string | undefined): StreamProfile 
 
 /**
  * Extract and normalize variant type from stream ID or URL (e.g., "autotrack" from "native_autotrack_main" or "?variant=autotrack")
- * Returns undefined if no variant is present, or "autotrack"/"telephoto"/"default" if present
- * Note: "telephoto" lens typically uses "autotrack" variant for TrackMix on NVR
+ * Returns undefined if no variant is present, or "autotrack"/"telephoto" if present
+ * Note: on Hub/NVR multifocal firmwares, the tele lens is often requested via "telephoto".
  */
-export function extractVariantFromStreamId(id: string | undefined, url?: string | undefined): 'autotrack' | 'telephoto' | 'default' | undefined {
+export function extractVariantFromStreamId(id: string | undefined, url?: string | undefined): 'autotrack' | 'telephoto' | undefined {
     let variant: string | undefined;
     
     // First try to extract from ID
@@ -138,8 +138,7 @@ export function extractVariantFromStreamId(id: string | undefined, url?: string 
 
     // Normalize variant: accept "autotrack", "telephoto", or map "default" to undefined
     if (variant === 'autotrack' || variant === 'telephoto') {
-        // For TrackMix on NVR, "telephoto" lens typically uses "autotrack" variant
-        // But we preserve "telephoto" if explicitly specified
+        // Preserve explicit variants; firmware-specific behavior is handled by the library.
         return variant as 'autotrack' | 'telephoto';
     }
 
@@ -284,10 +283,15 @@ export class StreamManager {
     private nativeRfcServerCreatePromises = new Map<string, Promise<RfcServerInfo>>();
 
     constructor(private opts: StreamManagerOptions) {
+        // Ensure logger is always valid
+        if (!this.opts.logger) {
+            this.opts.logger = console;
+        }
     }
 
-    private getLogger() {
-        return this.opts.logger;
+    private getLogger(): Console {
+        // Always return a valid logger, fallback to console if not set
+        return this.opts.logger || console;
     }
 
     private async ensureRfcServer(
