@@ -1,4 +1,4 @@
-import type { DeviceCapabilities, DualLensChannelAnalysis, NativeVideoStreamVariant, ReolinkBaichuanApi, ReolinkSimpleEvent, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { DeviceCapabilities, DualLensChannelAnalysis, NativeVideoStreamVariant, ReolinkBaichuanApi, ReolinkSimpleEvent, SleepStatus, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import type { BaichuanConnectionConfig } from "./baichuan-base";
 import sdk, { Device, DeviceProvider, Reboot, ScryptedDeviceType, Settings } from "@scrypted/sdk";
 import { ReolinkNativeCamera } from "./camera";
@@ -217,6 +217,72 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
 
     async unsubscribeFromAllEvents(): Promise<void> {
         await super.unsubscribeFromEvents();
+    }
+
+    /**
+     * Update sleeping state for the MultiFocal device itself and propagate to all lens devices.
+     * This ensures that when the MultiFocal receives a sleeping/awake state update (from events or API calls),
+     * the state is synchronized across the MultiFocal and all its lens children.
+     */
+    async updateSleepingState(sleepStatus: SleepStatus): Promise<void> {
+        const logger = this.getBaichuanLogger();
+        
+        // First, update the MultiFocal device's own sleeping state
+        await super.updateSleepingState(sleepStatus);
+
+        // Then, propagate the state to all lens devices (camera children)
+        const lensDevices = Array.from(this.cameraNativeMap.values());
+        
+        if (lensDevices.length === 0) {
+            logger.debug(`No lens devices found for MultiFocal, sleeping state updated only for MultiFocal itself`);
+            return;
+        }
+
+        logger.debug(`Propagating sleeping state (state=${sleepStatus.state}) to ${lensDevices.length} lens device(s)`);
+
+        // Propagate sleeping state to all lens devices
+        await Promise.allSettled(
+            lensDevices.map(async (camera) => {
+                try {
+                    await camera.updateSleepingState(sleepStatus);
+                } catch (e) {
+                    logger.warn(`Error propagating sleeping state to lens device ${camera.nativeId}:`, e?.message || String(e));
+                }
+            })
+        );
+    }
+
+    /**
+     * Update online state for the MultiFocal device itself and propagate to all lens devices.
+     * This ensures that when the MultiFocal receives an online/offline state update (from events or API calls),
+     * the state is synchronized across the MultiFocal and all its lens children.
+     */
+    async updateOnlineState(isOnline: boolean): Promise<void> {
+        const logger = this.getBaichuanLogger();
+        
+        // First, update the MultiFocal device's own online state
+        await super.updateOnlineState(isOnline);
+
+        // Then, propagate the state to all lens devices (camera children)
+        const lensDevices = Array.from(this.cameraNativeMap.values());
+        
+        if (lensDevices.length === 0) {
+            logger.debug(`No lens devices found for MultiFocal, online state updated only for MultiFocal itself`);
+            return;
+        }
+
+        logger.debug(`Propagating online state (isOnline=${isOnline}) to ${lensDevices.length} lens device(s)`);
+
+        // Propagate online state to all lens devices
+        await Promise.allSettled(
+            lensDevices.map(async (camera) => {
+                try {
+                    await camera.updateOnlineState(isOnline);
+                } catch (e) {
+                    logger.warn(`Error propagating online state to lens device ${camera.nativeId}:`, e?.message || String(e));
+                }
+            })
+        );
     }
 
     public async runDiagnostics(): Promise<void> {

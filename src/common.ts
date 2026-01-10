@@ -1628,6 +1628,29 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 return;
             }
 
+            // Handle battery/online/sleeping events separately from motion events
+            switch (ev?.type) {
+                case 'awake':
+                case 'sleeping':
+                    // Update sleeping state for battery cameras or devices that support it
+                    this.updateSleepingState({
+                        reason: ev?.type === 'sleeping' ? 'sleeping' : 'awake',
+                        state: ev.type === 'sleeping' ? 'sleeping' : 'awake',
+                    }).catch((e) => {
+                        logger.warn('Error updating sleeping state', e);
+                    });
+                    return; // These events are handled, no need to process as motion events
+                
+                case 'offline':
+                case 'online':
+                    // Update online state for battery cameras or devices that support it
+                    this.updateOnlineState(ev.type === 'online').catch((e) => {
+                        logger.warn('Error updating online state', e);
+                    });
+                    return; // These events are handled, no need to process as motion events
+            }
+
+            // Handle motion and object detection events
             const objects: string[] = [];
             let motion = false;
 

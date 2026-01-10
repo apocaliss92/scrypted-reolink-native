@@ -393,7 +393,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     // }
 
     async init() {
-        const logger = this.getBaichuanLogger();
+        // const logger = this.getBaichuanLogger();
         await this.ensureBaichuanClient();
 
         await this.updateDeviceInfo();
