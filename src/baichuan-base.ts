@@ -162,7 +162,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
     protected baichuanApi: ReolinkBaichuanApi | undefined;
     protected ensureClientPromise: Promise<ReolinkBaichuanApi> | undefined;
     protected connectionTime: number | undefined;
-    
+
     private errorListener?: (err: unknown) => void;
     private closeListener?: () => void;
     private lastDisconnectTime: number = 0;
@@ -216,11 +216,11 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         if (this.baichuanApi) {
             const isConnected = this.baichuanApi.client.isSocketConnected();
             const isLoggedIn = this.baichuanApi.client.loggedIn;
-            
+
             // Only reuse if both conditions are true
             if (isConnected && isLoggedIn) {
-            return this.baichuanApi;
-        }
+                return this.baichuanApi;
+            }
 
             // If socket is not connected or not logged in, cleanup the stale client
             // This prevents leaking connections when the socket appears connected but isn't
@@ -310,7 +310,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                 return;
             }
             logger.error(`error: ${msg}`);
-            
+
             // Call custom error handler if provided
             if (callbacks.onError) {
                 try {
@@ -359,7 +359,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                 // Only cleanup if this is still the current API instance
                 // This prevents cleanup of a new connection that was created
                 // while the old one was closing
-            await this.cleanupBaichuanApi();
+                await this.cleanupBaichuanApi();
             }
 
             // Call custom close handler if provided

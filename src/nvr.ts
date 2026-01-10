@@ -4,10 +4,11 @@ import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
 import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
-import { normalizeUid } from "./connect";
+import { CommonCameraMixin } from "./common";
 import { convertDebugLogsToApiOptions, getApiRelevantDebugLogs, getDebugLogChoices } from "./debug-options";
 import ReolinkNativePlugin from "./main";
-import { getDeviceInterfaces, updateDeviceInfo } from "./utils";
+import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
+import { batteryCameraSuffix, batteryMultifocalSuffix, cameraSuffix, getDeviceInterfaces, multifocalSuffix, updateDeviceInfo } from "./utils";
 
 export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Settings, DeviceDiscovery, DeviceProvider, Reboot {
     storageSettings = new StorageSettings(this, {
@@ -103,10 +104,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         rtspChannel: number;
         deviceData: ReolinkBaichuanDeviceSummary;
     }>();
-    lastNvrInfoCheck: number | undefined;
-    lastErrorsCheck: number | undefined;
-    lastDevicesStatusCheck: number | undefined;
-    cameraNativeMap = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera>();
+    cameraNativeMap = new Map<string, CommonCameraMixin>();
     private channelToNativeIdMap = new Map<number, string>();
     private discoverDevicesPromise: Promise<DiscoveredDevice[]> | undefined;
     processing = false;
@@ -159,7 +157,6 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             },
         };
     }
-
 
     protected isDebugEnabled(): boolean {
         return this.storageSettings.values.debugLogs || false;
@@ -267,7 +264,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             }
 
             if (isSleepingEvent) {
-                (targetCamera as ReolinkNativeBatteryCamera).updateSleepingState({
+                targetCamera.updateSleepingState({
                     reason: 'NVR',
                     state: ev.type === 'sleeping' ? 'sleeping' : 'awake',
                 }).catch(() => { });
@@ -283,13 +280,16 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             }
         }
         catch (e) {
-            logger.warn('Error in NVR Native event forwarder', e);
+            logger.warn('Error in NVR Native event forwarder', e?.message || String(e));
         }
     }
 
     async ensureBaichuanClient(): Promise<ReolinkBaichuanApi> {
-        // Use base class implementation
         return await super.ensureBaichuanClient();
+    }
+
+    async ensureClient(): Promise<ReolinkBaichuanApi> {
+        return await this.ensureBaichuanClient();
     }
 
     async subscribeToAllEvents(): Promise<void> {
@@ -313,7 +313,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                 logger: this.console,
             });
         } catch (e) {
-            logger.error('Failed to run NVR diagnostics', e);
+            logger.error('Failed to run NVR diagnostics', e?.message || String(e));
             throw e;
         }
     }
@@ -335,7 +335,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             await this.unsubscribeFromAllEvents();
         } else {
             this.subscribeToAllEvents().catch((e) => {
-                logger.warn('Failed to subscribe to Native events', e);
+                logger.warn('Failed to subscribe to Native events', e?.message || String(e));
             });
         }
 
@@ -374,23 +374,6 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             }
             this.processing = true;
             try {
-                const now = Date.now();
-
-                if (!this.lastErrorsCheck || (now - this.lastErrorsCheck > 60 * 1000)) {
-                    this.lastErrorsCheck = now;
-                    // Note: ReolinkCgiApi doesn't have checkErrors, skip for now
-                }
-
-                if (!this.lastNvrInfoCheck || now - this.lastNvrInfoCheck > 1000 * 60 * 5) {
-                    this.lastNvrInfoCheck = now;
-                    // const { nvrData } = await api.getNvrInfo();
-                    // const { devicesData, channelsResponse, response } = await api.getDevicesInfo();
-                    // logger.log(`NVR info data fetched`);
-                    // logger.debug(`${JSON.stringify({ nvrData, devicesData, channelsResponse, response })}`);
-
-                    await this.discoverDevices(true);
-                }
-
                 const api = await this.ensureBaichuanClient();
 
                 const { eventSource } = this.storageSettings.values;
@@ -408,7 +391,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                             const channel = camera.storageSettings.values.rtspChannel;
                             const cameraBatteryData = batteryInfoData[channel];
                             if (cameraBatteryData) {
-                                (camera as ReolinkNativeBatteryCamera).updateSleepingState({
+                                camera.updateSleepingState({
                                     reason: 'NVR',
                                     state: cameraBatteryData.sleeping ? 'sleeping' : 'awake',
                                     idleMs: 0,
@@ -419,7 +402,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                     });
                 }
             } catch (e) {
-                logger.error('Error on events flow', e);
+                logger.error('Error on events flow', e?.message || String(e));
             } finally {
                 this.processing = false;
             }
@@ -441,7 +424,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                 logger
             });
         } catch (e) {
-            logger.warn('Failed to fetch device info', e);
+            logger.warn('Failed to fetch device info', e?.message || String(e));
         }
     }
 
@@ -458,27 +441,38 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         this.cameraNativeMap.delete(nativeId);
     }
 
-    async getDevice(nativeId: string): Promise<ReolinkNativeCamera | ReolinkNativeBatteryCamera> {
+    async getDevice(nativeId: string): Promise<CommonCameraMixin> {
         let device = this.cameraNativeMap.get(nativeId);
 
         if (!device) {
-            if (nativeId.endsWith('-battery-cam')) {
+            if (nativeId.endsWith(batteryCameraSuffix)) {
                 device = new ReolinkNativeBatteryCamera(nativeId, this.plugin, this);
+            } else if (nativeId.endsWith(batteryMultifocalSuffix)) {
+                device = new ReolinkNativeMultiFocalDevice(nativeId, this.plugin, "multi-focal-battery", this);
+            } else if (nativeId.endsWith(multifocalSuffix)) {
+                device = new ReolinkNativeMultiFocalDevice(nativeId, this.plugin, "multi-focal", this);
             } else {
                 device = new ReolinkNativeCamera(nativeId, this.plugin, this);
             }
-            this.cameraNativeMap.set(nativeId, device);
+
+            if (device) {
+                this.cameraNativeMap.set(nativeId, device);
+            }
         }
 
         return device;
     }
 
-    buildNativeId(channel: number, serialNumber?: string, isBattery?: boolean): string {
-        const suffix = isBattery ? '-battery-cam' : '-cam';
-        if (serialNumber) {
-            return `${this.nativeId}-ch${channel}-${serialNumber}${suffix}`;
-        }
-        return `${this.nativeId}-ch${channel}${suffix}`;
+    buildNativeId(props: {
+        identifier?: string, isBattery?: boolean, isMultifocal?: boolean
+    }): string {
+        const { identifier, isBattery, isMultifocal } = props;
+
+        const suffix = isBattery ?
+            (isMultifocal ? batteryMultifocalSuffix : batteryCameraSuffix) :
+            (isMultifocal ? multifocalSuffix : cameraSuffix)
+
+        return `${this.nativeId}-${identifier}${suffix}`;
     }
 
     getCameraInterfaces() {
@@ -495,10 +489,10 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
     async syncEntitiesFromRemote() {
         const logger = this.getBaichuanLogger();
+        // const { ipAddress } = this.storageSettings.values;
 
         const api = await this.ensureBaichuanClient();
-        const { devices, channels } = await api.getDevicesInfo();
-        logger.log(devices, channels);
+        const { devices, channels } = await api.getNvrChannelsSummary({ source: "cgi" });
 
         if (!channels.length) {
             logger.debug(`No channels found, ${JSON.stringify({ channels, devices })}`);
@@ -508,10 +502,16 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         logger.log(`Sync entities from remote for ${channels.length} channels`);
 
         for (const deviceData of devices) {
-            const { isBattery, name, model, isDoorbell, uid, channel } = deviceData
+            const { isBattery, serialNumber, name, model, isDoorbell, uid, channel, isMultifocal } = deviceData;
+            const identifier = uid || name || `channel-${channel}`;
+            // const identifier = uid || mac || (ip !== ipAddress ? ip : undefined) || name || randomBytes(4).toString('hex');
 
             try {
-                const nativeId = this.buildNativeId(channel, uid, isBattery);
+                const nativeId = this.buildNativeId({
+                    isBattery,
+                    isMultifocal,
+                    identifier,
+                });
                 const interfaces = [ScryptedInterface.VideoCamera];
                 if (isBattery) {
                     interfaces.push(ScryptedInterface.Battery);
@@ -527,7 +527,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                     info: {
                         manufacturer: 'Reolink',
                         model,
-                        serialNumber: uid,
+                        serialNumber,
                     }
                 };
 
@@ -535,8 +535,15 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
                 const allNativeIds = sdk.deviceManager.getNativeIds().filter(nid => !!nid);
 
-                if (allNativeIds.some(nid => nid.includes(uid)) ||
-                    allNativeIds.includes(nativeId)) {
+                if (
+                    allNativeIds.some(
+                        nid => nid.includes(uid) ||
+                            nid.includes(`channel-${channel}`) ||
+                            // nid.includes(mac) ||
+                            // nid.includes(ip) ||
+                            nid.includes(name) ||
+                            nid === nativeId)
+                ) {
                     continue;
                 }
 
@@ -597,29 +604,28 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
         await this.onDeviceEvent(ScryptedInterface.DeviceDiscovery, await this.discoverDevices());
 
-        const isBattery = entry.device.interfaces.includes(ScryptedInterface.Battery);
         const { uid } = entry.deviceData;
 
         const { ReolinkBaichuanApi } = await import("@apocaliss92/reolink-baichuan-js");
         const transport = 'tcp';
-        const normalizedUid = isBattery && uid ? normalizeUid(uid) : undefined;
         const baichuanApi = new ReolinkBaichuanApi({
             host: this.storageSettings.values.ipAddress,
             username: this.storageSettings.values.username,
             password: this.storageSettings.values.password,
             transport,
             channel: entry.rtspChannel,
-            ...(normalizedUid ? { uid: normalizedUid } : {}),
+            uid,
         });
         await baichuanApi.login();
         const { capabilities, objects, presets } = await baichuanApi.getDeviceCapabilities(entry.rtspChannel);
         const { interfaces, type } = getDeviceInterfaces({
             capabilities,
-            logger: this.console,
+            logger: this.getBaichuanLogger(),
         });
 
         const actualDevice: Device = {
             ...entry.device,
+            providerNativeId: this.nativeId,
             interfaces,
             type
         };
@@ -628,8 +634,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
         const device = await this.getDevice(adopt.nativeId);
         const logger = this.getBaichuanLogger();
-        logger.log('Adopted device', device?.name);
-        logger.log(JSON.stringify(entry));
+        logger.log('Adopted device', device?.name, JSON.stringify(actualDevice));
         const { username, password, ipAddress } = this.storageSettings.values;
 
         device.storageSettings.values.rtspChannel = entry.rtspChannel;

@@ -20,7 +20,7 @@ export interface StreamManagerOptions {
      * @param profile The stream profile (main, sub, ext) - used to determine if a new client is needed.
      */
     createStreamClient: (profile?: StreamProfile) => Promise<ReolinkBaichuanApi>;
-    getLogger: () => Console;
+    logger: Console;
     /**
      * Credentials to include in the TCP stream (username, password).
      * Uses the same credentials as the main connection.
@@ -39,19 +39,33 @@ export function parseStreamProfileFromId(id: string | undefined): StreamProfile 
     if (!id)
         return;
 
-    // Handle native stream IDs: native_main, native_sub, native_ext
+    // Handle native stream IDs: native_main, native_sub, native_ext, native_autotrack_main, native_autotrack_sub, etc.
     if (id.startsWith('native_')) {
-        const profile = id.replace('native_', '');
-        return profile as StreamProfile;
+        const withoutPrefix = id.replace('native_', '');
+        // Extract profile from formats like "main", "sub", "ext", "autotrack_main", "telephoto_sub", etc.
+        // The profile is always the last part after underscore or the whole string if no underscore
+        const parts = withoutPrefix.split('_');
+        const profile = parts[parts.length - 1]; // Take the last part as profile
+        if (profile === 'main' || profile === 'sub' || profile === 'ext') {
+            return profile as StreamProfile;
+        }
+        // If no valid profile found, try to match the whole string
+        if (withoutPrefix === 'main' || withoutPrefix === 'sub' || withoutPrefix === 'ext') {
+            return withoutPrefix as StreamProfile;
+        }
+        return undefined;
     }
 
     // Handle RTMP IDs: main.bcs, sub.bcs, ext.bcs
     if (id.endsWith('.bcs')) {
         const profile = id.replace('.bcs', '');
-        return profile as StreamProfile;
+        if (profile === 'main' || profile === 'sub' || profile === 'ext') {
+            return profile as StreamProfile;
+        }
+        return undefined;
     }
 
-    // Handle RTSP IDs: h264Preview_XX_main, h264Preview_XX_sub
+    // Handle RTSP IDs: h264Preview_XX_main, h264Preview_XX_sub, Preview_03_autotrack, etc.
     if (id.startsWith('h264Preview_')) {
         if (id.endsWith('_main'))
             return 'main';
@@ -59,7 +73,77 @@ export function parseStreamProfileFromId(id: string | undefined): StreamProfile 
             return 'sub';
     }
 
+    // Handle RTSP IDs like Preview_03_autotrack, Preview_03_autotrack_sub
+    // These should map to main or sub based on the suffix
+    if (id.includes('Preview_')) {
+        if (id.endsWith('_autotrack_sub') || id.endsWith('_sub')) {
+            return 'sub';
+        }
+        if (id.endsWith('_autotrack') || id.endsWith('_main') || id.match(/Preview_\d+_?[a-z]*$/)) {
+            return 'main';
+        }
+    }
+
     return;
+}
+
+/**
+ * Extract and normalize variant type from stream ID or URL (e.g., "autotrack" from "native_autotrack_main" or "?variant=autotrack")
+ * Returns undefined if no variant is present, or "autotrack"/"telephoto"/"default" if present
+ * Note: "telephoto" lens typically uses "autotrack" variant for TrackMix on NVR
+ */
+export function extractVariantFromStreamId(id: string | undefined, url?: string | undefined): 'autotrack' | 'telephoto' | 'default' | undefined {
+    let variant: string | undefined;
+    
+    // First try to extract from ID
+    if (id) {
+        // Handle native stream IDs: native_autotrack_main, native_telephoto_sub, etc.
+        if (id.startsWith('native_')) {
+            const withoutPrefix = id.replace('native_', '');
+            const parts = withoutPrefix.split('_');
+            // If there are more than 1 parts, the first part(s) before the profile is the variant
+            // e.g., "autotrack_main" -> variant: "autotrack", profile: "main"
+            if (parts.length > 1) {
+                const profile = parts[parts.length - 1];
+                // Only return variant if profile is valid (main/sub/ext)
+                if (profile === 'main' || profile === 'sub' || profile === 'ext') {
+                    // Join all parts except the last one as variant (handles multi-part variants)
+                    variant = parts.slice(0, -1).join('_');
+                }
+            }
+        }
+
+        // Handle RTSP IDs like Preview_03_autotrack, Preview_03_autotrack_sub
+        if (!variant && id.includes('Preview_')) {
+            if (id.includes('_autotrack')) {
+                variant = 'autotrack';
+            } else if (id.includes('_telephoto')) {
+                variant = 'telephoto';
+            }
+        }
+    }
+
+    // Fallback: try to extract from URL query parameter
+    if (!variant && url) {
+        try {
+            const urlObj = new URL(url);
+            const variantParam = urlObj.searchParams.get('variant');
+            if (variantParam) {
+                variant = variantParam;
+            }
+        } catch {
+            // Invalid URL, ignore
+        }
+    }
+
+    // Normalize variant: accept "autotrack", "telephoto", or map "default" to undefined
+    if (variant === 'autotrack' || variant === 'telephoto') {
+        // For TrackMix on NVR, "telephoto" lens typically uses "autotrack" variant
+        // But we preserve "telephoto" if explicitly specified
+        return variant as 'autotrack' | 'telephoto';
+    }
+
+    return undefined;
 }
 
 export function selectStreamOption(
@@ -86,13 +170,14 @@ export async function createRfc4571MediaObjectFromStreamManager(params: {
     profile: StreamProfile;
     streamKey: string;
     expectedVideoType?: 'H264' | 'H265';
+    variant?: string;
     selected: UrlMediaStreamOptions;
     sourceId: string;
     onDetectedCodec?: (detectedCodec: 'h264' | 'h265') => void;
 }): Promise<MediaObject> {
-    const { streamManager, channel, profile, streamKey, expectedVideoType, selected, sourceId, onDetectedCodec } = params;
+    const { streamManager, channel, profile, streamKey, expectedVideoType, variant, selected, sourceId, onDetectedCodec } = params;
 
-    const { host, port, sdp, audio, username, password } = await streamManager.getRfcStream(channel, profile, streamKey, expectedVideoType);
+    const { host, port, sdp, audio, username, password } = await streamManager.getRfcStream(channel, profile, streamKey, expectedVideoType, variant);
 
     // Update cached stream options with the detected codec (helps prebuffer/NVR avoid mismatch).
     try {
@@ -202,7 +287,7 @@ export class StreamManager {
     }
 
     private getLogger() {
-        return this.opts.getLogger();
+        return this.opts.logger;
     }
 
     private async ensureRfcServer(
@@ -211,6 +296,7 @@ export class StreamManager {
         expectedVideoType: 'H264' | 'H265' | undefined,
         options: {
             channel?: number;
+            variant?: string;
             compositeOptions?: CompositeStreamPipOptions;
         },
     ): Promise<RfcServerInfo> {
@@ -279,6 +365,7 @@ export class StreamManager {
                 api,
                 channel: options.channel,
                 profile,
+                variant: options.variant as any, // NativeVideoStreamVariant: 'default' | 'autotrack' | 'telephoto'
                 logger: this.getLogger(),
                 expectedVideoType: expectedVideoType as VideoType | undefined,
                 closeApiOnTeardown,
@@ -317,9 +404,11 @@ export class StreamManager {
         profile: StreamProfile,
         streamKey: string,
         expectedVideoType?: 'H264' | 'H265',
+        variant?: string,
     ): Promise<RfcServerInfo> {
         return await this.ensureRfcServer(streamKey, profile, expectedVideoType, {
             channel,
+            variant,
         });
     }
 

@@ -97,56 +97,6 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
         logger.log(`Periodic tasks started: sleep check every 5s, battery update every ${batteryUpdateIntervalMinutes} minutes`);
     }
 
-    async updateSleepingState(sleepStatus: SleepStatus): Promise<void> {
-        try {
-            if (this.isDebugEnabled()) {
-                this.getBaichuanLogger().debug('getSleepStatus result:', JSON.stringify(sleepStatus));
-            }
-
-            if (sleepStatus.state === 'sleeping') {
-                if (!this.sleeping) {
-                    this.getBaichuanLogger().log(`Camera is sleeping: ${sleepStatus.reason}`);
-                    this.sleeping = true;
-                }
-            } else if (sleepStatus.state === 'awake') {
-                // Camera is awake
-                const wasSleeping = this.sleeping;
-                if (wasSleeping) {
-                    this.getBaichuanLogger().log(`Camera woke up: ${sleepStatus.reason}`);
-                    this.sleeping = false;
-                }
-
-                if (wasSleeping) {
-                    this.alignAuxDevicesState().catch(() => { });
-                    if (this.forceNewSnapshot) {
-                        this.takePicture().catch(() => { });
-                    }
-                }
-            } else {
-                // Unknown state
-                this.getBaichuanLogger().debug(`Sleep status unknown: ${sleepStatus.reason}`);
-            }
-        } catch (e) {
-            // Silently ignore errors in sleep check to avoid spam
-            this.getBaichuanLogger().debug('Error in updateSleepingState:', e);
-        }
-    }
-
-    async updateOnlineState(isOnline: boolean): Promise<void> {
-        try {
-            if (this.isDebugEnabled()) {
-                this.getBaichuanLogger().debug('updateOnlineState result:', isOnline);
-            }
-
-            if (isOnline !== this.online) {
-                this.online = isOnline;
-            }
-        } catch (e) {
-            // Silently ignore errors in sleep check to avoid spam
-            this.getBaichuanLogger().debug('Error in updateOnlineState:', e);
-        }
-    }
-
     async checkRecordingAction(newBatteryLevel: number) {
         const nvrDeviceId = this.plugin.nvrDeviceId;
         if (nvrDeviceId && this.mixins.includes(nvrDeviceId)) {

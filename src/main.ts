@@ -6,6 +6,7 @@ import { CommonCameraMixin } from "./common";
 import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
 import { batteryCameraSuffix, batteryMultifocalSuffix, cameraSuffix, extractThumbnailFromVideo, getDeviceInterfaces, handleVideoClipRequest, multifocalSuffix, nvrSuffix } from "./utils";
+import { randomBytes } from "crypto";
 
 interface ThumbnailRequest {
     deviceId: string;
@@ -29,6 +30,7 @@ interface ThumbnailRequestInput {
 
 class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, DeviceCreator {
     devices = new Map<string, BaseBaichuanClass>();
+    private deviceCreationPromises = new Map<string, Promise<BaseBaichuanClass>>();
     mixinsMap = new Map<string, CommonCameraMixin>();
     nvrDeviceId: string;
     private thumbnailQueue: ThumbnailRequest[] = [];
@@ -46,13 +48,36 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
     }
 
     async getDevice(nativeId: ScryptedNativeId): Promise<BaseBaichuanClass> {
+        // Return existing device if available
         if (this.devices.has(nativeId)) {
             return this.devices.get(nativeId)!;
         }
 
-        const newCamera = this.createCamera(nativeId);
-        this.devices.set(nativeId, newCamera);
-        return newCamera;
+        // Check if device creation is already in progress to prevent race conditions
+        const existingPromise = this.deviceCreationPromises.get(nativeId);
+        if (existingPromise) {
+            return existingPromise;
+        }
+
+        // Create device creation promise to handle concurrent requests
+        const creationPromise = (async () => {
+            try {
+                // Double-check after async operation
+                if (this.devices.has(nativeId)) {
+                    return this.devices.get(nativeId)!;
+                }
+
+                const newCamera = this.createCamera(nativeId);
+                this.devices.set(nativeId, newCamera);
+                return newCamera;
+            } finally {
+                // Clean up the promise after creation completes
+                this.deviceCreationPromises.delete(nativeId);
+            }
+        })();
+
+        this.deviceCreationPromises.set(nativeId, creationPromise);
+        return creationPromise;
     }
 
     async createDevice(settings: DeviceCreatorSettings, nativeId?: string): Promise<string> {
@@ -65,7 +90,6 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             throw new Error('IP address, username, and password are required');
         }
 
-        // Auto-detect device type (camera, battery-cam, or nvr)
         this.console.log(`[AutoDetect] Starting device type detection for ${ipAddress}...`);
         const { autoDetectDeviceType } = await import("@apocaliss92/reolink-baichuan-js");
 
@@ -78,19 +102,20 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 logger: this.console,
             },
         );
+        const { ip, mac } = detection.hostNetworkInfo ?? {}
 
-        this.console.log(`[AutoDetect] Detected device type: ${detection.type} (transport: ${detection.transport})`);
+        this.console.log(`[AutoDetect] Detected device type: ${detection.type} (transport: ${detection.transport}). Device info: ${JSON.stringify(detection.deviceInfo)}`);
 
         // Use the API that was successfully used for detection
         const detectedApi = detection.api;
+        const deviceInfo = detection.deviceInfo || {};
+        const name = deviceInfo?.name || `Reolink ${detection.type}`;
+        const identifier = uid || mac || ip || name || randomBytes(4).toString('hex');
 
         // Handle multi-focal device case
         if (detection.type === 'multifocal') {
-            const deviceInfo = detection.deviceInfo || {};
-            const name = deviceInfo.name || 'Reolink Multi-Focal';
-            const serialNumber = deviceInfo.serialNumber || deviceInfo.itemNo || `multifocal-${Date.now()}`;
             const isBattery = detection.transport === 'udp';
-            nativeId = `${serialNumber}${isBattery ? batteryMultifocalSuffix : multifocalSuffix}`;
+            nativeId = `${identifier}${isBattery ? batteryMultifocalSuffix : multifocalSuffix}`;
 
             settings.newCamera ||= name;
 
@@ -126,10 +151,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
         // Handle NVR case
         if (detection.type === 'nvr') {
-            const deviceInfo = detection.deviceInfo || {};
-            const name = deviceInfo?.name || 'Reolink NVR';
-            const serialNumber = deviceInfo?.serialNumber || deviceInfo?.itemNo || `nvr-${Date.now()}`;
-            nativeId = `${serialNumber}${nvrSuffix}`;
+            nativeId = `${identifier}${nvrSuffix}`;
 
             settings.newCamera ||= name;
 
@@ -157,16 +179,11 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             return nativeId;
         }
 
-        // For camera and battery-cam, create the device
-        const deviceInfo = detection.deviceInfo || {};
-        const name = deviceInfo?.name || 'Reolink Camera';
-        const serialNumber = deviceInfo?.serialNumber || deviceInfo?.itemNo || `unknown-${Date.now()}`;
-
         // Create nativeId based on device type
         if (detection.type === 'battery-cam') {
-            nativeId = `${serialNumber}${batteryCameraSuffix}`;
+            nativeId = `${identifier}${batteryCameraSuffix}`;
         } else {
-            nativeId = `${serialNumber}${cameraSuffix}`;
+            nativeId = `${identifier}${cameraSuffix}`;
         }
 
         settings.newCamera ||= name;
