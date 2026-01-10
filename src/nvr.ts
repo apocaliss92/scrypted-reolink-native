@@ -19,17 +19,17 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             type: 'boolean',
             immediate: true,
         },
-        eventSource: {
-            title: 'Event Source',
-            description: 'Select the source for camera events: Native (Baichuan) or CGI (HTTP polling)',
-            type: 'string',
-            choices: ['Native', 'CGI'],
-            defaultValue: 'Native',
-            immediate: true,
-            onPut: async () => {
-                await this.reinitEventSubscriptions();
-            }
-        },
+        // eventSource: {
+        //     title: 'Event Source',
+        //     description: 'Select the source for camera events: Native (Baichuan) or CGI (HTTP polling)',
+        //     type: 'string',
+        //     choices: ['Native', 'CGI'],
+        //     defaultValue: 'Native',
+        //     immediate: true,
+        //     onPut: async () => {
+        //         await this.reinitEventSubscriptions();
+        //     }
+        // },
         ipAddress: {
             title: 'IP address',
             type: 'string',
@@ -170,10 +170,11 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                 await this.reinit();
             },
             onSimpleEvent: (ev) => this.forwardNativeEvent(ev),
-            getEventSubscriptionEnabled: () => {
-                const eventSource = this.storageSettings.values.eventSource || 'Native';
-                return eventSource === 'Native';
-            },
+            getEventSubscriptionEnabled: () => true,
+            // getEventSubscriptionEnabled: () => {
+            //     const eventSource = this.storageSettings.values.eventSource || 'Native';
+            //     return eventSource === 'Native';
+            // },
         };
     }
 
@@ -217,10 +218,10 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     private forwardNativeEvent(ev: ReolinkSimpleEvent): void {
         const logger = this.getBaichuanLogger();
 
-        const eventSource = this.storageSettings.values.eventSource || 'Native';
-        if (eventSource !== 'Native') {
-            return;
-        }
+        // const eventSource = this.storageSettings.values.eventSource || 'Native';
+        // if (eventSource !== 'Native') {
+        //     return;
+        // }
 
         try {
             logger.debug(`Baichuan event: ${JSON.stringify(ev)}`);
@@ -311,15 +312,15 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         return await this.ensureBaichuanClient();
     }
 
-    async subscribeToAllEvents(): Promise<void> {
-        const eventSource = this.storageSettings.values.eventSource || 'Native';
+    // async subscribeToAllEvents(): Promise<void> {
+    // const eventSource = this.storageSettings.values.eventSource || 'Native';
 
-        if (eventSource !== 'Native') {
-            await this.unsubscribeFromAllEvents();
-        } else {
-            await super.subscribeToEvents();
-        }
-    }
+    // if (eventSource !== 'Native') {
+    // await this.unsubscribeFromAllEvents();
+    // } else {
+    // await super.subscribeToEvents();
+    // }
+    // }
 
     private async runNvrDiagnostics(): Promise<void> {
         const logger = this.getBaichuanLogger();
@@ -345,87 +346,88 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     /**
      * Reinitialize event subscriptions based on selected event source
      */
-    private async reinitEventSubscriptions(): Promise<void> {
-        const logger = this.getBaichuanLogger();
-        const { eventSource } = this.storageSettings.values;
+    // private async reinitEventSubscriptions(): Promise<void> {
+    //     const logger = this.getBaichuanLogger();
+    // const { eventSource } = this.storageSettings.values;
 
-        // Unsubscribe from Native events if switching away
-        if (eventSource !== 'Native') {
-            await this.unsubscribeFromAllEvents();
-        } else {
-            this.subscribeToAllEvents().catch((e) => {
-                logger.warn('Failed to subscribe to Native events', e?.message || String(e));
-            });
-        }
+    // // Unsubscribe from Native events if switching away
+    // if (eventSource !== 'Native') {
+    //     await this.unsubscribeFromAllEvents();
+    // } else {
+    // this.subscribeToAllEvents().catch((e) => {
+    //     logger.warn('Failed to subscribe to Native events', e?.message || String(e));
+    // });
+    // }
 
-        logger.log(`Event source set to: ${eventSource}`);
-    }
+    // logger.log(`Event source set to: ${eventSource}`);
+    // }
 
     /**
      * Forward events from CGI source to cameras
      */
-    private forwardCgiEvents(eventsRes: Record<number, EventsResponse>): void {
-        const logger = this.getBaichuanLogger();
+    // private forwardCgiEvents(eventsRes: Record<number, EventsResponse>): void {
+    //     const logger = this.getBaichuanLogger();
 
-        logger.debug(`CGI Events call result: ${JSON.stringify(eventsRes)}`);
+    //     logger.debug(`CGI Events call result: ${JSON.stringify(eventsRes)}`);
 
-        // Use channel map for efficient lookup
-        for (const [channel, nativeId] of this.channelToNativeIdMap.entries()) {
-            const targetCamera = nativeId ? this.cameraNativeMap.get(nativeId) : undefined;
-            const cameraEventsData = eventsRes[channel];
-            if (cameraEventsData && targetCamera) {
-                targetCamera.processEvents(cameraEventsData);
-            }
-        }
-    }
+    //     // Use channel map for efficient lookup
+    //     for (const [channel, nativeId] of this.channelToNativeIdMap.entries()) {
+    //         const targetCamera = nativeId ? this.cameraNativeMap.get(nativeId) : undefined;
+    //         const cameraEventsData = eventsRes[channel];
+    //         if (cameraEventsData && targetCamera) {
+    //             targetCamera.processEvents(cameraEventsData);
+    //         }
+    //     }
+    // }
 
     async init() {
         const logger = this.getBaichuanLogger();
         await this.ensureBaichuanClient();
 
         await this.updateDeviceInfo();
+        await this.subscribeToEvents();
 
-        await this.reinitEventSubscriptions();
+        // await this.reinitEventSubscriptions();
 
-        setInterval(async () => {
-            if (this.processing) {
-                return;
-            }
-            this.processing = true;
-            try {
-                const api = await this.ensureBaichuanClient();
+        // setInterval(async () => {
+        //     if (this.processing) {
+        //         return;
+        //     }
+        //     this.processing = true;
+        //     try {
+        //         const api = await this.ensureBaichuanClient();
 
-                const { eventSource } = this.storageSettings.values;
+        // const { eventSource } = this.storageSettings.values;
 
-                if (eventSource === 'CGI') {
-                    const eventsRes = await api.getAllChannelsEvents();
-                    this.forwardCgiEvents(eventsRes.parsed);
+        // if (eventSource === 'CGI') {
+        //     const eventsRes = await api.getAllChannelsEvents();
+        //     this.forwardCgiEvents(eventsRes.parsed);
 
-                    const { batteryInfoData, response } = await api.getAllChannelsBatteryInfo();
+        //     const { batteryInfoData, response } = await api.getAllChannelsBatteryInfo();
 
-                    logger.debug(`Battery info call result: ${JSON.stringify({ batteryInfoData, response })}`);
+        //     logger.debug(`Battery info call result: ${JSON.stringify({ batteryInfoData, response })}`);
 
-                    this.cameraNativeMap.forEach((camera) => {
-                        if (camera) {
-                            const channel = camera.storageSettings.values.rtspChannel;
-                            const cameraBatteryData = batteryInfoData[channel];
-                            if (cameraBatteryData) {
-                                camera.updateSleepingState({
-                                    reason: 'NVR',
-                                    state: cameraBatteryData.sleeping ? 'sleeping' : 'awake',
-                                    idleMs: 0,
-                                    lastRxAtMs: 0,
-                                }).catch(() => { });
-                            }
-                        }
-                    });
-                }
-            } catch (e) {
-                logger.error('Error on events flow', e?.message || String(e));
-            } finally {
-                this.processing = false;
-            }
-        }, 1000);
+        //     this.cameraNativeMap.forEach((camera) => {
+        //         if (camera) {
+        //             const channel = camera.storageSettings.values.rtspChannel;
+        //             const cameraBatteryData = batteryInfoData[channel];
+        //             if (cameraBatteryData) {
+        //                 camera.updateSleepingState({
+        //                     reason: 'NVR',
+        //                     state: cameraBatteryData.sleeping ? 'sleeping' : 'awake',
+        //                     idleMs: 0,
+        //                     lastRxAtMs: 0,
+        //                 }).catch(() => { });
+        //             }
+        //         }
+        //     });
+        // }
+        //         } catch (e) {
+        //             logger.error('Error on events flow', e?.message || String(e));
+        //         } finally {
+        //             this.processing = false;
+        //         }
+        //     }, 1000);
     }
 
     async updateDeviceInfo(): Promise<void> {
