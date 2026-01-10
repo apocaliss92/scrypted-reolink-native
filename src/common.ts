@@ -2561,7 +2561,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
                 await sdk.deviceManager.onDeviceDiscovered(device);
 
-                logger.log(`Device updated`);
+                logger.log(`Device interfaces updated`);
                 logger.debug(JSON.stringify({ hasNvr: !!this.nvrDevice, hasMultiFocal: !!this.multiFocalDevice, hasPlugin: !!this.plugin }));
                 logger.debug(`${JSON.stringify(device)}`);
             } catch (e) {

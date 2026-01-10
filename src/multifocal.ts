@@ -11,9 +11,6 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
     plugin: ReolinkNativePlugin;
     cameraNativeMap = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera>();
     private channelToNativeIdMap = new Map<number, string>();
-    private initReinitTimeout: NodeJS.Timeout | undefined;
-    private initInProgress: boolean = false;
-    private reportDevicesInProgress: boolean = false;
     isBattery: boolean;
 
     constructor(nativeId: string, plugin: ReolinkNativePlugin, type: CameraType, nvrDevice?: ReolinkNativeNvrDevice) {
@@ -43,43 +40,9 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
         return this.name || 'Multi-Focal Device';
     }
 
-    async reinit(): Promise<void> {
-        // Cancel any pending init/reinit
-        if (this.initReinitTimeout) {
-            clearTimeout(this.initReinitTimeout);
-            this.initReinitTimeout = undefined;
-        }
-
-        // Schedule reinit with debounce
-        this.scheduleInit(true);
-    }
-
-    private scheduleInit(isReinit: boolean = false): void {
-        // Cancel any pending init/reinit
-        if (this.initReinitTimeout) {
-            clearTimeout(this.initReinitTimeout);
-        }
-
-        this.initReinitTimeout = setTimeout(async () => {
-            const logger = this.getBaichuanLogger();
-            if (isReinit) {
-                logger.log('Reinitializing multi-focal device...');
-                await this.cleanupBaichuanApi();
-            }
-            await this.init();
-            this.initReinitTimeout = undefined;
-        }, isReinit ? 500 : 2000);
-    }
-
     async init(): Promise<void> {
         const logger = this.getBaichuanLogger();
 
-        // Prevent multiple simultaneous init calls
-        if (this.initInProgress) {
-            return;
-        }
-
-        this.initInProgress = true;
         try {
             this.storageSettings.settings.uid.hide = !this.isBattery;
 
@@ -88,8 +51,6 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
             await this.subscribeToEvents();
         } catch (e) {
             logger.error('Failed to initialize multi-focal device', e?.message || String(e));
-        } finally {
-            this.initInProgress = false;
         }
     }
 
@@ -125,27 +86,15 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
     async reportDevices(): Promise<void> {
         const logger = this.getBaichuanLogger();
 
-        // Prevent multiple simultaneous reportDevices calls
-        if (this.reportDevicesInProgress) {
-            return;
-        }
-
-        this.reportDevicesInProgress = true;
         try {
             const api = await this.ensureClient();
             const { username, password, ipAddress, uid, rtspChannel } = this.storageSettings.values;
 
-            const { capabilities, support, abilities, features, objects, presets } = await api.getDeviceCapabilities();
-
-            // if(this.nvrDevice) {
-
-            // } else {
-
-            // }
+            const { capabilities, objects, presets } = await api.getDeviceCapabilities();
             const multifocalInfo = await api.getDualLensChannelInfo(rtspChannel, {
                 onNvr: !!this.nvrDevice
             });
-            logger.log(`Sync entities from remote for ${multifocalInfo.channels.length} channels`);
+            logger.log(`Discovering ${multifocalInfo.channels.length} lenses`);
             logger.log({ multifocalInfo, rtspChannel, onNvr: !!this.nvrDevice });
 
             this.storageSettings.values.multifocalInfo = multifocalInfo;
@@ -176,8 +125,9 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
                 };
 
                 await sdk.deviceManager.onDeviceDiscovered(device);
-                // TODO: Remove this after debugging
-                logger.log(`Discovering lens device ${nativeId}: ${JSON.stringify({ interfaces, deviceCapabilities })}`);
+
+                logger.log(`Discovering lens ${lensType}`);
+                logger.log(`${JSON.stringify({ interfaces, deviceCapabilities })}`)
 
                 const camera = await this.getDevice(nativeId);
 
@@ -202,8 +152,6 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
         } catch (e) {
             logger.error('Failed to report devices', e?.message || String(e));
             throw e;
-        } finally {
-            this.reportDevicesInProgress = false;
         }
     }
 
