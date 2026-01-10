@@ -36,6 +36,8 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
             this.storageSettings.settings.uid.hide = !this.isBattery;
 
             await this.ensureClient();
+            // subscribeToEvents in common.ts will check if this device has a parent (nvrDevice)
+            // and skip subscription if needed - events will be forwarded from parent
             await this.subscribeToEvents();
         } catch (e) {
             logger.error('Failed to initialize multi-focal device', e?.message || String(e));
@@ -167,28 +169,50 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
         super.releaseDevice(id, nativeId);
     }
 
+    /**
+     * Forward events received from parent (NVR if child, or directly from Baichuan if standalone)
+     * to the MultiFocal device itself AND to ALL lens devices (camera children) of this MultiFocal.
+     * This ensures that:
+     * 1. The MultiFocal device itself receives events (it can have event handling capabilities)
+     * 2. All lenses receive the events, even if they share the same channel
+     *    (e.g., wide and tele on the same channel on NVR).
+     * Only the root device (NVR or standalone MultiFocal) subscribes to events,
+     * and events are forwarded down the hierarchy.
+     */
     forwardNativeEvent(ev: ReolinkSimpleEvent): void {
         const logger = this.getBaichuanLogger();
-        const channel = ev?.channel;
+        const eventChannel = ev?.channel;
 
-        if (channel === undefined) {
-            logger.debug('Event missing channel, ignoring');
+        // First, forward event to the MultiFocal device itself
+        try {
+            this.onSimpleEvent(ev);
+        } catch (e) {
+            logger.warn(`Error forwarding event to MultiFocal device itself:`, e?.message || String(e));
+        }
+
+        // Then, forward event to all lens devices (camera children) of this MultiFocal
+        // Even if event has a specific channel, we forward to all lenses because:
+        // 1. On NVR, wide and tele lenses can share the same channel
+        // 2. Events might be relevant to all lenses of the MultiFocal device
+        const lensDevices = Array.from(this.cameraNativeMap.values());
+        const forwardedCount = lensDevices.length;
+        
+        if (forwardedCount === 0) {
+            logger.debug(`No lens devices found for MultiFocal, event forwarded only to MultiFocal itself`);
             return;
         }
 
-        const nativeId = this.channelToNativeIdMap.get(channel);
-        if (!nativeId) {
-            logger.debug(`No camera found for channel ${channel}, ignoring event`);
-            return;
-        }
+        logger.debug(`Forwarding event (channel=${eventChannel}) to MultiFocal itself and ${forwardedCount} lens device(s)`);
 
-        const camera = this.cameraNativeMap.get(nativeId);
-        if (!camera) {
-            logger.debug(`Camera ${nativeId} not yet initialized, ignoring event`);
-            return;
+        // Forward event to all camera children (lens devices)
+        for (const camera of lensDevices) {
+            try {
+                // Each lens device will filter events based on its own channel if needed
+                camera.onSimpleEvent(ev);
+            } catch (e) {
+                logger.warn(`Error forwarding event to lens device ${camera.nativeId}:`, e?.message || String(e));
+            }
         }
-
-        camera.onSimpleEvent(ev);
     }
 
     async unsubscribeFromAllEvents(): Promise<void> {

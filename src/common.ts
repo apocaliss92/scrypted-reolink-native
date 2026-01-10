@@ -1662,8 +1662,16 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
     }
 
+    /**
+     * Subscribe to Baichuan events only if this is a standalone device (not a child of NVR or MultiFocal).
+     * If this device has a parent (nvrDevice or multiFocalDevice), events will be forwarded from the parent.
+     * This ensures that only the root device in the hierarchy subscribes to events, avoiding duplicate subscriptions.
+     */
     async subscribeToEvents(): Promise<void> {
+        // If this device has a parent (NVR or MultiFocal), don't subscribe - events will be forwarded from parent
         if (this.nvrDevice || this.multiFocalDevice) {
+            const logger = this.getBaichuanLogger();
+            logger.debug(`Device has parent (nvrDevice=${!!this.nvrDevice}, multiFocalDevice=${!!this.multiFocalDevice}), skipping event subscription (events will be forwarded from parent)`);
             return;
         }
 

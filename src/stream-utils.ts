@@ -369,6 +369,13 @@ export class StreamManager {
 
             let created: any;
             try {
+                const compositeOptions = isComposite
+                    ? {
+                        ...(options.compositeOptions ?? {}),
+                        forceH264: true,
+                    }
+                    : undefined;
+
                 created = await createRfc4571TcpServer({
                     api,
                     channel: options.channel,
@@ -380,7 +387,7 @@ export class StreamManager {
                     password,
                     // Composite can take a bit longer (ffmpeg warmup + first IDR).
                     ...(isComposite ? { keyframeTimeoutMs: 20_000, idleTeardownMs: 20_000 } : {}),
-                    ...(options.compositeOptions ? { compositeOptions: options.compositeOptions } : {}),
+                    ...(compositeOptions ? { compositeOptions } : {}),
                     ...(compositeApis ? { compositeApis } : {}),
                 });
             }

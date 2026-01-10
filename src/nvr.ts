@@ -215,6 +215,12 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         }, isReinit ? 500 : 2000);
     }
 
+    /**
+     * Forward events received from Baichuan to the appropriate child device (Camera or MultiFocal).
+     * This ensures that only NVR (root device) subscribes to events, and events are forwarded down the hierarchy:
+     * - NVR → MultiFocal → Camera
+     * - NVR → Camera (directly)
+     */
     private forwardNativeEvent(ev: ReolinkSimpleEvent): void {
         const logger = this.getBaichuanLogger();
 
@@ -226,7 +232,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         try {
             logger.debug(`Baichuan event: ${JSON.stringify(ev)}`);
 
-            // Find camera for this channel
+            // Find device (camera or multifocal) for this channel
             const channel = ev?.channel;
             if (channel === undefined) {
                 logger.error('Event has no channel, ignoring');
@@ -234,10 +240,16 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             }
 
             const nativeId = this.channelToNativeIdMap.get(channel);
-            const targetCamera = nativeId ? this.cameraNativeMap.get(nativeId) : undefined;
+            const targetDevice = nativeId ? this.cameraNativeMap.get(nativeId) : undefined;
 
-            if (!targetCamera) {
-                logger.debug(`No camera found for channel ${channel} (nativeId: ${nativeId}), ignoring event`);
+            if (!targetDevice) {
+                logger.debug(`No device found for channel ${channel} (nativeId: ${nativeId}), ignoring event`);
+                return;
+            }
+
+            // If target is a MultiFocal device, forward the event to it (it will forward to its camera children)
+            if (targetDevice instanceof ReolinkNativeMultiFocalDevice) {
+                targetDevice.forwardNativeEvent(ev);
                 return;
             }
 
@@ -254,7 +266,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                 case 'doorbell':
                     // Handle doorbell if camera supports it
                     try {
-                        targetCamera.handleDoorbellEvent();
+                        targetDevice.handleDoorbellEvent();
                     }
                     catch (e) {
                         logger.warn(`Error handling doorbell event for camera channel ${channel}`, e?.message || String(e));
@@ -284,17 +296,17 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             }
 
             if (isSleepingEvent) {
-                targetCamera.updateSleepingState({
+                targetDevice.updateSleepingState({
                     reason: 'NVR',
                     state: ev.type === 'sleeping' ? 'sleeping' : 'awake',
                 }).catch(() => { });
-            } if (isSleepingEvent) {
-                (targetCamera as ReolinkNativeBatteryCamera).updateOnlineState(
+            } else if (isOnlineEvent) {
+                (targetDevice as ReolinkNativeBatteryCamera).updateOnlineState(
                     ev.type === 'online' ? true : false
                 ).catch(() => { });
             } else {
                 // Process events on the target camera
-                targetCamera.processEvents({ motion, objects }).catch((e) => {
+                targetDevice.processEvents({ motion, objects }).catch((e) => {
                     logger.warn(`Error processing events for camera channel ${channel}`, e?.message || String(e));
                 });
             }
