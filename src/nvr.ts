@@ -1,4 +1,4 @@
-import type { EventsResponse, ReolinkBaichuanApi, ReolinkBaichuanDeviceSummary, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { EventsResponse, NativeVideoStreamVariant, ReolinkBaichuanApi, ReolinkBaichuanDeviceSummary, ReolinkSimpleEvent, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { AdoptDevice, Device, DeviceDiscovery, DeviceProvider, DiscoveredDevice, Reboot, ScryptedDeviceType, ScryptedInterface, Setting, Settings, SettingValue } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
@@ -9,6 +9,8 @@ import { convertDebugLogsToApiOptions, getApiRelevantDebugLogs, getDebugLogChoic
 import ReolinkNativePlugin from "./main";
 import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { batteryCameraSuffix, batteryMultifocalSuffix, cameraSuffix, getDeviceInterfaces, multifocalSuffix, updateDeviceInfo } from "./utils";
+import { createBaichuanApi } from "./connect";
+import { parseStreamProfileFromId } from "./stream-utils";
 
 export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Settings, DeviceDiscovery, DeviceProvider, Reboot {
     storageSettings = new StorageSettings(this, {
@@ -112,7 +114,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     private debugLogsResetTimeout: NodeJS.Timeout | undefined;
 
     constructor(nativeId: string, plugin: ReolinkNativePlugin) {
-        super(nativeId);
+        super(nativeId, "tcp");
         this.plugin = plugin;
 
         this.scheduleInit();
@@ -124,6 +126,23 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     }
 
     protected getConnectionConfig(): BaichuanConnectionConfig {
+        const { ipAddress, username, password } = this.storageSettings.values;
+        if (!ipAddress || !username || !password) {
+            throw new Error('Missing NVR credentials');
+        }
+
+        const debugOptions = this.getBaichuanDebugOptions();
+
+        return {
+            host: ipAddress,
+            username,
+            password,
+            transport: 'tcp',
+            debugOptions,
+        };
+    }
+
+    protected getStreamClientInputs(): BaichuanConnectionConfig {
         const { ipAddress, username, password } = this.storageSettings.values;
         if (!ipAddress || !username || !password) {
             throw new Error('Missing NVR credentials');

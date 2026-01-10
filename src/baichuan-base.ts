@@ -162,6 +162,14 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
     protected baichuanApi: ReolinkBaichuanApi | undefined;
     protected ensureClientPromise: Promise<ReolinkBaichuanApi> | undefined;
     protected connectionTime: number | undefined;
+    transport: BaichuanTransport;
+    // Map of stream clients keyed by streamKey (profile + variantType)
+    private streamClients = new Map<string, ReolinkBaichuanApi>();
+
+    constructor(nativeId: string, transport: BaichuanTransport) {
+        super(nativeId);
+        this.transport = transport
+    }
 
     private errorListener?: (err: unknown) => void;
     private closeListener?: () => void;
@@ -188,6 +196,13 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
      * Get the device name for logging
      */
     protected abstract getDeviceName(): string;
+
+    /**
+     * Get connection inputs for creating a stream client for a specific streamKey
+     * This method is called by createStreamClient to get the inputs needed to create a new client
+     * @param streamKey The unique stream key (e.g., "composite_default_main", "channel_0_main", etc.)
+     */
+    protected abstract getStreamClientInputs(): BaichuanConnectionConfig;
 
     /**
      * Get a Baichuan logger instance with formatting and debug control
@@ -403,6 +418,9 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         // Call before cleanup hook
         await this.onBeforeCleanup();
 
+        // Cleanup all stream clients
+        await this.cleanupStreamClients();
+
         // Remove all listeners
         if (this.closeListener) {
             try {
@@ -506,6 +524,98 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         }
 
         this.eventSubscriptionActive = false;
+    }
+
+    private async createNewClient(): Promise<ReolinkBaichuanApi> {
+        const config = this.getStreamClientInputs();
+        const logger = this.getBaichuanLogger();
+
+        const api = await createBaichuanApi({
+            inputs: {
+                host: config.host,
+                username: config.username,
+                password: config.password,
+                uid: config.uid,
+                logger,
+                debugOptions: config.debugOptions,
+                udpDiscoveryMethod: config.udpDiscoveryMethod,
+            },
+            transport: config.transport,
+        });
+
+        await api.login();
+
+        return api;
+    }
+
+    /**
+     * Create or get a dedicated Baichuan API session for streaming (used by StreamManager).
+     * Returns an existing client if one exists for the same streamKey, otherwise creates a new one.
+     * @param streamKey The unique stream key (e.g., "composite_default_main", "channel_0_main", etc.)
+     */
+    async createStreamClient(streamKey: string): Promise<ReolinkBaichuanApi> {
+        const logger = this.getBaichuanLogger();
+
+        // Check if a client already exists for this streamKey
+        const existingClient = this.streamClients.get(streamKey);
+        if (existingClient) {
+            // Verify the client is still valid (connected and logged in)
+            const isConnected = existingClient.client.isSocketConnected();
+            const isLoggedIn = existingClient.client.loggedIn;
+
+            if (isConnected && isLoggedIn) {
+                // Return existing valid client
+                logger.log(`Reusing existing stream client for streamKey=${streamKey}`);
+                return existingClient;
+            }
+
+            logger.log(`Stale stream client detected for streamKey=${streamKey}, recreating`);
+            try {
+                if (existingClient.client.isSocketConnected()) {
+                    await existingClient.close();
+                }
+            } catch {
+                // ignore cleanup errors
+            }
+            this.streamClients.delete(streamKey);
+        }
+
+        // Create new client for this streamKey
+        const api = await this.createNewClient();
+
+        // Store in map for future reuse
+        this.streamClients.set(streamKey, api);
+        logger.log(`Created new stream client for streamKey=${streamKey}`);
+
+        // Clean up when client closes
+        api.client.once('close', () => {
+            const currentClient = this.streamClients.get(streamKey);
+            if (currentClient === api) {
+                this.streamClients.delete(streamKey);
+            }
+        });
+
+        return api;
+    }
+
+    /**
+     * Cleanup all stream clients (called during device cleanup)
+     */
+    async cleanupStreamClients(): Promise<void> {
+        const clients = Array.from(this.streamClients.values());
+        this.streamClients.clear();
+
+        await Promise.allSettled(
+            clients.map(async (api) => {
+                try {
+                    if (api.client.isSocketConnected()) {
+                        await api.close();
+                    }
+                } catch {
+                    // ignore cleanup errors
+                }
+            })
+        );
     }
 }
 

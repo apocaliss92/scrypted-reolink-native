@@ -1,4 +1,5 @@
-import type { DeviceCapabilities, DualLensChannelAnalysis, NativeVideoStreamVariant, ReolinkBaichuanApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { DeviceCapabilities, DualLensChannelAnalysis, NativeVideoStreamVariant, ReolinkBaichuanApi, ReolinkSimpleEvent, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { BaichuanConnectionConfig } from "./baichuan-base";
 import sdk, { Device, DeviceProvider, Reboot, ScryptedDeviceType, Settings } from "@scrypted/sdk";
 import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
@@ -6,6 +7,7 @@ import { CameraType, CommonCameraMixin } from "./common";
 import ReolinkNativePlugin from "./main";
 import { batteryCameraSuffix, cameraSuffix, getDeviceInterfaces } from "./utils";
 import { ReolinkNativeNvrDevice } from "./nvr";
+import { createBaichuanApi } from "./connect";
 
 export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements Settings, DeviceProvider, Reboot {
     plugin: ReolinkNativePlugin;
@@ -222,6 +224,33 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
 
         // Use base class implementation
         return await this.ensureBaichuanClient();
+    }
+
+    protected getStreamClientInputs(): BaichuanConnectionConfig {
+        const { ipAddress, username, password } = this.storageSettings.values;
+        const debugOptions = this.getBaichuanDebugOptions();
+
+        return {
+            host: ipAddress,
+            username,
+            password,
+            transport: this.transport,
+            debugOptions,
+        };
+    }
+
+    /**
+     * Create a dedicated Baichuan API session for streaming (used by StreamManager).
+     * MultiFocal creates its own socket for stream clients, or delegates to NVR if on NVR.
+     */
+    async createStreamClient(streamKey: string): Promise<ReolinkBaichuanApi> {
+        // If on NVR, delegate to NVR to create the socket
+        if (this.nvrDevice) {
+            return await this.nvrDevice.createStreamClient(streamKey);
+        }
+
+        // Otherwise, use base class createStreamClient which manages stream clients per streamKey
+        return await super.createStreamClient(streamKey);
     }
 }
 

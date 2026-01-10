@@ -647,7 +647,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     protected netPortCacheBackoffMs: number = 5000; // 5 seconds backoff on failure
 
     // Client management (inherited from BaseBaichuanClass)
-    protected readonly protocol: BaichuanTransport;
     private debugLogsResetTimeout: NodeJS.Timeout | undefined;
 
     abstract init(): Promise<void>;
@@ -664,6 +663,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     isBattery: boolean;
     isMultiFocal: boolean;
     isOnNvr: boolean;
+    protocol: BaichuanTransport;
     private streamManagerRestartTimeout: NodeJS.Timeout | undefined;
     private videoClipsAutoLoadInterval: NodeJS.Timeout | undefined;
     private videoClipsAutoLoadInProgress: boolean = false;
@@ -674,7 +674,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         public plugin: ReolinkNativePlugin,
         public options: CommonCameraMixinOptions
     ) {
-        super(nativeId);
+        const isBattery = options.type === 'battery' || options.type === 'multi-focal-battery';
+        const transport = isBattery || !!options.nvrDevice ? 'udp' : 'tcp';
+        super(nativeId, transport);
         this.plugin.mixinsMap.set(this.id, this);
 
         // Store NVR device reference if provided
@@ -682,10 +684,10 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         this.multiFocalDevice = options.multiFocalDevice;
         this.thisDevice = sdk.systemManager.getDeviceById<Settings>(this.id);
 
-        this.isBattery = options.type === 'battery' || options.type === 'multi-focal-battery';
+        this.isBattery = isBattery;
         this.isMultiFocal = options.type === 'multi-focal' || options.type === 'multi-focal-battery';
-        this.protocol = this.isBattery || !!this.nvrDevice ? 'udp' : 'tcp';
         this.isOnNvr = !!this.nvrDevice || !!this.multiFocalDevice?.nvrDevice;
+        this.protocol = transport;
 
         setTimeout(async () => {
             await this.parentInit();
@@ -1303,6 +1305,19 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         };
     }
 
+    protected getStreamClientInputs(): BaichuanConnectionConfig {
+        const { ipAddress, username, password } = this.storageSettings.values;
+        const debugOptions = this.getBaichuanDebugOptions();
+
+        return {
+            host: ipAddress,
+            username,
+            password,
+            transport: this.transport,
+            debugOptions,
+        };
+    }
+
     protected getConnectionCallbacks(): BaichuanConnectionCallbacks {
         return {
             onClose: async () => {
@@ -1417,38 +1432,36 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
      * - For TCP devices (regular + multifocal), this creates a new TCP session with its own client.
      * - For UDP/battery devices, this reuses the existing client via ensureClient().
      */
-    async createStreamClient(profile?: StreamProfile): Promise<ReolinkBaichuanApi> {
-        // Battery / BCUDP path: reuse the main client to avoid extra wake-ups and sockets.
-        if (this.isBattery) {
-            return await this.ensureClient();
+    async createStreamClient(streamKey: string): Promise<ReolinkBaichuanApi> {
+        // Determine who should create the socket based on device hierarchy:
+        // 1. Camera of multifocal with nvrDevice -> nvrDevice creates the socket
+        // 2. Camera of multifocal (without nvrDevice) -> multiFocalDevice creates the socket
+        // 3. Camera of nvr -> nvrDevice creates the socket
+        // 4. Standalone camera -> camera creates its own socket (via base class)
+
+        // Case 1: Camera of multifocal with nvrDevice -> delegate to nvrDevice
+        if (this.multiFocalDevice?.nvrDevice) {
+            return await this.multiFocalDevice.nvrDevice.createStreamClient(streamKey);
         }
 
-        // For TCP path: create a new client ONLY for "ext" profile
-        // For other profiles (main, sub), reuse the main client
-        if (profile !== 'ext') {
-            return await this.ensureClient();
+        // Case 2: Camera of multifocal (without nvrDevice) -> delegate to multiFocalDevice
+        if (this.multiFocalDevice) {
+            return await this.multiFocalDevice.createStreamClient(streamKey);
         }
 
-        // TCP path with ext profile: create a separate session for streaming (RFC4571/composite/NVR-friendly).
-        const { ipAddress, username, password } = this.storageSettings.values;
-        const logger = this.getBaichuanLogger();
+        // Case 3: Camera of nvr -> delegate to nvrDevice
+        if (this.nvrDevice) {
+            return await this.nvrDevice.createStreamClient(streamKey);
+        }
 
-        const debugOptions = this.getBaichuanDebugOptions();
-        const api = await createBaichuanApi(
-            {
-                inputs: {
-                    host: ipAddress,
-                    username,
-                    password,
-                    logger,
-                    debugOptions,
-                },
-                transport: 'tcp',
-            },
-        );
+        // Case 4: Standalone camera -> create its own socket using base class method
+        // For battery cameras, reuse the main client
+        // if (this.isBattery) {
+        //     return await this.ensureClient();
+        // }
 
-        await api.login();
-        return api;
+        // For TCP standalone cameras, use base class createStreamClient which manages stream clients per streamKey
+        return await super.createStreamClient(streamKey);
     }
 
     public getAbilities(): DeviceCapabilities {
@@ -1493,7 +1506,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         const validLogger = logger || this.getBaichuanLogger() || console;
 
         const baseOptions: StreamManagerOptions = {
-            createStreamClient: (profile?: StreamProfile) => this.createStreamClient(profile),
+            createStreamClient: this.createStreamClient.bind(this),
             logger: validLogger,
             credentials: {
                 username,
@@ -2438,15 +2451,21 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         // if (isComposite && this.options && (this.options.type === 'multi-focal' || this.options.type === 'multi-focal-battery')) {
         if (selected.id?.startsWith('composite_')) {
             const profile = parseStreamProfileFromId(selected.id.replace('composite_', '')) || 'main';
-            const streamKey = `composite_${profile}`;
+            // Include variantType in streamKey to ensure each variantType has its own unique socket
+            // This is important for multifocal devices where different variantTypes may request composite streams
+            const variantType = this.storageSettings.values.variantType || 'default';
+            const streamKey = `composite_${variantType}_${profile}`;
+
+            logger.log(`Creating composite stream: profile=${profile}, variantType=${variantType}, streamKey=${streamKey}`);
 
             const createStreamFn = async () => {
                 return await createRfc4571CompositeMediaObjectFromStreamManager({
-                    streamManager: this.streamManager!,
+                    streamManager: this.streamManager,
                     profile,
                     streamKey,
                     selected,
                     sourceId: this.id,
+                    variantType,
                 });
             };
 
