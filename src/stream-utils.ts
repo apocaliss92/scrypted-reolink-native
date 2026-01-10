@@ -337,17 +337,27 @@ export class StreamManager {
 
             const isComposite = options.channel === undefined;
 
+            // For composite streams, MUST use two distinct Baichuan sessions (widerApi and teleApi).
+            // Otherwise cmd_id=3 frames can mix when streamType overlaps (wide/tele alternation/corruption).
+            // Each stream needs its own dedicated socket to avoid frame mixing.
+            // Create separate streamKeys for wider and tele to ensure distinct sockets:
+            // Format: composite_${variantType}_${profile}_wider and composite_${variantType}_${profile}_tele
+            const compositeApis = isComposite
+                ? {
+                    widerApi: await this.opts.createStreamClient(`${streamKey}_wider`),
+                    teleApi: await this.opts.createStreamClient(`${streamKey}_tele`),
+                }
+                : undefined;
+
+            // For non-composite streams, create a single API client
+            // For composite streams, api is still required as baseApi but widerApi and teleApi are used instead
             // Pass streamKey to createStreamClient - it contains all necessary information (profile, variantType, channel)
             // For composite streams, streamKey format: composite_${variantType}_${profile}
             // For regular streams, streamKey format: channel_${channel}_${profile}_${variantType} or similar
-            const api = await this.opts.createStreamClient(streamKey);
-            const compositeApis = isComposite
-                ? {
-                    widerApi: api,
-                    // Tele API uses the same streamKey since it's for the same composite stream
-                    teleApi: await this.opts.createStreamClient(streamKey),
-                }
-                : undefined;
+            const api = isComposite
+                ? compositeApis.widerApi // For composite, use widerApi as baseApi (it will be overridden by compositeApis)
+                : await this.opts.createStreamClient(streamKey);
+
             const { createRfc4571TcpServer } = await import('@apocaliss92/reolink-baichuan-js');
 
             const { username, password } = this.opts.credentials;
