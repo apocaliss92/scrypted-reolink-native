@@ -3,7 +3,6 @@ import type {
     ReolinkBaichuanApi,
     Rfc4571TcpServer,
     StreamProfile,
-    VideoType,
 } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 
 import sdk, {
@@ -155,40 +154,18 @@ export function selectStreamOption(
     return selected;
 }
 
-export function expectedVideoTypeFromUrlMediaStreamOptions(selected: UrlMediaStreamOptions): 'H264' | 'H265' | undefined {
-    const codec = selected?.video?.codec;
-    if (typeof codec !== 'string') return undefined;
-    if (codec.includes('265')) return 'H265';
-    if (codec.includes('264')) return 'H264';
-    return undefined;
-}
-
 export async function createRfc4571MediaObjectFromStreamManager(params: {
     streamManager: StreamManager;
     channel: number;
     profile: StreamProfile;
     streamKey: string;
-    expectedVideoType?: 'H264' | 'H265';
     variant?: string;
     selected: UrlMediaStreamOptions;
     sourceId: string;
-    onDetectedCodec?: (detectedCodec: 'h264' | 'h265') => void;
 }): Promise<MediaObject> {
-    const { streamManager, channel, profile, streamKey, expectedVideoType, variant, selected, sourceId, onDetectedCodec } = params;
+    const { streamManager, channel, profile, streamKey, variant, selected, sourceId } = params;
 
-    const { host, port, sdp, audio, username, password } = await streamManager.getRfcStream(channel, profile, streamKey, expectedVideoType, variant);
-
-    // Update cached stream options with the detected codec (helps prebuffer/NVR avoid mismatch).
-    try {
-        const detected = /a=rtpmap:\d+\s+(H26[45])\//.exec(sdp)?.[1];
-        if (detected) {
-            const dc = detected === 'H265' ? 'h265' : 'h264';
-            onDetectedCodec?.(dc);
-        }
-    }
-    catch {
-        // ignore
-    }
+    const { host, port, sdp, audio, username, password } = await streamManager.getRfcStream(channel, profile, streamKey, variant);
 
     const { url: _ignoredUrl, ...mso }: any = selected;
     mso.container = 'rtp';
@@ -223,26 +200,12 @@ export async function createRfc4571CompositeMediaObjectFromStreamManager(params:
     streamManager: StreamManager;
     profile: StreamProfile;
     streamKey: string;
-    expectedVideoType?: 'H264' | 'H265';
     selected: UrlMediaStreamOptions;
     sourceId: string;
-    onDetectedCodec?: (detectedCodec: 'h264' | 'h265') => void;
 }): Promise<MediaObject> {
-    const { streamManager, profile, streamKey, expectedVideoType, selected, sourceId, onDetectedCodec } = params;
+    const { streamManager, profile, streamKey, selected, sourceId } = params;
 
-    const { host, port, sdp, audio, username, password } = await streamManager.getRfcCompositeStream(profile, streamKey, expectedVideoType);
-
-    // Update cached stream options with the detected codec (helps prebuffer/NVR avoid mismatch).
-    try {
-        const detected = /a=rtpmap:\d+\s+(H26[45])\//.exec(sdp)?.[1];
-        if (detected) {
-            const dc = detected === 'H265' ? 'h265' : 'h264';
-            onDetectedCodec?.(dc);
-        }
-    }
-    catch {
-        // ignore
-    }
+    const { host, port, sdp, audio, username, password } = await streamManager.getRfcCompositeStream(profile, streamKey);
 
     const { url: _ignoredUrl, ...mso }: any = selected;
     mso.container = 'rtp';
@@ -290,14 +253,12 @@ export class StreamManager {
     }
 
     private getLogger(): Console {
-        // Always return a valid logger, fallback to console if not set
         return this.opts.logger || console;
     }
 
     private async ensureRfcServer(
         streamKey: string,
         profile: StreamProfile,
-        expectedVideoType: 'H264' | 'H265' | undefined,
         options: {
             channel?: number;
             variant?: string;
@@ -313,37 +274,27 @@ export class StreamManager {
         // Double-check: if server already exists and is listening, return it immediately
         const existingServer = this.nativeRfcServers.get(streamKey);
         if (existingServer?.server?.listening) {
-            if (!expectedVideoType || existingServer.videoType === expectedVideoType) {
-                return {
-                    host: existingServer.host,
-                    port: existingServer.port,
-                    sdp: existingServer.sdp,
-                    audio: existingServer.audio,
-                    username: existingServer.username || this.opts.credentials.username,
-                    password: existingServer.password || this.opts.credentials.password,
-                };
-            }
+            return {
+                host: existingServer.host,
+                port: existingServer.port,
+                sdp: existingServer.sdp,
+                audio: existingServer.audio,
+                username: existingServer.username || this.opts.credentials.username,
+                password: existingServer.password || this.opts.credentials.password,
+            };
         }
 
         const createPromise = (async () => {
             const cached = this.nativeRfcServers.get(streamKey);
             if (cached?.server?.listening) {
-                if (expectedVideoType && cached.videoType !== expectedVideoType) {
-                    const kind = options.channel === undefined ? 'composite' : 'native';
-                    this.getLogger().warn(
-                        `Native RFC ${kind} cache codec mismatch for ${streamKey}: cached=${cached.videoType} expected=${expectedVideoType}; recreating server.`,
-                    );
-                }
-                else {
-                    return {
-                        host: cached.host,
-                        port: cached.port,
-                        sdp: cached.sdp,
-                        audio: cached.audio,
-                        username: cached.username || this.opts.credentials.username,
-                        password: cached.password || this.opts.credentials.password,
-                    };
-                }
+                return {
+                    host: cached.host,
+                    port: cached.port,
+                    sdp: cached.sdp,
+                    audio: cached.audio,
+                    username: cached.username || this.opts.credentials.username,
+                    password: cached.password || this.opts.credentials.password,
+                };
             }
 
             if (cached) {
@@ -356,27 +307,52 @@ export class StreamManager {
                 this.nativeRfcServers.delete(streamKey);
             }
 
-            const api = await this.opts.createStreamClient(profile);
+            const isComposite = options.channel === undefined;
+
+            // Composite multifocal (NVR/Hub): MUST use two distinct Baichuan sessions, otherwise
+            // cmd_id=3 frames can mix when streamType overlaps and causes alternating/background swaps.
+            // We intentionally request a dedicated session by using 'ext' as the profile hint.
+            const api = isComposite ? await this.opts.createStreamClient('ext') : await this.opts.createStreamClient(profile);
+            const compositeApis = isComposite
+                ? {
+                    widerApi: api,
+                    teleApi: await this.opts.createStreamClient('ext'),
+                }
+                : undefined;
             const { createRfc4571TcpServer } = await import('@apocaliss92/reolink-baichuan-js');
 
             // Use the same credentials as the main connection
             const { username, password } = this.opts.credentials;
 
             // If connection is shared, don't close it when stream teardown happens
-            const closeApiOnTeardown = !(this.opts.sharedConnection ?? false);
+            // For composite, we create dedicated APIs even if the device uses a shared main connection.
+            // Ensure they are closed on teardown.
+            const closeApiOnTeardown = isComposite ? true : !(this.opts.sharedConnection ?? false);
 
-            const created = await createRfc4571TcpServer({
-                api,
-                channel: options.channel,
-                profile,
-                variant: options.variant as any, // NativeVideoStreamVariant: 'default' | 'autotrack' | 'telephoto'
-                logger: this.getLogger(),
-                expectedVideoType: expectedVideoType as VideoType | undefined,
-                closeApiOnTeardown,
-                username,
-                password,
-                ...(options.compositeOptions ? { compositeOptions: options.compositeOptions } : {}),
-            });
+            let created: any;
+            try {
+                created = await createRfc4571TcpServer({
+                    api,
+                    channel: options.channel,
+                    profile,
+                    variant: options.variant as any, // NativeVideoStreamVariant: 'default' | 'autotrack' | 'telephoto'
+                    logger: this.getLogger(),
+                    closeApiOnTeardown,
+                    username,
+                    password,
+                    ...(options.compositeOptions ? { compositeOptions: options.compositeOptions } : {}),
+                    ...(compositeApis ? { compositeApis } : {}),
+                });
+            }
+            catch (e) {
+                if (isComposite && closeApiOnTeardown && compositeApis) {
+                    await Promise.allSettled([
+                        compositeApis.widerApi?.close?.(),
+                        compositeApis.teleApi?.close?.(),
+                    ]);
+                }
+                throw e;
+            }
 
             this.nativeRfcServers.set(streamKey, created);
             created.server.once('close', () => {
@@ -407,10 +383,9 @@ export class StreamManager {
         channel: number,
         profile: StreamProfile,
         streamKey: string,
-        expectedVideoType?: 'H264' | 'H265',
         variant?: string,
     ): Promise<RfcServerInfo> {
-        return await this.ensureRfcServer(streamKey, profile, expectedVideoType, {
+        return await this.ensureRfcServer(streamKey, profile, {
             channel,
             variant,
         });
@@ -419,9 +394,8 @@ export class StreamManager {
     async getRfcCompositeStream(
         profile: StreamProfile,
         streamKey: string,
-        expectedVideoType?: 'H264' | 'H265',
     ): Promise<RfcServerInfo> {
-        return await this.ensureRfcServer(streamKey, profile, expectedVideoType, {
+        return await this.ensureRfcServer(streamKey, profile, {
             channel: undefined, // Undefined channel indicates composite stream
             compositeOptions: this.opts.compositeOptions,
         });

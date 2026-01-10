@@ -19,7 +19,6 @@ import { ReolinkPtzPresets } from "./presets";
 import {
     createRfc4571CompositeMediaObjectFromStreamManager,
     createRfc4571MediaObjectFromStreamManager,
-    expectedVideoTypeFromUrlMediaStreamOptions,
     extractVariantFromStreamId,
     parseStreamProfileFromId,
     selectStreamOption,
@@ -238,70 +237,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         multifocalInfo: {
             json: true,
             hide: true,
-        },
-        // Multifocal composite stream PIP settings
-        pipPosition: {
-            title: 'PIP Position',
-            description: 'Position of the tele lens overlay on the wider lens view',
-            type: 'string',
-            defaultValue: 'bottom-right',
-            group: 'Composite stream',
-            choices: [
-                'top-left',
-                'top-right',
-                'bottom-left',
-                'bottom-right',
-                'center',
-                'top-center',
-                'bottom-center',
-                'left-center',
-                'right-center',
-            ],
-            hide: true, // Only show for multifocal devices via getAdditionalSettings
-        },
-        pipSize: {
-            title: 'PIP Size',
-            description: 'Relative size of the PIP overlay (0.1 = 10%, 0.3 = 30%, etc.)',
-            type: 'number',
-            defaultValue: 0.25,
-            group: 'Composite stream',
-            hide: true,
-            onPut: async () => {
-                this.scheduleStreamManagerRestart('pipSize changed');
-            },
-        },
-        pipMargin: {
-            title: 'PIP Margin',
-            description: 'Margin from edge in pixels',
-            type: 'number',
-            defaultValue: 10,
-            group: 'Composite stream',
-            hide: true,
-            onPut: async () => {
-                this.scheduleStreamManagerRestart('pipMargin changed');
-            },
-        },
-        widerChannel: {
-            title: 'Wider Channel',
-            description: 'Channel number for wider lens (typically 0)',
-            type: 'number',
-            defaultValue: 0,
-            group: 'Composite stream',
-            hide: true,
-            onPut: async () => {
-                this.scheduleStreamManagerRestart('widerChannel changed');
-            },
-        },
-        teleChannel: {
-            title: 'Tele Channel',
-            description: 'Channel number for tele lens (typically 1)',
-            type: 'number',
-            defaultValue: 1,
-            group: 'Composite stream',
-            hide: true,
-            onPut: async () => {
-                this.scheduleStreamManagerRestart('teleChannel changed');
-            },
         },
         // Battery camera specific
         uid: {
@@ -645,6 +580,48 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 await this.runDiagnostics();
             },
         },
+        // Multifocal composite stream PIP settings
+        pipPosition: {
+            title: 'PIP Position',
+            description: 'Position of the tele lens overlay on the wider lens view',
+            type: 'string',
+            defaultValue: 'bottom-right',
+            group: 'Composite stream',
+            choices: [
+                'top-left',
+                'top-right',
+                'bottom-left',
+                'bottom-right',
+                'center',
+                'top-center',
+                'bottom-center',
+                'left-center',
+                'right-center',
+            ],
+            hide: true, // Only show for multifocal devices via getAdditionalSettings
+        },
+        pipSize: {
+            title: 'PIP Size',
+            description: 'Relative size of the PIP overlay (0.1 = 10%, 0.3 = 30%, etc.)',
+            type: 'number',
+            defaultValue: 0.25,
+            group: 'Composite stream',
+            hide: true,
+            onPut: async () => {
+                this.scheduleStreamManagerRestart('pipSize changed');
+            },
+        },
+        pipMargin: {
+            title: 'PIP Margin',
+            description: 'Margin from edge in pixels',
+            type: 'number',
+            defaultValue: 10,
+            group: 'Composite stream',
+            hide: true,
+            onPut: async () => {
+                this.scheduleStreamManagerRestart('pipMargin changed');
+            },
+        },
     });
 
     ptzPresets = new ReolinkPtzPresets(this);
@@ -673,12 +650,12 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     protected readonly protocol: BaichuanTransport;
     private debugLogsResetTimeout: NodeJS.Timeout | undefined;
 
-    // Abstract init method that subclasses must implement
     abstract init(): Promise<void>;
+
+    abstract reportDevices(): Promise<void>;
 
     motionTimeout?: NodeJS.Timeout;
     doorbellBinaryTimeout?: NodeJS.Timeout;
-    initComplete?: boolean;
     resetBaichuanClient?(reason?: any): Promise<void>;
 
     protected nvrDevice?: ReolinkNativeNvrDevice;
@@ -1472,7 +1449,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
     public getAbilities(): DeviceCapabilities {
         if (this.multiFocalDevice) {
-            return this.multiFocalDevice.getInterfaces(this.storageSettings.values.rtspChannel).capabilities;
+            return this.multiFocalDevice.getInterfaces(this.storageSettings.values.variantType).capabilities;
         } else {
             return this.storageSettings.values.capabilities;
         }
@@ -1502,12 +1479,12 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         };
 
         if (this.isMultiFocal) {
-            const { widerChannel, teleChannel, pipPosition, pipSize, pipMargin, rtspChannel } = this.storageSettings.values;
+            const { pipPosition, pipSize, pipMargin, rtspChannel } = this.storageSettings.values;
 
             // On NVR/Hub, TrackMix lenses are selected via stream variant, not via a separate channel.
             // Use rtspChannel for BOTH wide and tele so the library can request tele via streamType/variant.
-            const wider = this.isOnNvr ? rtspChannel : widerChannel;
-            const tele = this.isOnNvr ? rtspChannel : teleChannel;
+            const wider = this.isOnNvr ? rtspChannel : undefined;
+            const tele = this.isOnNvr ? rtspChannel : undefined;
 
             baseOptions.compositeOptions = {
                 widerChannel: wider,
@@ -1653,6 +1630,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             return;
         }
 
+        const api = await this.ensureClient();
+
         const logger = this.getBaichuanLogger();
         const selection = Array.from(this.getDispatchEventsSelection?.() ?? new Set()).sort();
         const enabled = selection.length > 0;
@@ -1676,8 +1655,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             this.binaryState = false;
             return;
         }
-
-        const api = await this.ensureClient();
 
         try {
             await api.onSimpleEvent(this.onSimpleEvent);
@@ -1914,7 +1891,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         this.binaryState = false;
     }
 
-    async reportDevices(): Promise<void> {
+    async reportDevicesParent(): Promise<void> {
         const abilities = this.getAbilities();
 
         const { hasSiren, hasFloodlight, hasPir } = abilities;
@@ -1962,6 +1939,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 type: ScryptedDeviceType.Switch,
             };
             sdk.deviceManager.onDeviceDiscovered(device);
+
+            this.reportDevices && await this.reportDevices();
         }
     }
 
@@ -1981,8 +1960,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         logger.log(`Taking new snapshot from camera: forceNewSnapshot=${this.forceNewSnapshot} channel=${rtspChannel} variant=${variantType}`);
 
         const compositeOptions = this.isMultiFocal ? {
-            widerChannel: this.isOnNvr ? rtspChannel : (this.storageSettings.values.widerChannel ?? 0),
-            teleChannel: this.isOnNvr ? rtspChannel : (this.storageSettings.values.teleChannel ?? 1),
+            widerChannel: this.isOnNvr ? rtspChannel : undefined,
+            teleChannel: this.isOnNvr ? rtspChannel : undefined,
             pipPosition: this.storageSettings.values.pipPosition || 'bottom-right',
             pipSize: this.storageSettings.values.pipSize ?? 0.25,
             pipMargin: this.storageSettings.values.pipMargin ?? 10,
@@ -2304,11 +2283,16 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                     for (const supportedStream of supportedStreams) {
                         const { id, metadata, url, name, container, nativeVariant, lens } = supportedStream;
 
-                        const codec = String(metadata.videoEncType || "").includes("264")
-                            ? "h264"
-                            : String(metadata.videoEncType || "").includes("265")
-                                ? "h265"
-                                : String(metadata.videoEncType || "").toLowerCase();
+                        // Composite streams are re-encoded to H.264 by the library (ffmpeg/libx264).
+                        // Do not infer codec from underlying camera metadata.
+                        const isComposite = id.startsWith('composite_') || lens === 'composite';
+                        const codec = isComposite
+                            ? 'h264'
+                            : String(metadata.videoEncType || "").includes("264")
+                                ? "h264"
+                                : String(metadata.videoEncType || "").includes("265")
+                                    ? "h265"
+                                    : String(metadata.videoEncType || "").toLowerCase();
 
                         // Preserve variant information for native RTP streams by ensuring the URL contains it.
                         let finalUrl = url;
@@ -2433,14 +2417,12 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         if (isComposite && this.options && (this.options.type === 'multi-focal' || this.options.type === 'multi-focal-battery')) {
             const profile = parseStreamProfileFromId(selected.id.replace('composite_', '')) || 'main';
             const streamKey = `composite_${profile}`;
-            const expectedVideoType = expectedVideoTypeFromUrlMediaStreamOptions(selected);
 
             const createStreamFn = async () => {
                 return await createRfc4571CompositeMediaObjectFromStreamManager({
                     streamManager: this.streamManager!,
                     profile,
                     streamKey,
-                    expectedVideoType,
                     selected,
                     sourceId: this.id,
                 });
@@ -2466,7 +2448,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         // Include variant in streamKey to distinguish streams with different variants
         const streamKey = variant ? `${channel}_${variant}_${profile}` : `${channel}_${profile}`;
-        const expectedVideoType = expectedVideoTypeFromUrlMediaStreamOptions(selected);
 
         const createStreamFn = async () => {
             // Honor the requested variant. Some NVR firmwares label the tele lens as either
@@ -2478,7 +2459,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 channel,
                 profile,
                 streamKey,
-                expectedVideoType,
                 variant,
                 selected,
                 sourceId: this.id,
@@ -2581,6 +2561,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     async parentInit(): Promise<void> {
         const logger = this.getBaichuanLogger();
 
+        this.init && await this.init();
+
         try {
             await this.ensureClient();
             await this.updateDeviceInfo();
@@ -2589,9 +2571,10 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             logger.warn('Failed to update device info during init', e?.message || String(e));
         }
 
+        await this.refreshDeviceState();
+
         if (!this.multiFocalDevice) {
             try {
-                await this.refreshDeviceState();
                 await this.reportDevices();
             }
             catch (e) {
@@ -2613,8 +2596,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         this.storageSettings.settings.pipPosition.hide = !this.isMultiFocal;
         this.storageSettings.settings.pipSize.hide = !this.isMultiFocal;
         this.storageSettings.settings.pipMargin.hide = !this.isMultiFocal;
-        this.storageSettings.settings.widerChannel.hide = !this.isMultiFocal;
-        this.storageSettings.settings.teleChannel.hide = !this.isMultiFocal;
 
         this.storageSettings.settings.uid.hide = !this.isBattery
         this.storageSettings.settings.discoveryMethod.hide = !this.isBattery && !this.nvrDevice;
@@ -2682,12 +2663,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             this.storageSettings.settings.ipAddress.defaultValue = parentDevice.storageSettings.values.ipAddress;
         }
 
-        await this.init();
-
-        this.initComplete = true;
-
-        // Initialize video clips auto-load if enabled
         this.updateVideoClipsAutoLoad();
+
+        this.onDeviceEvent(ScryptedInterface.Settings, '');
     }
 
     async updateSleepingState(sleepStatus: SleepStatus): Promise<void> {
@@ -2740,5 +2718,3 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
     }
 }
-
-

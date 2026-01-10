@@ -22,7 +22,6 @@ export const b64ToMo = async (b64: string) => {
 export class ReolinkNativeCamera extends CommonCameraMixin {
     videoStreamOptions: Promise<UrlMediaStreamOptions[]>;
     motionTimeout?: NodeJS.Timeout;
-    initComplete: boolean = false;
     doorbellBinaryTimeout?: NodeJS.Timeout;
     ptzCapabilities?: any;
 
@@ -41,6 +40,10 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
             nvrDevice,
             multiFocalDevice,
         });
+    }
+
+    async reportDevices(): Promise<void> {
+        // Do nothing
     }
 
     async resetBaichuanClient(reason?: any): Promise<void> {

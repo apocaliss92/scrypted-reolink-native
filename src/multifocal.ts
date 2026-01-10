@@ -1,4 +1,4 @@
-import type { DeviceCapabilities, DualLensChannelAnalysis, ReolinkBaichuanApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { DeviceCapabilities, DualLensChannelAnalysis, NativeVideoStreamVariant, ReolinkBaichuanApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { Device, DeviceProvider, Reboot, ScryptedDeviceType, Settings } from "@scrypted/sdk";
 import { ReolinkNativeCamera } from "./camera";
 import { ReolinkNativeBatteryCamera } from "./camera-battery";
@@ -47,29 +47,31 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
             this.storageSettings.settings.uid.hide = !this.isBattery;
 
             await this.ensureClient();
-            await this.reportDevices();
             await this.subscribeToEvents();
         } catch (e) {
             logger.error('Failed to initialize multi-focal device', e?.message || String(e));
         }
     }
 
-    getInterfaces(channel: number) {
+    getInterfaces(lensType?: NativeVideoStreamVariant) {
         const logger = this.getBaichuanLogger();
         const { capabilities: caps, multifocalInfo } = this.storageSettings.values;
 
         let capabilities: DeviceCapabilities = { ...caps };
 
-        if (!this.nvrDevice) {
-            const channelInfo = (multifocalInfo as DualLensChannelAnalysis).channels.find(c => c.channel === channel);
+        if (lensType) {
+            const channelInfo = (multifocalInfo as DualLensChannelAnalysis).channels.find(c => c.variantType === lensType);
+
+            const hasPtz = channelInfo?.hasPan || channelInfo?.hasTilt || channelInfo?.hasZoom;
 
             capabilities = {
                 ...capabilities,
                 hasPan: channelInfo.hasPan,
                 hasTilt: channelInfo.hasTilt,
                 hasZoom: channelInfo?.hasZoom,
-                hasPresets: channelInfo?.hasPresets,
+                hasPresets: channelInfo?.hasPresets || hasPtz,
                 hasIntercom: channelInfo?.hasIntercom,
+                hasPtz,
             };
         }
 
@@ -78,7 +80,7 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
             logger,
         });
 
-        logger.log(`Interfaces found for channel ${channel}: ${JSON.stringify({ interfaces, capabilities, multifocalInfo })}`);
+        logger.log(`Interfaces found for lens ${lensType}: ${JSON.stringify({ interfaces, capabilities, multifocalInfo })}`);
 
         return { interfaces, capabilities };
     }
@@ -95,7 +97,7 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
                 onNvr: !!this.nvrDevice
             });
             logger.log(`Discovering ${multifocalInfo.channels.length} lenses`);
-            logger.log({ multifocalInfo, rtspChannel, onNvr: !!this.nvrDevice });
+            logger.log({ multifocalInfo, capabilities });
 
             this.storageSettings.values.multifocalInfo = multifocalInfo;
             this.storageSettings.values.capabilities = capabilities;
@@ -107,7 +109,7 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
                 const nativeId = `${this.nativeId}-${lensType}${this.isBattery ? batteryCameraSuffix : cameraSuffix}`;
 
                 this.channelToNativeIdMap.set(channel, nativeId);
-                const { interfaces, capabilities: deviceCapabilities } = this.getInterfaces(channel);
+                const { interfaces, capabilities: deviceCapabilities } = this.getInterfaces();
 
                 const device: Device = {
                     providerNativeId: this.nativeId,
@@ -147,8 +149,6 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
                 camera.storageSettings.values.capabilities = deviceCapabilities;
                 camera.storageSettings.values.uid = uid;
             }
-
-            await super.reportDevices();
         } catch (e) {
             logger.error('Failed to report devices', e?.message || String(e));
             throw e;

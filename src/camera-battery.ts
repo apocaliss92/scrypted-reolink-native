@@ -1,16 +1,9 @@
-import type { ReolinkBaichuanApi, SleepStatus } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import sdk, {
-    type MediaObject,
-    RequestPictureOptions,
-    ResponsePictureOptions
-} from "@scrypted/sdk";
 import {
     CommonCameraMixin,
 } from "./common";
-import { DebugLogOption } from "./debug-options";
 import type ReolinkNativePlugin from "./main";
-import { ReolinkNativeNvrDevice } from "./nvr";
 import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
+import { ReolinkNativeNvrDevice } from "./nvr";
 
 export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
     doorbellBinaryTimeout?: NodeJS.Timeout;
@@ -44,6 +37,10 @@ export class ReolinkNativeBatteryCamera extends CommonCameraMixin {
     async release(): Promise<void> {
         this.stopPeriodicTasks();
         return this.resetBaichuanClient();
+    }
+
+    async reportDevices(): Promise<void> {
+        // Do nothing
     }
 
     private stopPeriodicTasks(): void {
