@@ -101,7 +101,7 @@ export const getDeviceInterfaces = (props: {
             interfaces.push(ScryptedInterface.BinarySensor);
         }
     } catch (e) {
-        logger.error('Error getting device interfaces', e);
+        logger.error('Error getting device interfaces', e?.message || String(e));
     }
 
     return { interfaces, type: capabilities.isDoorbell ? ScryptedDeviceType.Doorbell : ScryptedDeviceType.Camera };
@@ -211,7 +211,7 @@ export async function recordingFileToVideoClip(
             thumbnailHref = thumbnailUrl;
             logger?.debug(`[recordingFileToVideoClip] Webhook URLs generated successfully: videoHref="${videoHref}", thumbnailHref="${thumbnailHref}"`);
         } catch (e) {
-            logger?.error(`[recordingFileToVideoClip] Failed to generate webhook URLs for fileId=${id}:`, e);
+            logger?.error(`[recordingFileToVideoClip] Failed to generate webhook URLs for fileId=${id}:`, e?.message || String(e));
         }
     } else if (!videoHref && api) {
         // Fallback to direct RTMP URL if webhook is not used
@@ -223,7 +223,7 @@ export async function recordingFileToVideoClip(
             videoHref = rtmpVodUrl;
             logger?.debug(`[recordingFileToVideoClip] RTMP URL fetched successfully: videoHref="${videoHref}"`);
         } catch (e) {
-            logger?.debug(`[recordingFileToVideoClip] Failed to build playback URL for recording fileName=${rec.fileName}:`, e);
+            logger?.debug(`[recordingFileToVideoClip] Failed to build playback URL for recording fileName=${rec.fileName}:`, e?.message || String(e));
         }
     } else {
         logger?.debug(`[recordingFileToVideoClip] No URL generation: useWebhook=${useWebhook}, hasPlugin=${!!plugin}, deviceId=${deviceId}, providedVideoHref=${providedVideoHref || 'none'}, hasApi=${!!api}`);
@@ -368,7 +368,7 @@ export async function recordingsToVideoClips(
             });
             clips.push(clip);
         } catch (e) {
-            logger?.warn(`Failed to convert recording to video clip: fileName=${rec.fileName}`, e);
+            logger?.warn(`Failed to convert recording to video clip: fileName=${rec.fileName}`, e?.message || String(e));
         }
     }
 
@@ -399,7 +399,7 @@ export async function getVideoClipWebhookUrls(props: {
             // log.debug?.(`[getVideoClipWebhookUrls] Using cloud endpoint: ${endpoint}`);
         } catch (e) {
             // Fallback to local endpoint if cloud is not available (e.g., not logged in)
-            log.debug?.(`[getVideoClipWebhookUrls] Cloud endpoint not available, using local endpoint: ${e instanceof Error ? e.message : String(e)}`);
+            log.debug?.(`[getVideoClipWebhookUrls] Cloud endpoint not available, using local endpoint: ${e?.message || String(e)}`);
             endpoint = await sdk.endpointManager.getLocalEndpoint(undefined, { public: true });
             endpointSource = 'local';
             // log.debug?.(`[getVideoClipWebhookUrls] Using local endpoint: ${endpoint}`);
@@ -428,7 +428,7 @@ export async function getVideoClipWebhookUrls(props: {
     } catch (e) {
         log.error?.(
             `[getVideoClipWebhookUrls] Failed to generate webhook URLs: deviceId=${deviceId}, fileId=${fileId}`,
-            e
+            e?.message || String(e)
         );
         throw e;
     }
@@ -467,7 +467,7 @@ export async function extractThumbnailFromVideo(props: {
         return mo;
     } catch (e) {
         // Error already logged in main.ts
-        throw e;
+        throw e?.message || String(e);
     }
 }
 
@@ -514,7 +514,7 @@ export async function handleVideoClipRequest(props: {
             try {
                 await fs.promises.unlink(cachePath);
             } catch (unlinkErr) {
-                logger.warn(`Failed to delete small cached video clip: fileId=${fileId}`, unlinkErr);
+                logger.warn(`Failed to delete small cached video clip: fileId=${fileId}`, unlinkErr?.message || String(unlinkErr));
             }
             // Force cache miss path below
             throw new Error('Cached video too small, deleted');
@@ -567,7 +567,7 @@ export async function handleVideoClipRequest(props: {
         try {
             rtmpVodUrl = await device.getVideoClipRtmpUrl(fileId);
         } catch (e2) {
-            logger.error(`[VideoClip] Stream error: fileId=${fileId}`, e2);
+            logger.error(`[VideoClip] Stream error: fileId=${fileId}`, e2?.message || String(e2));
             response.send('Failed to get RTMP playback URL', { code: 500 });
             return;
         }
@@ -681,12 +681,12 @@ export async function handleVideoClipRequest(props: {
                                 ffmpeg.stdin.on('error', (err) => {
                                     // Ignore EPIPE errors when ffmpeg closes
                                     if ((err as any).code !== 'EPIPE') {
-                                        logger.error(`FFmpeg stdin error: fileId=${fileId}`, err);
+                                        logger.error(`FFmpeg stdin error: fileId=${fileId}`, err?.message || String(err));
                                     }
                                 });
 
                                 httpResponse.on('error', (err) => {
-                                    logger.error(`HTTP response error before ffmpeg: fileId=${fileId}`, err);
+                                    logger.error(`HTTP response error before ffmpeg: fileId=${fileId}`, err?.message || String(err));
                                     try {
                                         ffmpeg.kill('SIGKILL');
                                     } catch (e) {
@@ -706,7 +706,7 @@ export async function handleVideoClipRequest(props: {
                                             yield chunk;
                                         }
                                     } catch (e) {
-                                        logger.error(`Error streaming ffmpeg output: fileId=${fileId}`, e);
+                                        logger.error(`Error streaming ffmpeg output: fileId=${fileId}`, e?.message || String(e));
                                         throw e;
                                     } finally {
                                         // Clean up ffmpeg process
@@ -738,7 +738,7 @@ export async function handleVideoClipRequest(props: {
                                 });
 
                                 ffmpeg.on('error', (error) => {
-                                    logger.error(`FFmpeg spawn error: fileId=${fileId}`, error);
+                                    logger.error(`FFmpeg spawn error: fileId=${fileId}`, error?.message || String(error));
                                     reject(error);
                                 });
 
@@ -753,7 +753,7 @@ export async function handleVideoClipRequest(props: {
                                         }
                                         logger.log(`[VideoClip] Stream end: fileId=${fileId}`);
                                     } catch (streamErr) {
-                                        logger.error(`[VideoClip] Stream error: fileId=${fileId}`, streamErr);
+                                        logger.error(`[VideoClip] Stream error: fileId=${fileId}`, streamErr?.message || String(streamErr));
                                         throw streamErr;
                                     }
                                 })(), {
@@ -764,11 +764,11 @@ export async function handleVideoClipRequest(props: {
                                 resolve();
                             }
                         } catch (err) {
-                            logger.error(`Error sending stream: fileId=${fileId}`, err);
+                            logger.error(`Error sending stream: fileId=${fileId}`, err?.message || String(err));
                             reject(err);
                         }
                     }).on('error', (e) => {
-                        logger.error(`Error fetching videoclip: fileId=${fileId}`, e);
+                        logger.error(`Error fetching videoclip: fileId=${fileId}`, e?.message || String(e));
                         reject(e);
                     });
                 });
@@ -778,7 +778,7 @@ export async function handleVideoClipRequest(props: {
                 await sendVideo();
                 return;
             } catch (e) {
-                logger.error(`HTTP proxy error: fileId=${fileId}`, e);
+                logger.error(`HTTP proxy error: fileId=${fileId}`, e?.message || String(e));
                 response.send('Failed to proxy HTTP stream', { code: 500 });
                 return;
             }
@@ -816,7 +816,7 @@ export async function handleVideoClipRequest(props: {
                 }
                 logger.log(`[VideoClip] Stream end: fileId=${fileId}`);
             } catch (e) {
-                logger.error(`[VideoClip] Stream error: fileId=${fileId}`, e);
+                logger.error(`[VideoClip] Stream error: fileId=${fileId}`, e?.message || String(e));
                 throw e;
             } finally {
                 // Clean up ffmpeg process
@@ -844,7 +844,7 @@ export async function handleVideoClipRequest(props: {
         });
 
         ffmpeg.on('error', (error) => {
-            logger.error(`FFmpeg spawn error for video proxy: fileId=${fileId}`, error);
+            logger.error(`FFmpeg spawn error for video proxy: fileId=${fileId}`, error?.message || String(error));
         });
 
         return;

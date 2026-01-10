@@ -19,19 +19,6 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
         this.plugin = plugin;
     }
 
-    getAbilities(): DeviceCapabilities {
-        const { capabilities } = this.storageSettings.values;
-
-        return {
-            ...capabilities,
-            hasPan: false,
-            hasTilt: false,
-            hasZoom: false,
-            hasPresets: false,
-            hasIntercom: false,
-        }
-    }
-
     protected async onBeforeCleanup(): Promise<void> {
         await this.unsubscribeFromAllEvents();
     }
@@ -80,7 +67,7 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
             logger,
         });
 
-        logger.log(`Interfaces found for lens ${lensType}: ${JSON.stringify({ interfaces, capabilities, multifocalInfo })}`);
+        logger.debug(`Interfaces found for lens ${lensType}: ${JSON.stringify({ interfaces, capabilities, multifocalInfo })}`);
 
         return { interfaces, capabilities };
     }
@@ -92,12 +79,14 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
             const api = await this.ensureClient();
             const { username, password, ipAddress, uid, rtspChannel } = this.storageSettings.values;
 
-            const { capabilities, objects, presets } = await api.getDeviceCapabilities();
+            const { capabilities, objects, presets } = await api.getDeviceCapabilities(rtspChannel, {
+                mergeDualLensOnSameChannel: true,
+            });
             const multifocalInfo = await api.getDualLensChannelInfo(rtspChannel, {
                 onNvr: !!this.nvrDevice
             });
             logger.log(`Discovering ${multifocalInfo.channels.length} lenses`);
-            logger.log({ multifocalInfo, capabilities });
+            logger.debug({ multifocalInfo, capabilities });
 
             this.storageSettings.values.multifocalInfo = multifocalInfo;
             this.storageSettings.values.capabilities = capabilities;
@@ -129,7 +118,7 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
                 await sdk.deviceManager.onDeviceDiscovered(device);
 
                 logger.log(`Discovering lens ${lensType}`);
-                logger.log(`${JSON.stringify({ interfaces, deviceCapabilities })}`)
+                logger.debug(`${JSON.stringify({ interfaces, deviceCapabilities })}`)
 
                 const camera = await this.getDevice(nativeId);
 
@@ -219,9 +208,9 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
             const multifocalDiagnostics = await api.collectMultifocalDiagnostics(logger);
 
             logger.log(`NVR diagnostics completed successfully.`);
-            logger.log(JSON.stringify(multifocalDiagnostics));
+            logger.debug(JSON.stringify(multifocalDiagnostics));
         } catch (e) {
-            logger.error('Failed to run NVR diagnostics', e);
+            logger.error('Failed to run NVR diagnostics', e?.message || String(e));
             throw e;
         }
     }

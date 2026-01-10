@@ -52,7 +52,7 @@ export class ReolinkNativeCamera extends CommonCameraMixin {
             await this.baichuanApi?.close();
         }
         catch (e) {
-            this.getBaichuanLogger().warn('Error closing Baichuan client during reset', e);
+            this.getBaichuanLogger().warn('Error closing Baichuan client during reset', e?.message || String(e));
         }
         finally {
             this.baichuanApi = undefined;

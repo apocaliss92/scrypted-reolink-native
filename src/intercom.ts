@@ -63,7 +63,7 @@ export class ReolinkBaichuanIntercom {
                 });
             }
             catch (e) {
-                logger.warn("Intercom: unable to fetch TalkAbility", e);
+                logger.warn("Intercom: unable to fetch TalkAbility", e?.message || String(e));
             }
         }
 
@@ -81,7 +81,7 @@ export class ReolinkBaichuanIntercom {
                         await new Promise(resolve => setTimeout(resolve, 1000));
                     }
                 } catch (e) {
-                    logger.debug('Failed to check/wake camera for intercom, proceeding anyway', e);
+                    logger.debug('Failed to check/wake camera for intercom, proceeding anyway', e?.message || String(e));
                 }
             }
             
@@ -221,7 +221,7 @@ export class ReolinkBaichuanIntercom {
                     await Promise.race([session.stop(), sleepMs(2000)]);
                 }
                 catch (e) {
-                    logger.warn("Intercom session stop error", e);
+                    logger.warn("Intercom session stop error", e?.message || String(e));
                 }
             }
         })().finally(() => {

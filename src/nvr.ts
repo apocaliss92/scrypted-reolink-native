@@ -90,7 +90,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                             // Trigger reconnection
                             await this.ensureBaichuanClient();
                         } catch (e) {
-                            logger.warn('Failed to reset client after debug logs change', e);
+                            logger.warn('Failed to reset client after debug logs change', e?.message || String(e));
                         }
                     }, 2000);
                 }
@@ -237,7 +237,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                         targetCamera.handleDoorbellEvent();
                     }
                     catch (e) {
-                        logger.warn(`Error handling doorbell event for camera channel ${channel}`, e);
+                        logger.warn(`Error handling doorbell event for camera channel ${channel}`, e?.message || String(e));
                     }
                     motion = true;
                     break;
@@ -275,7 +275,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             } else {
                 // Process events on the target camera
                 targetCamera.processEvents({ motion, objects }).catch((e) => {
-                    logger.warn(`Error processing events for camera channel ${channel}`, e);
+                    logger.warn(`Error processing events for camera channel ${channel}`, e?.message || String(e));
                 });
             }
         }

@@ -251,33 +251,42 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             // Create new Baichuan client
             // BaichuanLogger implements Console, so it can be used directly
             const logger = this.getBaichuanLogger();
-            const api = await createBaichuanApi({
-                inputs: {
-                    host: config.host,
-                    username: config.username,
-                    password: config.password,
-                    uid: config.uid,
-                    logger,
-                    debugOptions: config.debugOptions,
-                    udpDiscoveryMethod: config.udpDiscoveryMethod,
-                },
-                transport: config.transport,
-            });
+            try {
+                const api = await createBaichuanApi({
+                    inputs: {
+                        host: config.host,
+                        username: config.username,
+                        password: config.password,
+                        uid: config.uid,
+                        logger,
+                        debugOptions: config.debugOptions,
+                        udpDiscoveryMethod: config.udpDiscoveryMethod,
+                    },
+                    transport: config.transport,
+                });
 
-            await api.login();
+                await api.login();
 
-            // Verify socket is connected before returning
-            if (!api.client.isSocketConnected()) {
-                throw new Error('Socket not connected after login');
+                // Verify socket is connected before returning
+                if (!api.client.isSocketConnected()) {
+                    throw new Error('Socket not connected after login');
+                }
+
+                // Attach listeners
+                this.attachBaichuanListeners(api);
+
+                this.baichuanApi = api;
+                this.connectionTime = Date.now();
+
+                return api;
             }
-
-            // Attach listeners
-            this.attachBaichuanListeners(api);
-
-            this.baichuanApi = api;
-            this.connectionTime = Date.now();
-
-            return api;
+            catch (e) {
+                // Apply backoff for connection failures too, otherwise multiple callers can hammer connect().
+                this.lastDisconnectTime = Date.now();
+                // Ensure state is reset so next attempt is clean.
+                await this.cleanupBaichuanApi();
+                throw e;
+            }
         })();
 
         try {

@@ -222,8 +222,8 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             return nativeId;
         }
         catch (e) {
-            this.console.error('Error adding Reolink device', e);
-            throw e;
+            this.console.error('Error adding Reolink device', e?.message || String(e));
+            throw e;    
         }
     }
 

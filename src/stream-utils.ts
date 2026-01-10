@@ -1,5 +1,6 @@
 import type {
     CompositeStreamPipOptions,
+    NativeVideoStreamVariant,
     ReolinkBaichuanApi,
     Rfc4571TcpServer,
     StreamProfile,
@@ -37,6 +38,11 @@ export interface StreamManagerOptions {
 export function parseStreamProfileFromId(id: string | undefined): StreamProfile | undefined {
     if (!id)
         return;
+
+    // Handle plain profiles (used by composite parsing: 'main'/'sub'/'ext')
+    if (id === 'main' || id === 'sub' || id === 'ext') {
+        return id as StreamProfile;
+    }
 
     // Handle native stream IDs: native_main, native_sub, native_ext, native_autotrack_main, native_autotrack_sub, etc.
     if (id.startsWith('native_')) {
@@ -93,7 +99,7 @@ export function parseStreamProfileFromId(id: string | undefined): StreamProfile 
  */
 export function extractVariantFromStreamId(id: string | undefined, url?: string | undefined): 'autotrack' | 'telephoto' | undefined {
     let variant: string | undefined;
-    
+
     // First try to extract from ID
     if (id) {
         // Handle native stream IDs: native_autotrack_main, native_telephoto_sub, etc.
@@ -159,7 +165,7 @@ export async function createRfc4571MediaObjectFromStreamManager(params: {
     channel: number;
     profile: StreamProfile;
     streamKey: string;
-    variant?: string;
+    variant?: NativeVideoStreamVariant;
     selected: UrlMediaStreamOptions;
     sourceId: string;
 }): Promise<MediaObject> {
@@ -217,12 +223,18 @@ export async function createRfc4571CompositeMediaObjectFromStreamManager(params:
     }
 
     // Build URL with credentials: tcp://username:password@host:port
-    const encodedUsername = encodeURIComponent(username || '');
-    const encodedPassword = encodeURIComponent(password || '');
-    const url = `tcp://${encodedUsername}:${encodedPassword}@${host}:${port}`;
+    // Keep this consistent with non-composite path (URL object -> JSON string via toJSON()).
+    const urlObj = new URL(`tcp://${host}`);
+    urlObj.port = port.toString();
+    if (username) {
+        urlObj.username = username;
+    }
+    if (password) {
+        urlObj.password = password;
+    }
 
     const rfc = {
-        url,
+        url: urlObj,
         sdp,
         mediaStreamOptions: mso as ResponseMediaStreamOptions,
     };
@@ -261,7 +273,7 @@ export class StreamManager {
         profile: StreamProfile,
         options: {
             channel?: number;
-            variant?: string;
+            variant?: NativeVideoStreamVariant;
             compositeOptions?: CompositeStreamPipOptions;
         },
     ): Promise<RfcServerInfo> {
@@ -335,11 +347,13 @@ export class StreamManager {
                     api,
                     channel: options.channel,
                     profile,
-                    variant: options.variant as any, // NativeVideoStreamVariant: 'default' | 'autotrack' | 'telephoto'
+                    variant: options.variant,
                     logger: this.getLogger(),
                     closeApiOnTeardown,
                     username,
                     password,
+                    // Composite can take a bit longer (ffmpeg warmup + first IDR).
+                    ...(isComposite ? { keyframeTimeoutMs: 15_000, idleTeardownMs: 15_000 } : {}),
                     ...(options.compositeOptions ? { compositeOptions: options.compositeOptions } : {}),
                     ...(compositeApis ? { compositeApis } : {}),
                 });
@@ -383,7 +397,7 @@ export class StreamManager {
         channel: number,
         profile: StreamProfile,
         streamKey: string,
-        variant?: string,
+        variant?: NativeVideoStreamVariant,
     ): Promise<RfcServerInfo> {
         return await this.ensureRfcServer(streamKey, profile, {
             channel,
@@ -414,7 +428,7 @@ export class StreamManager {
                 try {
                     await server.close(reason || 'connection reset');
                 } catch (e) {
-                    this.getLogger().debug('Error closing stream server', e);
+                    this.getLogger().debug('Error closing stream server', e?.message || String(e));
                 }
             })
         );

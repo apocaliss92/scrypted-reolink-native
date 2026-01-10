@@ -48,7 +48,7 @@ class ReolinkCameraSiren extends ScryptedDeviceBase implements OnOff {
             this.camera.getBaichuanLogger().log(`Siren toggle: turnOff ok (device=${this.nativeId})`);
         }
         catch (e) {
-            this.camera.getBaichuanLogger().warn(`Siren toggle: turnOff failed (device=${this.nativeId})`, e);
+            this.camera.getBaichuanLogger().warn(`Siren toggle: turnOff failed (device=${this.nativeId})`, e?.message || String(e));
             throw e;
         }
     }
@@ -61,7 +61,7 @@ class ReolinkCameraSiren extends ScryptedDeviceBase implements OnOff {
             this.camera.getBaichuanLogger().log(`Siren toggle: turnOn ok (device=${this.nativeId})`);
         }
         catch (e) {
-            this.camera.getBaichuanLogger().warn(`Siren toggle: turnOn failed (device=${this.nativeId})`, e);
+            this.camera.getBaichuanLogger().warn(`Siren toggle: turnOn failed (device=${this.nativeId})`, e?.message || String(e));
             throw e;
         }
     }
@@ -80,7 +80,7 @@ class ReolinkCameraFloodlight extends ScryptedDeviceBase implements OnOff, Brigh
             this.camera.getBaichuanLogger().log(`Floodlight toggle: setBrightness ok (device=${this.nativeId} brightness=${brightness})`);
         }
         catch (e) {
-            this.camera.getBaichuanLogger().warn(`Floodlight toggle: setBrightness failed (device=${this.nativeId} brightness=${brightness})`, e);
+            this.camera.getBaichuanLogger().warn(`Floodlight toggle: setBrightness failed (device=${this.nativeId} brightness=${brightness})`, e?.message || String(e));
             throw e;
         }
     }
@@ -93,7 +93,7 @@ class ReolinkCameraFloodlight extends ScryptedDeviceBase implements OnOff, Brigh
             this.camera.getBaichuanLogger().log(`Floodlight toggle: turnOff ok (device=${this.nativeId})`);
         }
         catch (e) {
-            this.camera.getBaichuanLogger().warn(`Floodlight toggle: turnOff failed (device=${this.nativeId})`, e);
+            this.camera.getBaichuanLogger().warn(`Floodlight toggle: turnOff failed (device=${this.nativeId})`, e?.message || String(e));
             throw e;
         }
     }
@@ -106,7 +106,7 @@ class ReolinkCameraFloodlight extends ScryptedDeviceBase implements OnOff, Brigh
             this.camera.getBaichuanLogger().log(`Floodlight toggle: turnOn ok (device=${this.nativeId})`);
         }
         catch (e) {
-            this.camera.getBaichuanLogger().warn(`Floodlight toggle: turnOn failed (device=${this.nativeId})`, e);
+            this.camera.getBaichuanLogger().warn(`Floodlight toggle: turnOn failed (device=${this.nativeId})`, e?.message || String(e));
             throw e;
         }
     }
@@ -319,7 +319,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                             // Trigger reconnection
                             await this.ensureClient();
                         } catch (e) {
-                            logger.warn('Failed to reset client after debug logs change', e);
+                            logger.warn('Failed to reset client after debug logs change', e?.message || String(e));
                         }
                     }, 2000);
                 }
@@ -996,7 +996,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 return mo;
             }
         } catch (e) {
-            logger.error(`getVideoClip: failed to get video clip ${videoId}`, e);
+            logger.error(`getVideoClip: failed to get video clip ${videoId}`, e?.message || String(e));
             throw e;
         }
     }
@@ -1093,13 +1093,13 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 await fs.promises.writeFile(cachePath, buffer);
                 logger.debug(`[Thumbnail] Cached: fileId=${thumbnailId}, size=${buffer.length} bytes`);
             } catch (e) {
-                logger.warn(`[Thumbnail] Failed to cache: fileId=${thumbnailId}`, e);
+                logger.warn(`[Thumbnail] Failed to cache: fileId=${thumbnailId}`, e?.message || String(e));
                 // Continue even if caching fails
             }
 
             return thumbnail;
         } catch (e) {
-            logger.error(`[Thumbnail] Error: fileId=${thumbnailId}`, e);
+            logger.error(`[Thumbnail] Error: fileId=${thumbnailId}`, e?.message || String(e));
             throw e;
         }
     }
@@ -1129,7 +1129,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 logger.debug(`[getVideoClipRtmpUrl] NVR getVodUrl Download URL received: url="${url || 'none'}"`);
                 if (url) return url;
             } catch (e: any) {
-                logger.error(`[getVideoClipRtmpUrl] getVodUrl Download failed: ${e.message}`);
+                logger.error(`[getVideoClipRtmpUrl] getVodUrl Download failed: ${e?.message || String(e)}`);
             }
 
             throw new Error(`No streaming URL found from NVR for file ${fileId} after trying Playback and Download methods`);
@@ -1264,7 +1264,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
             logger.log(`Completed auto-loading video clips and thumbnails`);
         } catch (e) {
-            logger.error('Error during auto-loading video clips:', e);
+            logger.error('Error during auto-loading video clips:', e?.message || String(e));
         } finally {
             this.videoClipsAutoLoadInProgress = false;
             this.videoClipsAutoLoadMode = false;
@@ -1284,6 +1284,12 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
         if (this.isBattery && !normalizedUid) {
             throw new Error('UID is required for battery cameras (BCUDP)');
+        }
+
+        // Prevent accidental connections to localhost (Node will default host=127.0.0.1 when host is undefined).
+        // This shows up as connect ECONNREFUSED 127.0.0.1:9000 and will never recover with socket resets.
+        if (!this.isBattery && !ipAddress) {
+            throw new Error('IP Address is required for TCP devices');
         }
 
         return {
@@ -1310,7 +1316,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                             await this.subscribeToEvents();
                         } catch (e) {
                             const logger = this.getBaichuanLogger();
-                            logger.warn('Failed to resubscribe to events after reconnection', e);
+                            logger.warn('Failed to resubscribe to events after reconnection', e?.message || String(e));
                         }
                     }, 1000);
                 }
@@ -1329,8 +1335,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
     }
 
     async withBaichuanRetry<T>(fn: () => Promise<T>): Promise<T> {
-        return await fn();
-
         if (this.isBattery) {
             return await fn();
         } else {
@@ -1390,7 +1394,7 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
             logger.log(`Diagnostics file: ${result.diagnosticsPath}`);
             logger.log(`Streams directory: ${result.streamsDir}`);
         } catch (e) {
-            logger.error('Failed to run diagnostics', e);
+            logger.error('Failed to run diagnostics', e?.message || String(e));
             throw e;
         }
     }
@@ -1449,10 +1453,30 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
 
     public getAbilities(): DeviceCapabilities {
         if (this.multiFocalDevice) {
-            return this.multiFocalDevice.getInterfaces(this.storageSettings.values.variantType).capabilities;
+            const variantType = this.storageSettings.values.variantType;
+            const ifaces = this.multiFocalDevice.getInterfaces(variantType);
+            if (ifaces?.capabilities) return ifaces.capabilities;
         } else {
-            return this.storageSettings.values.capabilities;
+            const caps = this.storageSettings.values.capabilities;
+            if (caps) return caps;
         }
+
+        // Safe fallback to avoid crashes during init when connection hasn't succeeded yet.
+        return {
+            channel: this.storageSettings.values.rtspChannel ?? 0,
+            ptzMode: 'none',
+            hasPan: false,
+            hasTilt: false,
+            hasZoom: false,
+            hasPresets: false,
+            hasPtz: false,
+            hasBattery: !!this.isBattery,
+            hasIntercom: false,
+            hasSiren: false,
+            hasFloodlight: false,
+            hasPir: false,
+            isDoorbell: false,
+        };
     }
 
     getBaichuanDebugOptions(): any | undefined {
@@ -2351,50 +2375,47 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         const vsos = await this.getVideoStreamOptions();
         const logger = this.getBaichuanLogger();
 
-        logger.log(`Available streams: ${vsos?.map(s => s.id).join(', ') || 'none'}`);
-        logger.log(`Requested stream ID: '${vso?.id}'`);
+        logger.debug(`Available streams: ${vsos?.map(s => s.id).join(', ') || 'none'}`);
+        logger.debug(`Requested stream ID: '${vso?.id}'`);
 
-        let selected = selectStreamOption(vsos, vso);
+        const selected = selectStreamOption(vsos, vso);
 
         // If the request explicitly asks for a variant (e.g. native_telephoto_main),
         // never override it with the device's variantType preference.
-        const requestedVariant = vso?.id ? extractVariantFromStreamId(vso.id, undefined) : undefined;
-        if (requestedVariant) {
-            logger.log(`Explicit variant requested: '${requestedVariant}'. Skipping variantType preference.`);
-        }
+        // const requestedVariant = vso?.id ? extractVariantFromStreamId(vso.id, undefined) : undefined;
 
         // If we have variantType set and the selected stream doesn't have the variant,
         // try to find a stream with the correct variant that matches the profile
-        const variantType = this.storageSettings.values.variantType;
-        if (!requestedVariant && variantType && variantType !== 'default') {
-            const profile = parseStreamProfileFromId(selected.id) || 'main';
+        // const variantType = this.storageSettings.values.variantType;
+        // if (!requestedVariant && variantType && variantType !== 'default') {
+        //     const profile = parseStreamProfileFromId(selected.id) || 'main';
 
-            // On NVR, firmwares vary: some expose the tele lens as 'autotrack', others as 'telephoto'.
-            // When variantType is set, prefer that variant but fall back to the other tele variant if present.
-            const preferred = variantType as 'autotrack' | 'telephoto';
-            const fallbacks: Array<'autotrack' | 'telephoto'> = this.isOnNvr && preferred === 'telephoto'
-                ? ['telephoto', 'autotrack']
-                : this.isOnNvr && preferred === 'autotrack'
-                    ? ['autotrack', 'telephoto']
-                    : [preferred];
+        //     // On NVR, firmwares vary: some expose the tele lens as 'autotrack', others as 'telephoto'.
+        //     // When variantType is set, prefer that variant but fall back to the other tele variant if present.
+        //     const preferred = variantType as 'autotrack' | 'telephoto';
+        //     const fallbacks: Array<'autotrack' | 'telephoto'> = this.isOnNvr && preferred === 'telephoto'
+        //         ? ['telephoto', 'autotrack']
+        //         : this.isOnNvr && preferred === 'autotrack'
+        //             ? ['autotrack', 'telephoto']
+        //             : [preferred];
 
-            const extractedVariant = extractVariantFromStreamId(selected.id, selected.url);
-            for (const v of fallbacks) {
-                const variantId = `native_${v}_${profile}`;
-                const variantStream = vsos?.find(s => s.id === variantId);
-                if (!variantStream) {
-                    logger.debug(`Variant stream '${variantId}' not found in available streams`);
-                    continue;
-                }
-                // Only use variant stream if the selected one doesn't already have a variant,
-                // or if the selected one has a different variant than what we want.
-                if (!extractedVariant || extractedVariant !== v) {
-                    logger.log(`Preferring variant stream: '${variantId}' over '${selected.id}' (variantType='${variantType}')`);
-                    selected = variantStream;
-                }
-                break;
-            }
-        }
+        //     const extractedVariant = extractVariantFromStreamId(selected.id, selected.url);
+        //     for (const v of fallbacks) {
+        //         const variantId = `native_${v}_${profile}`;
+        //         const variantStream = vsos?.find(s => s.id === variantId);
+        //         if (!variantStream) {
+        //             logger.debug(`Variant stream '${variantId}' not found in available streams`);
+        //             continue;
+        //         }
+        //         // Only use variant stream if the selected one doesn't already have a variant,
+        //         // or if the selected one has a different variant than what we want.
+        //         if (!extractedVariant || extractedVariant !== v) {
+        //             logger.log(`Preferring variant stream: '${variantId}' over '${selected.id}' (variantType='${variantType}')`);
+        //             selected = variantStream;
+        //         }
+        //         break;
+        //     }
+        // }
 
         logger.log(`Selected stream: id='${selected.id}', url='${selected.url}'`);
 
@@ -2413,8 +2434,9 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
         }
 
         // Check if this is a composite stream request (for multifocal devices)
-        const isComposite = selected.id?.startsWith('composite_');
-        if (isComposite && this.options && (this.options.type === 'multi-focal' || this.options.type === 'multi-focal-battery')) {
+        // const isComposite = selected.id?.startsWith('composite_');
+        // if (isComposite && this.options && (this.options.type === 'multi-focal' || this.options.type === 'multi-focal-battery')) {
+        if (selected.id?.startsWith('composite_')) {
             const profile = parseStreamProfileFromId(selected.id.replace('composite_', '')) || 'main';
             const streamKey = `composite_${profile}`;
 
@@ -2462,16 +2484,6 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 variant,
                 selected,
                 sourceId: this.id,
-                // onDetectedCodec: (detectedCodec) => {
-                //     const prev = this.cachedVideoStreamOptions ?? [];
-                //     const next = prev.filter((s) => s.id !== nativeId);
-                //     next.push({
-                //         container: 'rtp',
-                //         video: { codec: detectedCodec },
-                //         url: ``
-                //     });
-                //     this.cachedVideoStreamOptions = next;
-                // },
             });
         };
 
@@ -2548,8 +2560,8 @@ export abstract class CommonCameraMixin extends BaseBaichuanClass implements Vid
                 logger.error('Failed to update device interfaces', e?.message || String(e));
             }
 
-            logger.log(`Refreshed device capabilities: ${JSON.stringify(capabilities)}`);
-            logger.debug(`Refreshed device capabilities: ${JSON.stringify({ abilities, support, presets, objects })}`);
+            logger.log(`Refreshed device capabilities`);
+            logger.debug(`Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets, objects })}`);
         }
         catch (e) {
             logger.error('Failed to refresh abilities', e?.message || String(e));
