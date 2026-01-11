@@ -1,4 +1,4 @@
-import type { DeviceCapabilities, EnrichedRecordingFile, ParsedRecordingFileName, RecordingFile, ReolinkBaichuanApi, ReolinkDeviceInfo, VodFile, VodSearchResponse } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { DeviceCapabilities, EnrichedRecordingFile, NativeVideoStreamVariant, ParsedRecordingFileName, RecordingFile, ReolinkBaichuanApi, ReolinkDeviceInfo, VodFile, VodSearchResponse } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { DeviceBase, HttpRequest, HttpResponse, MediaObject, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, VideoClip, VideoClips } from "@scrypted/sdk";
 import { spawn } from "node:child_process";
 import { Readable } from "stream";
@@ -58,9 +58,10 @@ export const pirSuffix = `-pir`;
 
 export const getDeviceInterfaces = (props: {
     capabilities: DeviceCapabilities,
-    logger: Console
+    logger: Console,
+    lensType?: NativeVideoStreamVariant
 }) => {
-    const { capabilities, logger } = props;
+    const { capabilities, logger, lensType } = props;
 
     const interfaces = [
         ScryptedInterface.VideoCamera,
@@ -71,8 +72,11 @@ export const getDeviceInterfaces = (props: {
         ScryptedInterface.AudioSensor,
         ScryptedInterface.MotionSensor,
         ScryptedInterface.VideoTextOverlays,
-        ScryptedInterface.VideoClips,
     ];
+
+    if (!lensType) {
+        interfaces.push(ScryptedInterface.VideoClips);
+    }
 
     try {
         const {

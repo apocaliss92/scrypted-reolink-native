@@ -199,6 +199,11 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
     private readonly onSimpleEventBound = (ev: ReolinkSimpleEvent) => this.onSimpleEvent(ev);
 
     storageSettings = new StorageSettings(this, {
+        debugLogs: {
+            title: 'Debug logs',
+            type: 'boolean',
+            immediate: true,
+        },
         // Basic connection settings
         ipAddress: {
             title: 'IP Address',
@@ -261,11 +266,6 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             onPut: async () => {
                 await this.credentialsChanged();
             }
-        },
-        debugLogs: {
-            title: 'Debug logs',
-            type: 'boolean',
-            immediate: true,
         },
         mixinsSetup: {
             type: 'boolean',
@@ -1319,15 +1319,22 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
     }
 
     protected getStreamClientInputs(): BaichuanConnectionConfig {
-        const { ipAddress, username, password } = this.storageSettings.values;
+        const { ipAddress, username, password, uid, discoveryMethod } = this.storageSettings.values;
         const debugOptions = this.getBaichuanDebugOptions();
+
+        const normalizedUid = this.isBattery ? normalizeUid(uid) : undefined;
+        if (this.isBattery && !normalizedUid) {
+            throw new Error('UID is required for battery cameras (BCUDP)');
+        }
 
         return {
             host: ipAddress,
             username,
             password,
+            uid: normalizedUid,
             transport: this.transport,
             debugOptions,
+            udpDiscoveryMethod: discoveryMethod as BaichuanClientOptions["udpDiscoveryMethod"],
         };
     }
 
@@ -2348,16 +2355,23 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                 const { rtspChannel, variantType } = this.storageSettings.values;
 
                 try {
-                    // Lens-scoped behavior: request streams only for the current lens/variant.
-                    // This keeps a single native_main and native_sub for the device.
-                    const lensParam: NativeVideoStreamVariant | undefined = variantType as any;
 
                     const { nativeStreams, rtmpStreams, rtspStreams } = await client.buildVideoStreamOptions({
                         onNvr: this.isOnNvr,
                         channel: rtspChannel,
                         compositeOnly: this.isMultiFocal,
-                        ...(lensParam !== undefined ? { lens: lensParam } : {})
+                        lens: variantType,
                     });
+
+                    logger.debug(`Supported streams: ${JSON.stringify({
+                        nativeStreams,
+                        rtmpStreams,
+                        rtspStreams,
+                        variantType,
+                        onNvr: this.isOnNvr,
+                        channel: rtspChannel,
+                        compositeOnly: this.isMultiFocal,
+                    })}`);
 
                     // const urls = client.getRtspUrl(rtspChannel);
 
@@ -2413,12 +2427,10 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     }
                 }
 
-                if (streams.length) {
-                    logger.log('Fetched video stream options', streams.map((s) => s.name).join(', '));
-                    logger.debug(JSON.stringify(streams));
-                    this.cachedVideoStreamOptions = streams;
-                    return streams;
-                }
+                logger.log('Fetched video stream options', streams.map((s) => s.name).join(', '));
+                logger.debug(JSON.stringify({ streams }));
+                this.cachedVideoStreamOptions = streams;
+                return streams;
 
                 return [];
             } finally {
@@ -2605,6 +2617,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                 const { interfaces, type } = getDeviceInterfaces({
                     capabilities,
                     logger: this.console,
+                    lensType: this.storageSettings.values.variantType,
                 });
 
                 const device: Device = {
@@ -2696,7 +2709,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         this.storageSettings.settings.pipSize.hide = !this.isMultiFocal;
         this.storageSettings.settings.pipMargin.hide = !this.isMultiFocal;
 
-        this.storageSettings.settings.uid.hide = !this.isBattery
+        this.storageSettings.settings.uid.hide = !this.isBattery || this.isOnNvr;
         this.storageSettings.settings.discoveryMethod.hide = !this.isBattery && !this.nvrDevice;
 
         if (this.isBattery && !this.storageSettings.values.mixinsSetup) {

@@ -50,9 +50,10 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
         const { interfaces } = getDeviceInterfaces({
             capabilities,
             logger,
+            lensType,
         });
 
-        // logger.debug(`Interfaces found for lens ${lensType}: ${JSON.stringify({ interfaces, capabilities, multifocalInfo })}`);
+        logger.debug(`Interfaces found for lens ${lensType}: ${JSON.stringify({ interfaces, capabilities, multifocalInfo })}`);
 
         return { interfaces, capabilities };
     }
@@ -193,15 +194,23 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
     }
 
     protected getStreamClientInputs(): BaichuanConnectionConfig {
-        const { ipAddress, username, password } = this.storageSettings.values;
+        const { ipAddress, username, password, uid, discoveryMethod } = this.storageSettings.values;
         const debugOptions = this.getBaichuanDebugOptions();
+
+        // Multifocal battery cams use BCUDP for streaming too; UID is required.
+        const normalizedUid = this.isBattery ? uid?.trim() || undefined : undefined;
+        if (this.isBattery && !normalizedUid) {
+            throw new Error('UID is required for battery cameras (BCUDP)');
+        }
 
         return {
             host: ipAddress,
             username,
             password,
+            uid: normalizedUid,
             transport: this.transport,
             debugOptions,
+            udpDiscoveryMethod: discoveryMethod,
         };
     }
 
