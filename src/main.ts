@@ -1,12 +1,10 @@
 import sdk, { DeviceCreator, DeviceCreatorSettings, DeviceProvider, HttpRequest, HttpResponse, MediaObject, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, ScryptedNativeId, Setting, VideoClips } from "@scrypted/sdk";
 import { BaseBaichuanClass } from "./baichuan-base";
-import { ReolinkNativeCamera } from "./camera";
-import { ReolinkNativeBatteryCamera } from "./camera-battery";
-import { CommonCameraMixin } from "./common";
 import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
 import { batteryCameraSuffix, batteryMultifocalSuffix, cameraSuffix, extractThumbnailFromVideo, getDeviceInterfaces, handleVideoClipRequest, multifocalSuffix, nvrSuffix } from "./utils";
 import { randomBytes } from "crypto";
+import { ReolinkCamera } from "./camera";
 
 interface ThumbnailRequest {
     deviceId: string;
@@ -14,7 +12,7 @@ interface ThumbnailRequest {
     rtmpUrl?: string;
     filePath?: string;
     logger?: Console;
-    device?: CommonCameraMixin;
+    device?: ReolinkCamera;
     resolve: (mo: MediaObject) => void;
     reject: (error: Error) => void;
 }
@@ -25,13 +23,12 @@ interface ThumbnailRequestInput {
     rtmpUrl?: string;
     filePath?: string;
     logger?: Console;
-    device?: CommonCameraMixin;
+    device?: ReolinkCamera;
 }
 
 class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, DeviceCreator {
     devices = new Map<string, BaseBaichuanClass>();
-    private deviceCreationPromises = new Map<string, Promise<BaseBaichuanClass>>();
-    mixinsMap = new Map<string, CommonCameraMixin>();
+    camerasMap = new Map<string, ReolinkCamera>();
     nvrDeviceId: string;
     private thumbnailQueue: ThumbnailRequest[] = [];
     private thumbnailProcessing = false;
@@ -48,36 +45,13 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
     }
 
     async getDevice(nativeId: ScryptedNativeId): Promise<BaseBaichuanClass> {
-        // Return existing device if available
         if (this.devices.has(nativeId)) {
             return this.devices.get(nativeId)!;
         }
 
-        // Check if device creation is already in progress to prevent race conditions
-        const existingPromise = this.deviceCreationPromises.get(nativeId);
-        if (existingPromise) {
-            return existingPromise;
-        }
-
-        // Create device creation promise to handle concurrent requests
-        const creationPromise = (async () => {
-            try {
-                // Double-check after async operation
-                if (this.devices.has(nativeId)) {
-                    return this.devices.get(nativeId)!;
-                }
-
-                const newCamera = this.createCamera(nativeId);
-                this.devices.set(nativeId, newCamera);
-                return newCamera;
-            } finally {
-                // Clean up the promise after creation completes
-                this.deviceCreationPromises.delete(nativeId);
-            }
-        })();
-
-        this.deviceCreationPromises.set(nativeId, creationPromise);
-        return creationPromise;
+        const newCamera = this.createCamera(nativeId);
+        this.devices.set(nativeId, newCamera);
+        return newCamera;
     }
 
     async createDevice(settings: DeviceCreatorSettings, nativeId?: string): Promise<string> {
@@ -206,7 +180,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 providerNativeId: this.nativeId,
             });
 
-            const device = await this.getDevice(nativeId) as CommonCameraMixin;
+            const device = await this.getDevice(nativeId) as ReolinkCamera;
 
             device.info = deviceInfo;
             device.classes = objects;
@@ -223,7 +197,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
         }
         catch (e) {
             this.console.error('Error adding Reolink device', e?.message || String(e));
-            throw e;    
+            throw e;
         }
     }
 
@@ -265,7 +239,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
 
     createCamera(nativeId: string) {
         if (nativeId.endsWith(batteryCameraSuffix)) {
-            return new ReolinkNativeBatteryCamera(nativeId, this);
+            return new ReolinkCamera(nativeId, this, { type: 'battery' });
         } else if (nativeId.endsWith(nvrSuffix)) {
             return new ReolinkNativeNvrDevice(nativeId, this);
         } else if (nativeId.endsWith(batteryMultifocalSuffix)) {
@@ -273,7 +247,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
         } else if (nativeId.endsWith(multifocalSuffix)) {
             return new ReolinkNativeMultiFocalDevice(nativeId, this, "multi-focal");
         } else {
-            return new ReolinkNativeCamera(nativeId, this);
+            return new ReolinkCamera(nativeId, this, { type: 'regular' });
         }
     }
 
@@ -313,7 +287,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             // logger.log(`Webhook request: type=${type}, deviceId=${deviceId}, fileId=${fileId}`);
 
             // Get the device
-            const device = this.mixinsMap.get(deviceId);
+            const device = this.camerasMap.get(deviceId);
             if (!device) {
                 response.send('Device not found', { code: 404 });
                 return;

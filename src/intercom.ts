@@ -1,9 +1,7 @@
 import type { ReolinkBaichuanApi } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { FFmpegInput, MediaObject, ScryptedMimeTypes } from "@scrypted/sdk";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-
-import type { ReolinkNativeCamera } from "./camera";
-import { CommonCameraMixin } from "./common";
+import { ReolinkCamera } from "./camera";
 
 // Keep this low: Reolink blocks are ~64ms at 16kHz (1025 samples).
 // A small backlog avoids multi-second latency when the pipeline stalls.
@@ -23,7 +21,7 @@ export class ReolinkBaichuanIntercom {
     private sendChain: Promise<void> = Promise.resolve();
     private pcmBuffer: Buffer = Buffer.alloc(0);
 
-    constructor(private camera: CommonCameraMixin) {
+    constructor(private camera: ReolinkCamera) {
     }
 
     get blocksPerPayload(): number {

@@ -1,5 +1,5 @@
 import type { PtzPreset } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import type { CommonCameraMixin } from "./common";
+import type { ReolinkCamera } from "./camera";
 
 export type PtzCapabilitiesShape = {
     presets?: Record<string, string>;
@@ -7,7 +7,7 @@ export type PtzCapabilitiesShape = {
 };
 
 export class ReolinkPtzPresets {
-    constructor(private camera: CommonCameraMixin & { ptzCapabilities?: any }) { }
+    constructor(private camera: ReolinkCamera & { ptzCapabilities?: any }) { }
 
     private get storageSettings() {
         return this.camera.storageSettings;

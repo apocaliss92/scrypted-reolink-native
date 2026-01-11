@@ -1,19 +1,15 @@
-import type { DeviceCapabilities, DualLensChannelAnalysis, NativeVideoStreamVariant, ReolinkBaichuanApi, ReolinkSimpleEvent, SleepStatus, StreamProfile } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
-import type { BaichuanConnectionConfig } from "./baichuan-base";
+import type { BatteryInfo, DeviceCapabilities, DualLensChannelAnalysis, NativeVideoStreamVariant, ReolinkBaichuanApi, ReolinkSimpleEvent, SleepStatus } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { Device, DeviceProvider, Reboot, ScryptedDeviceType, Settings } from "@scrypted/sdk";
-import { ReolinkNativeCamera } from "./camera";
-import { ReolinkNativeBatteryCamera } from "./camera-battery";
-import { CameraType, CommonCameraMixin } from "./common";
+import type { BaichuanConnectionConfig } from "./baichuan-base";
+import { CameraType, ReolinkCamera } from "./camera";
 import ReolinkNativePlugin from "./main";
-import { batteryCameraSuffix, cameraSuffix, getDeviceInterfaces } from "./utils";
 import { ReolinkNativeNvrDevice } from "./nvr";
-import { createBaichuanApi } from "./connect";
+import { batteryCameraSuffix, cameraSuffix, getDeviceInterfaces } from "./utils";
 
-export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements Settings, DeviceProvider, Reboot {
+export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Settings, DeviceProvider, Reboot {
     plugin: ReolinkNativePlugin;
-    cameraNativeMap = new Map<string, ReolinkNativeCamera | ReolinkNativeBatteryCamera>();
+    lensDevicesMap = new Map<string, ReolinkCamera>();
     private channelToNativeIdMap = new Map<number, string>();
-    isBattery: boolean;
 
     constructor(nativeId: string, plugin: ReolinkNativePlugin, type: CameraType, nvrDevice?: ReolinkNativeNvrDevice) {
         super(nativeId, plugin, { type, nvrDevice });
@@ -27,21 +23,6 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
 
     protected getDeviceName(): string {
         return this.name || 'Multi-Focal Device';
-    }
-
-    async init(): Promise<void> {
-        const logger = this.getBaichuanLogger();
-
-        try {
-            this.storageSettings.settings.uid.hide = !this.isBattery;
-
-            await this.ensureClient();
-            // subscribeToEvents in common.ts will check if this device has a parent (nvrDevice)
-            // and skip subscription if needed - events will be forwarded from parent
-            await this.subscribeToEvents();
-        } catch (e) {
-            logger.error('Failed to initialize multi-focal device', e?.message || String(e));
-        }
     }
 
     getInterfaces(lensType?: NativeVideoStreamVariant) {
@@ -71,12 +52,14 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
             logger,
         });
 
-        logger.debug(`Interfaces found for lens ${lensType}: ${JSON.stringify({ interfaces, capabilities, multifocalInfo })}`);
+        // logger.debug(`Interfaces found for lens ${lensType}: ${JSON.stringify({ interfaces, capabilities, multifocalInfo })}`);
 
         return { interfaces, capabilities };
     }
 
     async reportDevices(): Promise<void> {
+        await super.reportDevices();
+
         const logger = this.getBaichuanLogger();
 
         try {
@@ -150,14 +133,19 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
 
     async getDevice(nativeId: string) {
         if (nativeId.endsWith(cameraSuffix) || nativeId.endsWith(batteryCameraSuffix)) {
-            let device = this.cameraNativeMap.get(nativeId);
+            let device = this.lensDevicesMap.get(nativeId);
             if (!device) {
                 if (nativeId.endsWith(batteryCameraSuffix)) {
-                    device = new ReolinkNativeBatteryCamera(nativeId, this.plugin, undefined, this);
+                    device = new ReolinkCamera(nativeId, this.plugin, { type: 'battery', multiFocalDevice: this });
                 } else {
-                    device = new ReolinkNativeCamera(nativeId, this.plugin, undefined, this);
+                    device = new ReolinkCamera(nativeId, this.plugin, { type: 'regular', multiFocalDevice: this });
                 }
             }
+
+            if (device) {
+                this.lensDevicesMap.set(nativeId, device);
+            }
+
             return device;
         } else {
             return super.getDevice(nativeId);
@@ -165,124 +153,12 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
     }
 
     async releaseDevice(id: string, nativeId: string) {
-        this.cameraNativeMap.delete(nativeId);
+        this.lensDevicesMap.delete(nativeId);
         super.releaseDevice(id, nativeId);
-    }
-
-    /**
-     * Forward events received from parent (NVR if child, or directly from Baichuan if standalone)
-     * to the MultiFocal device itself AND to ALL lens devices (camera children) of this MultiFocal.
-     * This ensures that:
-     * 1. The MultiFocal device itself receives events (it can have event handling capabilities)
-     * 2. All lenses receive the events, even if they share the same channel
-     *    (e.g., wide and tele on the same channel on NVR).
-     * Only the root device (NVR or standalone MultiFocal) subscribes to events,
-     * and events are forwarded down the hierarchy.
-     */
-    forwardNativeEvent(ev: ReolinkSimpleEvent): void {
-        const logger = this.getBaichuanLogger();
-        const eventChannel = ev?.channel;
-
-        // First, forward event to the MultiFocal device itself
-        try {
-            this.onSimpleEvent(ev);
-        } catch (e) {
-            logger.warn(`Error forwarding event to MultiFocal device itself:`, e?.message || String(e));
-        }
-
-        // Then, forward event to all lens devices (camera children) of this MultiFocal
-        // Even if event has a specific channel, we forward to all lenses because:
-        // 1. On NVR, wide and tele lenses can share the same channel
-        // 2. Events might be relevant to all lenses of the MultiFocal device
-        const lensDevices = Array.from(this.cameraNativeMap.values());
-        const forwardedCount = lensDevices.length;
-        
-        if (forwardedCount === 0) {
-            logger.debug(`No lens devices found for MultiFocal, event forwarded only to MultiFocal itself`);
-            return;
-        }
-
-        logger.debug(`Forwarding event (channel=${eventChannel}) to MultiFocal itself and ${forwardedCount} lens device(s)`);
-
-        // Forward event to all camera children (lens devices)
-        for (const camera of lensDevices) {
-            try {
-                // Each lens device will filter events based on its own channel if needed
-                camera.onSimpleEvent(ev);
-            } catch (e) {
-                logger.warn(`Error forwarding event to lens device ${camera.nativeId}:`, e?.message || String(e));
-            }
-        }
     }
 
     async unsubscribeFromAllEvents(): Promise<void> {
         await super.unsubscribeFromEvents();
-    }
-
-    /**
-     * Update sleeping state for the MultiFocal device itself and propagate to all lens devices.
-     * This ensures that when the MultiFocal receives a sleeping/awake state update (from events or API calls),
-     * the state is synchronized across the MultiFocal and all its lens children.
-     */
-    async updateSleepingState(sleepStatus: SleepStatus): Promise<void> {
-        const logger = this.getBaichuanLogger();
-        
-        // First, update the MultiFocal device's own sleeping state
-        await super.updateSleepingState(sleepStatus);
-
-        // Then, propagate the state to all lens devices (camera children)
-        const lensDevices = Array.from(this.cameraNativeMap.values());
-        
-        if (lensDevices.length === 0) {
-            logger.debug(`No lens devices found for MultiFocal, sleeping state updated only for MultiFocal itself`);
-            return;
-        }
-
-        logger.debug(`Propagating sleeping state (state=${sleepStatus.state}) to ${lensDevices.length} lens device(s)`);
-
-        // Propagate sleeping state to all lens devices
-        await Promise.allSettled(
-            lensDevices.map(async (camera) => {
-                try {
-                    await camera.updateSleepingState(sleepStatus);
-                } catch (e) {
-                    logger.warn(`Error propagating sleeping state to lens device ${camera.nativeId}:`, e?.message || String(e));
-                }
-            })
-        );
-    }
-
-    /**
-     * Update online state for the MultiFocal device itself and propagate to all lens devices.
-     * This ensures that when the MultiFocal receives an online/offline state update (from events or API calls),
-     * the state is synchronized across the MultiFocal and all its lens children.
-     */
-    async updateOnlineState(isOnline: boolean): Promise<void> {
-        const logger = this.getBaichuanLogger();
-        
-        // First, update the MultiFocal device's own online state
-        await super.updateOnlineState(isOnline);
-
-        // Then, propagate the state to all lens devices (camera children)
-        const lensDevices = Array.from(this.cameraNativeMap.values());
-        
-        if (lensDevices.length === 0) {
-            logger.debug(`No lens devices found for MultiFocal, online state updated only for MultiFocal itself`);
-            return;
-        }
-
-        logger.debug(`Propagating online state (isOnline=${isOnline}) to ${lensDevices.length} lens device(s)`);
-
-        // Propagate online state to all lens devices
-        await Promise.allSettled(
-            lensDevices.map(async (camera) => {
-                try {
-                    await camera.updateOnlineState(isOnline);
-                } catch (e) {
-                    logger.warn(`Error propagating online state to lens device ${camera.nativeId}:`, e?.message || String(e));
-                }
-            })
-        );
     }
 
     public async runDiagnostics(): Promise<void> {
@@ -341,6 +217,58 @@ export class ReolinkNativeMultiFocalDevice extends CommonCameraMixin implements 
 
         // Otherwise, use base class createStreamClient which manages stream clients per streamKey
         return await super.createStreamClient(streamKey);
+    }
+
+    async getLensDevices() {
+        const devices = Array.from(this.lensDevicesMap.values());
+        const logger = this.getBaichuanLogger();
+        logger.debug(`Found ${devices.length} lens devices: ${devices.map(d => d.nativeId).join(', ')}`);
+
+        return devices;
+    }
+
+    async updateBatteryInfo() {
+        const batteryInfo = await super.updateBatteryInfo();
+        const lensDevices = await this.getLensDevices();
+
+        for (const camera of lensDevices) {
+            await camera.updateBatteryInfo(batteryInfo);
+        }
+
+        return batteryInfo;
+    }
+
+    async onSimpleEvent(ev: ReolinkSimpleEvent) {
+        const logger = this.getBaichuanLogger();
+        await super.onSimpleEvent(ev);
+        const lensDevices = await this.getLensDevices();
+
+        for (const camera of lensDevices) {
+            logger.debug(`Forward ${ev.type} event to lens device ${camera.nativeId}`);
+            await camera.onSimpleEvent(ev);
+        }
+    }
+
+    async updateSleepingState(sleepStatus: SleepStatus) {
+        const logger = this.getBaichuanLogger();
+        await super.updateSleepingState(sleepStatus);
+        const lensDevices = await this.getLensDevices();
+
+        for (const camera of lensDevices) {
+            logger.debug(`Forward ${sleepStatus} sleeping state to lens device ${camera.nativeId}`);
+            await camera.updateSleepingState(sleepStatus);
+        }
+    }
+
+    async updateOnlineState(isOnline: boolean) {
+        const logger = this.getBaichuanLogger();
+        await super.updateOnlineState(isOnline);
+        const lensDevices = await this.getLensDevices();
+
+        for (const camera of lensDevices) {
+            logger.debug(`Forward ${isOnline ? 'online' : 'offline'} state to lens device ${camera.nativeId}`);
+            await camera.updateOnlineState(isOnline);
+        }
     }
 }
 

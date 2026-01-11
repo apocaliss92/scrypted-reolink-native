@@ -7,7 +7,7 @@ import https from "https";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
-import { CommonCameraMixin } from "./common";
+import { ReolinkCamera } from "./camera";
 /**
  * Sanitize FFmpeg output or URLs to avoid leaking credentials
  */
@@ -135,7 +135,6 @@ export const updateDeviceInfo = async (props: {
 
         throw e;
     } finally {
-
         logger.log(`Device info updated`);
         logger.debug(`${JSON.stringify({ newInfo: device.info, deviceData })}`);
     }
@@ -443,7 +442,7 @@ export async function extractThumbnailFromVideo(props: {
     fileId: string;
     deviceId: string;
     logger?: Console;
-    device?: CommonCameraMixin;
+    device?: ReolinkCamera;
 }): Promise<MediaObject> {
     const { rtmpUrl, filePath, fileId, deviceId, device } = props;
     // Use device logger if available, otherwise fallback to provided logger
@@ -489,7 +488,7 @@ function getVideoClipCachePath(deviceId: string, fileId: string): string {
  * Checks cache first, then proxies RTMP stream if not cached
  */
 export async function handleVideoClipRequest(props: {
-    device: CommonCameraMixin;
+    device: ReolinkCamera;
     deviceId: string;
     fileId: string;
     request: HttpRequest;
