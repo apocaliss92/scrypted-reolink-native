@@ -1925,15 +1925,16 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             if (motionDetected !== this.motionDetected) {
                 logger.log(`Motion detected: ${motionDetected}`);
                 this.motionDetected = motionDetected;
-                if (motionDetected) {
-                    if (this.motionTimeout) clearTimeout(this.motionTimeout);
-                    const timeout = (this.storageSettings.values.motionTimeout || 30) * 1000;
-                    this.motionTimeout = setTimeout(() => {
-                        this.motionDetected = false;
-                    }, timeout);
-                } else {
-                    if (this.motionTimeout) clearTimeout(this.motionTimeout);
-                }
+            }
+
+            if (motionDetected) {
+                if (this.motionTimeout) clearTimeout(this.motionTimeout);
+                const timeout = (this.storageSettings.values.motionTimeout || 30) * 1000;
+                this.motionTimeout = setTimeout(() => {
+                    this.motionDetected = false;
+                }, timeout);
+            } else {
+                if (this.motionTimeout) clearTimeout(this.motionTimeout);
             }
         }
 
