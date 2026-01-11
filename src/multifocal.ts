@@ -221,8 +221,8 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
 
     async getLensDevices() {
         const devices = Array.from(this.lensDevicesMap.values());
-        const logger = this.getBaichuanLogger();
-        logger.debug(`Found ${devices.length} lens devices: ${devices.map(d => d.nativeId).join(', ')}`);
+        // const logger = this.getBaichuanLogger();
+        // logger.debug(`Found ${devices.length} lens devices: ${devices.map(d => d.nativeId).join(', ')}`);
 
         return devices;
     }
@@ -239,8 +239,8 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
     }
 
     async onSimpleEvent(ev: ReolinkSimpleEvent) {
-        const logger = this.getBaichuanLogger();
         await super.onSimpleEvent(ev);
+        const logger = this.getBaichuanLogger();
         const lensDevices = await this.getLensDevices();
 
         for (const camera of lensDevices) {
@@ -255,7 +255,7 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
         const lensDevices = await this.getLensDevices();
 
         for (const camera of lensDevices) {
-            logger.debug(`Forward ${sleepStatus} sleeping state to lens device ${camera.nativeId}`);
+            logger.debug(`Forward ${JSON.stringify(sleepStatus)} sleeping state to lens device ${camera.nativeId}`);
             await camera.updateSleepingState(sleepStatus);
         }
     }

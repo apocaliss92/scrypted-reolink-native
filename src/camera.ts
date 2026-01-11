@@ -1904,6 +1904,8 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         const isEventDispatchEnabled = this.isEventDispatchEnabled?.() ?? true;
         if (!isEventDispatchEnabled) return;
 
+        const logger = this.getBaichuanLogger();
+
         const dispatchEvents = this.getDispatchEventsSelection?.() ?? new Set(['motion', 'objects']);
         const shouldDispatchMotion = dispatchEvents.has('motion');
         const shouldDispatchObjects = dispatchEvents.has('objects');
@@ -1911,6 +1913,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         if (shouldDispatchMotion && events.motion !== undefined) {
             const motionDetected = events.motion;
             if (motionDetected !== this.motionDetected) {
+                logger.log(`Motion detected: ${motionDetected}`);
                 this.motionDetected = motionDetected;
                 if (motionDetected) {
                     if (this.motionTimeout) clearTimeout(this.motionTimeout);
@@ -1941,7 +1944,6 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         }
     }
 
-    // BinarySensor interface implementation (for doorbell)
     handleDoorbellEvent(): void {
         if (!this.doorbellBinaryTimeout) {
             this.binaryState = true;
@@ -2233,7 +2235,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     const sirenState = await api.getSiren(channel);
                     this.siren.on = sirenState.enabled;
                 } catch (e) {
-                    logger.debug('Failed to align siren state', e);
+                    logger.error('Failed to align siren state', e?.message || String(e));
                 }
             }
 
@@ -2246,7 +2248,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                         this.floodlight.brightness = wl.brightness;
                     }
                 } catch (e) {
-                    logger.debug('Failed to align floodlight state', e);
+                    logger.error('Failed to align floodlight state', e?.message || String(e));
                 }
             }
 
@@ -2270,11 +2272,11 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                         }
                     }
                 } catch (e) {
-                    logger.debug('Failed to align PIR state', e);
+                    logger.error('Failed to align PIR state', e?.message || String(e));
                 }
             }
         } catch (e) {
-            logger.debug('Failed to align auxiliary devices state', e);
+            logger.error('Failed to align auxiliary devices state', e?.message || String(e));
         }
     }
 
@@ -2306,7 +2308,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             return url.toString();
         } catch (e) {
             // If URL parsing fails, return original URL
-            logger.warn('Failed to parse URL for credentials', e);
+            logger.warn('Failed to parse URL for credentials', e?.message || String(e));
             return rtspUrl;
         }
     }
@@ -2394,7 +2396,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     }
                 } catch (e) {
                     if (!this.isRecoverableBaichuanError?.(e)) {
-                        logger.warn('Failed to build RTSP/RTMP stream options, falling back to Native', e?.message || String(e));
+                        logger.error('Failed to build RTSP/RTMP stream options, falling back to Native', e?.message || String(e));
                     }
                 }
 
