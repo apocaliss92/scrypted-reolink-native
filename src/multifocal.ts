@@ -50,10 +50,10 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
         const { interfaces } = getDeviceInterfaces({
             capabilities,
             logger,
-            lensType,
+            isLensDevice: !!lensType
         });
 
-        logger.debug(`Interfaces found for lens ${lensType}: ${JSON.stringify({ interfaces, capabilities, multifocalInfo })}`);
+        logger.debug(`Interfaces found for lens ${lensType}: ${JSON.stringify({ interfaces, capabilities, multifocalInfo, isLensDevice: !!lensType })}`);
 
         return { interfaces, capabilities };
     }

@@ -59,9 +59,9 @@ export const pirSuffix = `-pir`;
 export const getDeviceInterfaces = (props: {
     capabilities: DeviceCapabilities,
     logger: Console,
-    lensType?: NativeVideoStreamVariant
+    isLensDevice?: boolean
 }) => {
-    const { capabilities, logger, lensType } = props;
+    const { capabilities, logger, isLensDevice } = props;
 
     const interfaces = [
         ScryptedInterface.VideoCamera,
@@ -74,7 +74,7 @@ export const getDeviceInterfaces = (props: {
         ScryptedInterface.VideoTextOverlays,
     ];
 
-    if (!lensType) {
+    if (!isLensDevice) {
         interfaces.push(ScryptedInterface.VideoClips);
     }
 

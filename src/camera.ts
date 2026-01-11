@@ -2617,7 +2617,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                 const { interfaces, type } = getDeviceInterfaces({
                     capabilities,
                     logger: this.console,
-                    lensType: this.storageSettings.values.variantType,
+                    isLensDevice: !!this.multiFocalDevice,
                 });
 
                 const device: Device = {
@@ -2634,7 +2634,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                 await sdk.deviceManager.onDeviceDiscovered(device);
 
                 logger.log(`Device interfaces updated`);
-                logger.debug(JSON.stringify({ hasNvr: !!this.nvrDevice, hasMultiFocal: !!this.multiFocalDevice, hasPlugin: !!this.plugin }));
+                logger.debug(JSON.stringify({ interfaces, isLensDevice: !!this.multiFocalDevice, hasNvr: !!this.nvrDevice, hasMultiFocal: !!this.multiFocalDevice, hasPlugin: !!this.plugin }));
                 logger.debug(`${JSON.stringify(device)}`);
             } catch (e) {
                 logger.error('Failed to update device interfaces', e?.message || String(e));
@@ -2697,6 +2697,12 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         this.storageSettings.settings.socketApiDebugLogs.hide = !!this.nvrDevice;
         this.storageSettings.settings.clipsSource.hide = !this.nvrDevice;
         this.storageSettings.settings.clipsSource.defaultValue = this.nvrDevice ? "NVR" : "Device";
+
+        this.storageSettings.settings.enableVideoclips.hide = !!this.multiFocalDevice;
+        this.storageSettings.settings.videoclipsDaysToPreload.hide = !!this.multiFocalDevice;
+        this.storageSettings.settings.videoclipsRegularChecks.hide = !!this.multiFocalDevice;
+        this.storageSettings.settings.loadVideoclips.hide = !!this.multiFocalDevice;
+        this.storageSettings.settings.downloadVideoclipsLocally.hide = !!this.multiFocalDevice;
 
         this.storageSettings.settings.videoclipsRegularChecks.defaultValue = this.isBattery ? 120 : 30;
 
