@@ -207,6 +207,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         // Basic connection settings
         ipAddress: {
             title: 'IP Address',
+            hide: true,
             type: 'string',
             onPut: async () => {
                 await this.credentialsChanged();
@@ -214,6 +215,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         },
         username: {
             type: 'string',
+            hide: true,
             title: 'Username',
             onPut: async () => {
                 await this.credentialsChanged();
@@ -221,6 +223,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         },
         password: {
             type: 'password',
+            hide: true,
             title: 'Password',
             onPut: async () => {
                 await this.credentialsChanged();
@@ -2538,11 +2541,20 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         // Extract variant from stream ID or URL if present (e.g., "autotrack" from "native_autotrack_main" or "?variant=autotrack")
         let variant = extractVariantFromStreamId(selected.id, selected.url);
 
-        // Fallback: if no variant found in stream ID/URL, use variantType from device settings
-        // This is important for multi-focal devices where the device has a variantType setting
+        // Fallback: if no variant found in stream ID/URL, use variantType from device settings.
+        // IMPORTANT:
+        // - On NVR/Hub multifocal setups, the tele lens is often selected via a variant (autotrack/telephoto) on the same channel.
+        // - On standalone TrackMix (no NVR), the tele lens is selected via channel=1 (no variant).
+        // Forcing a variant on standalone can result in a started stream with no frames.
         if (!variant && this.storageSettings.values.variantType && this.storageSettings.values.variantType !== 'default') {
-            variant = this.storageSettings.values.variantType as 'autotrack' | 'telephoto';
-            logger.log(`Using variant from device settings: '${variant}' (not found in stream ID/URL)`);
+            if (this.isOnNvr) {
+                variant = this.storageSettings.values.variantType as 'autotrack' | 'telephoto';
+                logger.log(`Using variant from device settings: '${variant}' (not found in stream ID/URL)`);
+            } else {
+                logger.log(
+                    `Ignoring device variantType '${this.storageSettings.values.variantType}' for standalone stream (channel-based lens selection)`
+                );
+            }
         }
 
         logger.log(`Stream selection: id='${selected.id}', profile='${profile}', channel=${channel}, variant='${variant || 'default'}'`);
@@ -2725,8 +2737,9 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         this.storageSettings.settings.pipSize.hide = !this.isMultiFocal;
         this.storageSettings.settings.pipMargin.hide = !this.isMultiFocal;
 
-        this.storageSettings.settings.uid.hide = !this.isBattery || this.isOnNvr;
-        this.storageSettings.settings.discoveryMethod.hide = !this.isBattery && !this.nvrDevice;
+        const hideUid = !this.isBattery || this.isOnNvr || !!this.multiFocalDevice
+        this.storageSettings.settings.uid.hide = hideUid;
+        this.storageSettings.settings.discoveryMethod.hide = hideUid;
 
         if (this.isBattery && !this.storageSettings.values.mixinsSetup) {
             try {
