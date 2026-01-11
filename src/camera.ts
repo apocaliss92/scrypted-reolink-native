@@ -689,6 +689,10 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         this.protocol = transport;
 
         setTimeout(async () => {
+            if (this.motionDetected) {
+                this.motionDetected = false;
+            }
+
             await this.init();
         }, 2000);
     }
@@ -1621,48 +1625,45 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
 
         try {
             const logger = this.getBaichuanLogger();
+            const isDispatchEnabled = this.isEventDispatchEnabled();
 
-            logger.debug(`Baichuan event: ${JSON.stringify(ev)}`);
+            logger.debug(`Baichuan event on camera (dispatch enabled: ${isDispatchEnabled}): ${JSON.stringify(ev)}`);
 
-            if (!this.isEventDispatchEnabled()) {
+            if (!isDispatchEnabled) {
                 logger.debug('Event dispatch is disabled, ignoring event');
                 return;
             }
 
-            // Handle battery/online/sleeping events separately from motion events
+            const objects: string[] = [];
+            let motion = false;
+
             switch (ev?.type) {
                 case 'awake':
                 case 'sleeping':
-                    // Update sleeping state for battery cameras or devices that support it
                     this.updateSleepingState({
                         reason: ev?.type === 'sleeping' ? 'sleeping' : 'awake',
                         state: ev.type === 'sleeping' ? 'sleeping' : 'awake',
                     }).catch((e) => {
                         logger.warn('Error updating sleeping state', e);
                     });
-                    return; // These events are handled, no need to process as motion events
+                    return;
 
                 case 'offline':
                 case 'online':
-                    // Update online state for battery cameras or devices that support it
                     this.updateOnlineState(ev.type === 'online').catch((e) => {
                         logger.warn('Error updating online state', e);
                     });
-                    return; // These events are handled, no need to process as motion events
-            }
+                    return;
 
-            // Handle motion and object detection events
-            const objects: string[] = [];
-            let motion = false;
-
-            switch (ev?.type) {
                 case 'motion':
                     motion = true;
                     break;
+
                 case 'doorbell':
                     this.handleDoorbellEvent();
                     motion = true;
                     break;
+
                 case 'people':
                 case 'vehicle':
                 case 'animal':
@@ -1672,6 +1673,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     if (this.shouldDispatchObjects()) objects.push(ev.type);
                     motion = true;
                     break;
+
                 default:
                     logger.error(`Unknown event type: ${ev?.type}`);
                     return;
@@ -1909,6 +1911,14 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         const dispatchEvents = this.getDispatchEventsSelection?.() ?? new Set(['motion', 'objects']);
         const shouldDispatchMotion = dispatchEvents.has('motion');
         const shouldDispatchObjects = dispatchEvents.has('objects');
+
+        logger.debug(`Processing events ${JSON.stringify({
+            isMotion: events.motion,
+            objects: events.objects,
+            currentMotion: this.motionDetected,
+            shouldDispatchMotion,
+            shouldDispatchObjects,
+        })}`);
 
         if (shouldDispatchMotion && events.motion !== undefined) {
             const motionDetected = events.motion;
@@ -2626,6 +2636,10 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
 
     async init(): Promise<void> {
         const logger = this.getBaichuanLogger();
+
+        if (this.motionDetected) {
+            this.motionDetected = false;
+        }
 
         if (!this.multiFocalDevice) {
             try {
