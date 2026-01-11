@@ -219,7 +219,7 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
         return await super.createStreamClient(streamKey);
     }
 
-    async getLensDevices() {
+    getLensDevices() {
         const devices = Array.from(this.lensDevicesMap.values());
         // const logger = this.getBaichuanLogger();
         // logger.debug(`Found ${devices.length} lens devices: ${devices.map(d => d.nativeId).join(', ')}`);
@@ -229,7 +229,7 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
 
     async updateBatteryInfo() {
         const batteryInfo = await super.updateBatteryInfo();
-        const lensDevices = await this.getLensDevices();
+        const lensDevices = this.getLensDevices();
 
         for (const camera of lensDevices) {
             await camera.updateBatteryInfo(batteryInfo);
@@ -238,21 +238,21 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
         return batteryInfo;
     }
 
-    async onSimpleEvent(ev: ReolinkSimpleEvent) {
-        await super.onSimpleEvent(ev);
+    onSimpleEvent(ev: ReolinkSimpleEvent) {
+        super.onSimpleEvent(ev);
         const logger = this.getBaichuanLogger();
-        const lensDevices = await this.getLensDevices();
+        const lensDevices = this.getLensDevices();
 
         for (const camera of lensDevices) {
             logger.debug(`Forward ${ev.type} event to lens device ${camera.nativeId}`);
-            await camera.onSimpleEvent(ev);
+            camera.onSimpleEvent(ev);
         }
     }
 
     async updateSleepingState(sleepStatus: SleepStatus) {
         const logger = this.getBaichuanLogger();
         await super.updateSleepingState(sleepStatus);
-        const lensDevices = await this.getLensDevices();
+        const lensDevices = this.getLensDevices();
 
         for (const camera of lensDevices) {
             logger.debug(`Forward ${JSON.stringify(sleepStatus)} sleeping state to lens device ${camera.nativeId}`);
@@ -263,7 +263,7 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
     async updateOnlineState(isOnline: boolean) {
         const logger = this.getBaichuanLogger();
         await super.updateOnlineState(isOnline);
-        const lensDevices = await this.getLensDevices();
+        const lensDevices = this.getLensDevices();
 
         for (const camera of lensDevices) {
             logger.debug(`Forward ${isOnline ? 'online' : 'offline'} state to lens device ${camera.nativeId}`);

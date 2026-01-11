@@ -196,6 +196,8 @@ class ReolinkCameraPirSensor extends ScryptedDeviceBase implements OnOff, Settin
 }
 
 export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Camera, Settings, DeviceProvider, ObjectDetector, PanTiltZoom, VideoTextOverlays, BinarySensor, Intercom, Reboot, VideoClips {
+    private readonly onSimpleEventBound = (ev: ReolinkSimpleEvent) => this.onSimpleEvent(ev);
+
     storageSettings = new StorageSettings(this, {
         // Basic connection settings
         ipAddress: {
@@ -1347,7 +1349,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     }, 1000);
                 }
             },
-            onSimpleEvent: async (ev: ReolinkSimpleEvent) => await this.onSimpleEvent(ev),
+            onSimpleEvent: this.onSimpleEventBound,
             getEventSubscriptionEnabled: () => this.isEventDispatchEnabled?.() ?? false,
         };
     }
@@ -1427,9 +1429,9 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
 
     protected async onBeforeCleanup(): Promise<void> {
         // Unsubscribe from events if needed
-        if (this.onSimpleEvent && this.baichuanApi) {
+        if (this.baichuanApi) {
             try {
-                this.baichuanApi.offSimpleEvent(this.onSimpleEvent);
+                this.baichuanApi.offSimpleEvent(this.onSimpleEventBound);
             }
             catch {
                 // ignore
@@ -1620,7 +1622,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         }
     }
 
-    async onSimpleEvent(ev: ReolinkSimpleEvent) {
+    onSimpleEvent(ev: ReolinkSimpleEvent) {
         const logger = this.getBaichuanLogger();
 
         try {
@@ -1701,8 +1703,6 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             return;
         }
 
-        const api = await this.ensureClient();
-
         const logger = this.getBaichuanLogger();
         const selection = Array.from(this.getDispatchEventsSelection?.() ?? new Set()).sort();
         const enabled = selection.length > 0;
@@ -1727,12 +1727,14 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             return;
         }
 
+        // IMPORTANT: use base subscription logic so the callback is properly bound.
+        // Passing `this.onSimpleEvent` directly would lose `this` and can result in silent failures.
         try {
-            await api.onSimpleEvent(this.onSimpleEvent);
+            await super.subscribeToEvents();
             logger.log(`Subscribed to events (${selection.join(', ')}) on ${this.protocol} connection`);
         }
         catch (e) {
-            logger.warn('Failed to attach Baichuan event handler', e);
+            logger.warn('Failed to subscribe to Baichuan events', e);
             return;
         }
     }

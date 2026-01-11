@@ -9,6 +9,8 @@ import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { batteryCameraSuffix, batteryMultifocalSuffix, cameraSuffix, getDeviceInterfaces, multifocalSuffix, updateDeviceInfo } from "./utils";
 
 export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Settings, DeviceDiscovery, DeviceProvider, Reboot {
+    private readonly onSimpleEventBound = (ev: ReolinkSimpleEvent) => this.onSimpleEvent(ev);
+
     storageSettings = new StorageSettings(this, {
         debugLogs: {
             title: 'Debug Events',
@@ -162,7 +164,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
             onClose: async () => {
                 await this.reinit();
             },
-            onSimpleEvent: async (ev: ReolinkSimpleEvent) => await this.onSimpleEvent(ev),
+            onSimpleEvent: this.onSimpleEventBound,
             getEventSubscriptionEnabled: () => true,
         };
     }
@@ -203,7 +205,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         }, isReinit ? 500 : 2000);
     }
 
-    async onSimpleEvent(ev: ReolinkSimpleEvent): Promise<void> {
+    onSimpleEvent(ev: ReolinkSimpleEvent) {
         const logger = this.getBaichuanLogger();
 
         try {
