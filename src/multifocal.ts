@@ -224,6 +224,14 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
             return await this.nvrDevice.createStreamClient(streamKey);
         }
 
+        // For multifocal battery cams (BCUDP), reuse the main client to avoid D2C_DISC storms.
+        if (this.isBattery) {
+            // For battery (BCUDP) cameras, streaming must be keyed by streamKey.
+            // Do NOT reuse ensureClient(): composite needs two concurrent streams, and single-lens streams
+            // should reuse the same API that composite already created for that same streamKey.
+            return await super.createStreamClient(streamKey);
+        }
+
         // Otherwise, use base class createStreamClient which manages stream clients per streamKey
         return await super.createStreamClient(streamKey);
     }

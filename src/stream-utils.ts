@@ -337,25 +337,60 @@ export class StreamManager {
 
             const isComposite = options.channel === undefined;
 
-            // For composite streams, MUST use two distinct Baichuan sessions (widerApi and teleApi).
-            // Otherwise cmd_id=3 frames can mix when streamType overlaps (wide/tele alternation/corruption).
-            // Each stream needs its own dedicated socket to avoid frame mixing.
-            // Create separate streamKeys for wider and tele to ensure distinct sockets:
-            // Format: composite_${variantType}_${profile}_wider and composite_${variantType}_${profile}_tele
-            const compositeApis = isComposite
-                ? {
-                    widerApi: await this.opts.createStreamClient(`${streamKey}_wider`),
-                    teleApi: await this.opts.createStreamClient(`${streamKey}_tele`),
-                }
-                : undefined;
+            // For composite streams, we may want two distinct Baichuan sessions (wider + tele)
+            // to avoid frame mixing on some firmwares. On BCUDP/battery devices, extra sessions
+            // can be harmful; in that case, createStreamClient may return the same underlying client.
+            //
+            // IMPORTANT: Use the same per-lens streamKey format as regular streams so that later
+            // requests for a single lens can reuse these same cached APIs.
+            const compositeWiderChannel = options.compositeOptions?.widerChannel ?? 0;
+            const compositeTeleChannel = options.compositeOptions?.teleChannel ?? 1;
+            const compositeTeleIsVariantOnSameChannel =
+                Boolean(options.compositeOptions?.onNvr) || compositeTeleChannel === compositeWiderChannel;
 
-            // For non-composite streams, create a single API client
-            // For composite streams, api is still required as baseApi but widerApi and teleApi are used instead
-            // Pass streamKey to createStreamClient - it contains all necessary information (profile, variantType, channel)
-            // For composite streams, streamKey format: composite_${variantType}_${profile}
-            // For regular streams, streamKey format: channel_${channel}_${profile}_${variantType} or similar
+            const compositeWiderStreamKey = `${compositeWiderChannel}_${profile}`;
+            const compositeTeleVariant = compositeTeleIsVariantOnSameChannel
+                ? (options.variant && options.variant !== 'default' ? options.variant : 'telephoto')
+                : undefined;
+            const compositeTeleStreamKey = compositeTeleVariant
+                ? `${compositeTeleChannel}_${compositeTeleVariant}_${profile}`
+                : `${compositeTeleChannel}_${profile}`;
+
+            // For composite streams, using two distinct Baichuan sessions can avoid frame mixing on some firmwares.
+            // However, for UDP/battery devices extra BCUDP sessions can trigger storms; if we detect the same
+            // underlying client, fall back to single-session composite.
+            let compositeApis:
+                | {
+                    widerApi: ReolinkBaichuanApi;
+                    teleApi: ReolinkBaichuanApi;
+                }
+                | undefined;
+            if (isComposite) {
+                try {
+                    const widerApi = await this.opts.createStreamClient(compositeWiderStreamKey);
+                    const teleApi = await this.opts.createStreamClient(compositeTeleStreamKey);
+
+                    const sameApiObject = widerApi === teleApi;
+                    const sameUnderlyingClient = (widerApi as any)?.client && (teleApi as any)?.client
+                        ? (widerApi as any).client === (teleApi as any).client
+                        : false;
+
+                    if (!sameApiObject && !sameUnderlyingClient) {
+                        compositeApis = { widerApi, teleApi };
+                    } else {
+                        // Likely a shared/battery connection: avoid forcing multi-session behavior.
+                        compositeApis = undefined;
+                    }
+                } catch {
+                    // Best-effort: if creating dedicated sessions fails, fall back to single-session composite.
+                    compositeApis = undefined;
+                }
+            }
+
+            // For non-composite streams, create a single API client.
+            // For composite streams, base api must be a real lens streamKey (not the composite RFC key).
             const api = isComposite
-                ? compositeApis.widerApi // For composite, use widerApi as baseApi (it will be overridden by compositeApis)
+                ? (compositeApis?.widerApi ?? await this.opts.createStreamClient(compositeWiderStreamKey))
                 : await this.opts.createStreamClient(streamKey);
 
             const { createRfc4571TcpServer } = await import('@apocaliss92/reolink-baichuan-js');
@@ -364,17 +399,14 @@ export class StreamManager {
 
             // If connection is shared, don't close it when stream teardown happens
             // For composite, we create dedicated APIs even if the device uses a shared main connection.
-            // Ensure they are closed on teardown.
-            const closeApiOnTeardown = isComposite ? true : !(this.opts.sharedConnection ?? false);
+            // On battery/BCUDP (sharedConnection=true), prefer keeping them alive to avoid reconnect storms.
+            const closeApiOnTeardown = isComposite
+                ? (Boolean(compositeApis) && !(this.opts.sharedConnection ?? false))
+                : !(this.opts.sharedConnection ?? false);
 
             let created: any;
             try {
-                const compositeOptions = isComposite
-                    ? {
-                        ...(options.compositeOptions ?? {}),
-                        forceH264: true,
-                    }
-                    : undefined;
+                const compositeOptions = isComposite ? options.compositeOptions : undefined;
 
                 created = await createRfc4571TcpServer({
                     api,

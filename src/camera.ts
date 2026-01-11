@@ -618,13 +618,36 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         },
         pipMargin: {
             title: 'PIP Margin',
-            description: 'Margin from edge in pixels',
+            description: 'Margin from edge as a fraction of the output size (e.g. 0.01 = 1%). Values > 1 are treated as pixels (legacy).',
             type: 'number',
-            defaultValue: 10,
+            defaultValue: 0.01,
             group: 'Composite stream',
             hide: true,
             onPut: async () => {
                 this.scheduleStreamManagerRestart('pipMargin changed');
+            },
+        },
+
+        compositeAssumeH264: {
+            title: 'Composite: Assume H.264 Inputs',
+            description: 'Assume both wider+tele inputs are H.264 (skips codec detection). Recommended when using sub+sub on TrackMix. If inputs are actually H.265, the composite may fail to start.',
+            type: 'boolean',
+            defaultValue: true,
+            group: 'Composite stream',
+            hide: true,
+            onPut: async () => {
+                this.scheduleStreamManagerRestart('compositeAssumeH264 changed');
+            },
+        },
+        compositeDisableTranscode: {
+            title: 'Composite: Disable Codec Transcode (Best-effort)',
+            description: 'Best-effort knob. Overlay requires re-encode in ffmpeg; this option only avoids HEVC->H264 codec assumptions when possible. Leave off unless you know what you are doing.',
+            type: 'boolean',
+            defaultValue: false,
+            group: 'Composite stream',
+            hide: true,
+            onPut: async () => {
+                this.scheduleStreamManagerRestart('compositeDisableTranscode changed');
             },
         },
     });
@@ -1478,10 +1501,12 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         }
 
         // Case 4: Standalone camera -> create its own socket using base class method
-        // For battery cameras, reuse the main client
-        // if (this.isBattery) {
-        //     return await this.ensureClient();
-        // }
+        // For battery (BCUDP) cameras, streaming must be keyed by streamKey.
+        // Do NOT reuse ensureClient(): composite needs two concurrent streams, and single-lens streams
+        // should reuse the same API that composite already created for that same streamKey.
+        if (this.isBattery) {
+            return await super.createStreamClient(streamKey);
+        }
 
         // For TCP standalone cameras, use base class createStreamClient which manages stream clients per streamKey
         return await super.createStreamClient(streamKey);
@@ -1539,20 +1564,52 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         };
 
         if (this.isMultiFocal) {
-            const { pipPosition, pipSize, pipMargin, rtspChannel } = this.storageSettings.values;
+            const { pipPosition, pipSize, pipMargin, rtspChannel, compositeAssumeH264, compositeDisableTranscode } = this.storageSettings.values;
 
             // On NVR/Hub, TrackMix lenses are selected via stream variant, not via a separate channel.
             // Use rtspChannel for BOTH wide and tele so the library can request tele via streamType/variant.
             const wider = this.isOnNvr ? rtspChannel : undefined;
             const tele = this.isOnNvr ? rtspChannel : undefined;
 
+            // On standalone TrackMix/Duo, lens channels are often separate, but they are not always 0/1.
+            // Prefer using the discovered multifocalInfo mapping when available.
+            let derivedWider: number | undefined = wider;
+            let derivedTele: number | undefined = tele;
+            if (!this.isOnNvr) {
+                try {
+                    const info: any = this.storageSettings.values.multifocalInfo;
+                    const channels: any[] = Array.isArray(info?.channels) ? info.channels : [];
+
+                    const wideCh = channels.find((c) => c?.lensType === 'wide')?.channel
+                        ?? channels.find((c) => c?.variantType === 'default')?.channel;
+                    const teleCh = channels.find((c) => c?.lensType === 'telephoto')?.channel
+                        ?? channels.find((c) => c?.variantType === 'telephoto')?.channel;
+
+                    if (Number.isFinite(wideCh)) derivedWider = wideCh;
+                    if (Number.isFinite(teleCh)) derivedTele = teleCh;
+
+                    // Avoid setting nonsense; leave undefined to fall back to library defaults.
+                    if (derivedWider === derivedTele) {
+                        // Keep undefined behavior (defaults inside the library) unless we are on NVR.
+                        derivedWider = undefined;
+                        derivedTele = undefined;
+                    }
+                } catch {
+                    // ignore and fall back to defaults
+                }
+            }
+
             baseOptions.compositeOptions = {
-                widerChannel: wider,
-                teleChannel: tele,
+                widerChannel: derivedWider,
+                teleChannel: derivedTele,
                 pipPosition,
                 pipSize,
                 pipMargin,
                 onNvr: this.isOnNvr,
+                // Prefer H.264 for composite (sub+sub by default) to reduce GOP latency.
+                forceH264: true,
+                assumeH264Inputs: compositeAssumeH264 ?? true,
+                disableTranscode: compositeDisableTranscode ?? false,
             };
         }
 
