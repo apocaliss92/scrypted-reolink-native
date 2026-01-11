@@ -2698,6 +2698,16 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         this.storageSettings.settings.clipsSource.hide = !this.nvrDevice;
         this.storageSettings.settings.clipsSource.defaultValue = this.nvrDevice ? "NVR" : "Device";
 
+        // if (!!this.multiFocalDevice) {
+        //     const allSettingKeys = Object.keys(this.storageSettings.settings);
+
+        //     for (const key of allSettingKeys) {
+        //         const setting = this.storageSettings.settings[key];
+        //         if (['Videoclips', 'PTZ'].includes(setting.subgroup)) {
+        //             setting.hide = true;
+        //         }
+        //     }
+        // }
         this.storageSettings.settings.enableVideoclips.hide = !!this.multiFocalDevice;
         this.storageSettings.settings.videoclipsDaysToPreload.hide = !!this.multiFocalDevice;
         this.storageSettings.settings.videoclipsRegularChecks.hide = !!this.multiFocalDevice;
@@ -2753,7 +2763,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             this.intercom = new ReolinkBaichuanIntercom(this);
         }
 
-        if (hasPtz) {
+        if (hasPtz && !this.multiFocalDevice) {
             const choices = (this.presets || []).map((preset: any) => preset.id + '=' + preset.name);
 
             this.storageSettings.settings.presets.choices = choices;
