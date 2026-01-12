@@ -172,12 +172,28 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
                 throw new Error('Missing device credentials');
             }
 
+            const outputPath = this.storageSettings.values.diagnosticsOutputPath || process.env.SCRYPTED_PLUGIN_VOLUME || "";
+            if (!outputPath) {
+                throw new Error('Diagnostics output path is required');
+            }
+
             const api = await this.ensureClient();
 
-            const multifocalDiagnostics = await api.collectMultifocalDiagnostics(logger);
+            const channel = this.storageSettings.values.rtspChannel || 0;
+            const durationSeconds = 8;
+            const result = await api.runMultifocalDiagnosticsConsecutively({
+                logger,
+                outDir: outputPath,
+                channel,
+                durationSeconds,
+                rtmpApps: ["bcs"],
+                probeFull: true,
+                onNvr: !!this.nvrDevice,
+            });
 
-            logger.log(`NVR diagnostics completed successfully.`);
-            logger.debug(JSON.stringify(multifocalDiagnostics));
+            logger.log(`Multifocal diagnostics completed successfully. Output directory: ${result.runDir}`);
+            logger.log(`Results file: ${result.resultsPath}`);
+            logger.log(`Streams directory: ${result.streamsDir}`);
         } catch (e) {
             logger.error('Failed to run NVR diagnostics', e?.message || String(e));
             throw e;

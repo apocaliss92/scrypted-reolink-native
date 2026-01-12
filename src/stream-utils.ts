@@ -93,6 +93,90 @@ export function parseStreamProfileFromId(id: string | undefined): StreamProfile 
     return;
 }
 
+function parseRfcStreamKey(streamKey: string): {
+    isComposite: boolean;
+    channel?: number;
+    variant?: NativeVideoStreamVariant;
+    profile?: StreamProfile;
+} {
+    const key = String(streamKey ?? '');
+    if (!key) {
+        throw new Error('parseRfcStreamKey: missing streamKey');
+    }
+
+    // Composite forms supported by the library/server:
+    // - composite-main-main (wider-tele)
+    // - composite_<profile>
+    // - composite_<variant>_<profile>
+    // - composite_<variant>_<wider>_<tele>
+    if (key.startsWith('composite-')) {
+        const parts = key.split('-').filter(Boolean);
+        const tele = parts.length >= 3 ? parts[2] : undefined;
+        const teleProfile = tele === 'main' || tele === 'sub' || tele === 'ext' ? (tele as StreamProfile) : undefined;
+        return { isComposite: true, profile: teleProfile };
+    }
+
+    if (key.startsWith('composite_')) {
+        const parts = key.split('_').filter(Boolean);
+        // parts[0] === 'composite'
+        const maybeVariant = parts.length >= 2 ? parts[1] : undefined;
+        const variant =
+            maybeVariant === 'default' || maybeVariant === 'autotrack' || maybeVariant === 'telephoto'
+                ? (maybeVariant as NativeVideoStreamVariant)
+                : undefined;
+
+        // Heuristic: pick last token that looks like a profile as the tele profile.
+        const last = parts[parts.length - 1];
+        const profile = last === 'main' || last === 'sub' || last === 'ext' ? (last as StreamProfile) : undefined;
+        return {
+            isComposite: true,
+            ...(variant && variant !== 'default' ? { variant } : {}),
+            ...(profile ? { profile } : {}),
+        };
+    }
+
+    // Non-composite forms supported by the plugin:
+    // - channel_<ch>_<profile>
+    // - channel_<ch>_<variant>_<profile>
+    // - <ch>_<profile>
+    // - <ch>_<variant>_<profile>
+    const parts = key.split('_').filter(Boolean);
+    if (!parts.length) {
+        throw new Error(`parseRfcStreamKey: invalid streamKey='${key}'`);
+    }
+
+    let idx = 0;
+    if (parts[0] === 'channel') {
+        idx = 1;
+    }
+
+    const channelStr = parts[idx];
+    const channel = channelStr !== undefined ? Number(channelStr) : NaN;
+    if (!Number.isFinite(channel)) {
+        throw new Error(`parseRfcStreamKey: could not parse channel from streamKey='${key}'`);
+    }
+
+    const tail = parts.slice(idx + 1);
+    const last = tail[tail.length - 1];
+    const profile = last === 'main' || last === 'sub' || last === 'ext' ? (last as StreamProfile) : undefined;
+
+    // tail can be:
+    // - [profile]
+    // - [variant, profile]
+    const maybeVariant = tail.length >= 2 ? tail[0] : undefined;
+    const variant =
+        maybeVariant === 'default' || maybeVariant === 'autotrack' || maybeVariant === 'telephoto'
+            ? (maybeVariant as NativeVideoStreamVariant)
+            : undefined;
+
+    return {
+        isComposite: false,
+        channel,
+        ...(variant && variant !== 'default' ? { variant } : {}),
+        ...(profile ? { profile } : {}),
+    };
+}
+
 /**
  * Extract and normalize variant type from stream ID or URL (e.g., "autotrack" from "native_autotrack_main" or "?variant=autotrack")
  * Returns undefined if no variant is present, or "autotrack"/"telephoto" if present
@@ -163,16 +247,13 @@ export function selectStreamOption(
 
 export async function createRfc4571MediaObjectFromStreamManager(params: {
     streamManager: StreamManager;
-    channel: number;
-    profile: StreamProfile;
     streamKey: string;
-    variant?: NativeVideoStreamVariant;
     selected: UrlMediaStreamOptions;
     sourceId: string;
 }): Promise<MediaObject> {
-    const { streamManager, channel, profile, streamKey, variant, selected, sourceId } = params;
+    const { streamManager, streamKey, selected, sourceId } = params;
 
-    const { host, port, sdp, audio, username, password } = await streamManager.getRfcStream(channel, profile, streamKey, variant);
+    const { host, port, sdp, audio, username, password } = await streamManager.getRfcServer(streamKey);
 
     const { url: _ignoredUrl, ...mso }: any = selected;
     mso.container = 'rtp';
@@ -194,62 +275,6 @@ export async function createRfc4571MediaObjectFromStreamManager(params: {
 
     const rfc = {
         url,
-        sdp,
-        mediaStreamOptions: mso as ResponseMediaStreamOptions,
-    };
-
-    return await sdk.mediaManager.createMediaObject(Buffer.from(JSON.stringify(rfc)), 'x-scrypted/x-rfc4571', {
-        sourceId,
-    });
-}
-
-export async function createRfc4571CompositeMediaObjectFromStreamManager(params: {
-    streamManager: StreamManager;
-    profile: StreamProfile;
-    streamKey: string;
-    selected: UrlMediaStreamOptions;
-    sourceId: string;
-    variantType?: NativeVideoStreamVariant;
-}): Promise<MediaObject> {
-    const { streamManager, profile, streamKey, selected, sourceId, variantType } = params;
-
-    // Extract variantType from streamKey if not provided (format: composite_${variantType}_${profile})
-    let extractedVariantType = variantType;
-    if (!extractedVariantType && streamKey.startsWith('composite_')) {
-        const parts = streamKey.split('_');
-        if (parts.length >= 3) {
-            // Format: composite_${variantType}_${profile}
-            const variantPart = parts[1];
-            if (variantPart === 'default' || variantPart === 'autotrack' || variantPart === 'telephoto') {
-                extractedVariantType = variantPart as NativeVideoStreamVariant;
-            }
-        }
-    }
-
-    const { host, port, sdp, audio, username, password } = await streamManager.getRfcCompositeStream(profile, streamKey, extractedVariantType);
-
-    const { url: _ignoredUrl, ...mso }: any = selected;
-    mso.container = 'rtp';
-    if (audio) {
-        mso.audio ||= {};
-        mso.audio.codec = audio.codec;
-        mso.audio.sampleRate = audio.sampleRate;
-        mso.audio.channels = audio.channels;
-    }
-
-    // Build URL with credentials: tcp://username:password@host:port
-    // Keep this consistent with non-composite path (URL object -> JSON string via toJSON()).
-    const urlObj = new URL(`tcp://${host}`);
-    urlObj.port = port.toString();
-    if (username) {
-        urlObj.username = username;
-    }
-    if (password) {
-        urlObj.password = password;
-    }
-
-    const rfc = {
-        url: urlObj,
         sdp,
         mediaStreamOptions: mso as ResponseMediaStreamOptions,
     };
@@ -281,6 +306,27 @@ export class StreamManager {
 
     private getLogger(): Console {
         return this.opts.logger || console;
+    }
+
+    /**
+     * Unified RFC4571 server accessor.
+     *
+     * The streamKey is the single source of truth:
+     * - Composite: composite_* (channel-less)
+     * - Single channel: channel_<ch>_* or <ch>_*
+     */
+    async getRfcServer(streamKey: string, profile?: StreamProfile): Promise<RfcServerInfo> {
+        const parsed = parseRfcStreamKey(streamKey);
+        const resolvedProfile = profile ?? parsed.profile;
+        if (!resolvedProfile) {
+            throw new Error(`getRfcServer: could not infer profile from streamKey='${streamKey}'`);
+        }
+
+        return await this.ensureRfcServer(streamKey, resolvedProfile, {
+            channel: parsed.isComposite ? undefined : parsed.channel,
+            variant: parsed.variant,
+            compositeOptions: parsed.isComposite ? this.opts.compositeOptions : undefined,
+        });
     }
 
     private async ensureRfcServer(
@@ -337,24 +383,16 @@ export class StreamManager {
 
             const isComposite = options.channel === undefined;
 
+            // IMPORTANT: do not parse composite profiles here.
+            // The library/server derives the composite pairing from the requested id.
+
             // For composite streams, we may want two distinct Baichuan sessions (wider + tele)
             // to avoid frame mixing on some firmwares. On BCUDP/battery devices, extra sessions
             // can be harmful; in that case, createStreamClient may return the same underlying client.
             //
-            // IMPORTANT: Use the same per-lens streamKey format as regular streams so that later
-            // requests for a single lens can reuse these same cached APIs.
-            const compositeWiderChannel = options.compositeOptions?.widerChannel ?? 0;
-            const compositeTeleChannel = options.compositeOptions?.teleChannel ?? 1;
-            const compositeTeleIsVariantOnSameChannel =
-                Boolean(options.compositeOptions?.onNvr) || compositeTeleChannel === compositeWiderChannel;
-
-            const compositeWiderStreamKey = `${compositeWiderChannel}_${profile}`;
-            const compositeTeleVariant = compositeTeleIsVariantOnSameChannel
-                ? (options.variant && options.variant !== 'default' ? options.variant : 'telephoto')
-                : undefined;
-            const compositeTeleStreamKey = compositeTeleVariant
-                ? `${compositeTeleChannel}_${compositeTeleVariant}_${profile}`
-                : `${compositeTeleChannel}_${profile}`;
+            // Use stable per-request keys; include variant for tele to keep sessions distinct.
+            const compositeWiderStreamKey = `${streamKey}_wider`;
+            const compositeTeleStreamKey = `${streamKey}_tele_${options.variant ?? 'default'}`;
 
             // For composite streams, using two distinct Baichuan sessions can avoid frame mixing on some firmwares.
             // However, for UDP/battery devices extra BCUDP sessions can trigger storms; if we detect the same
@@ -387,11 +425,18 @@ export class StreamManager {
                 }
             }
 
-            // For non-composite streams, create a single API client.
+            // For non-composite streams, create/reuse a single API client.
+            // For NVR/Hub (sharedConnection=true), avoid creating one TCP session per profile
+            // (e.g. main+sub would otherwise become two sockets). Group by (channel, variant).
             // For composite streams, base api must be a real lens streamKey (not the composite RFC key).
+            const shared = this.opts.sharedConnection ?? false;
+            const nonCompositeApiKey = (!isComposite && shared && options.channel !== undefined)
+                ? `channel_${options.channel}_${options.variant ?? 'default'}`
+                : streamKey;
+
             const api = isComposite
                 ? (compositeApis?.widerApi ?? await this.opts.createStreamClient(compositeWiderStreamKey))
-                : await this.opts.createStreamClient(streamKey);
+                : await this.opts.createStreamClient(nonCompositeApiKey);
 
             const { createRfc4571TcpServer } = await import('@apocaliss92/reolink-baichuan-js');
 
@@ -417,6 +462,7 @@ export class StreamManager {
                     closeApiOnTeardown,
                     username,
                     password,
+                    requestedId: streamKey,
                     // Composite can take a bit longer (ffmpeg warmup + first IDR).
                     ...(isComposite ? { keyframeTimeoutMs: 20_000, idleTeardownMs: 20_000 } : {}),
                     ...(compositeOptions ? { compositeOptions } : {}),
@@ -464,10 +510,8 @@ export class StreamManager {
         streamKey: string,
         variant?: NativeVideoStreamVariant,
     ): Promise<RfcServerInfo> {
-        return await this.ensureRfcServer(streamKey, profile, {
-            channel,
-            variant,
-        });
+        // Back-compat wrapper. Prefer getRfcServer(streamKey).
+        return await this.ensureRfcServer(streamKey, profile, { channel, variant });
     }
 
     async getRfcCompositeStream(
@@ -475,24 +519,11 @@ export class StreamManager {
         streamKey: string,
         variantType?: NativeVideoStreamVariant,
     ): Promise<RfcServerInfo> {
-        // Extract variantType from streamKey if not provided (format: composite_${variantType}_${profile})
-        let extractedVariantType = variantType;
-        if (!extractedVariantType && streamKey.startsWith('composite_')) {
-            const parts = streamKey.split('_');
-            if (parts.length >= 3) {
-                // Format: composite_${variantType}_${profile}
-                const variantPart = parts[1];
-                if (variantPart === 'default' || variantPart === 'autotrack' || variantPart === 'telephoto') {
-                    extractedVariantType = variantPart as NativeVideoStreamVariant;
-                }
-            }
-        }
-        
-        // Pass variantType to ensureRfcServer so it can be used when creating the stream client
-        // This ensures each variantType gets its own socket
+        // Back-compat wrapper. Prefer getRfcServer(streamKey).
+        // Pass variantType to ensureRfcServer so it can be used when creating the stream client.
         return await this.ensureRfcServer(streamKey, profile, {
-            channel: undefined, // Undefined channel indicates composite stream
-            variant: extractedVariantType,
+            channel: undefined,
+            variant: variantType,
             compositeOptions: this.opts.compositeOptions,
         });
     }

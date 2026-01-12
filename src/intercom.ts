@@ -274,7 +274,7 @@ export class ReolinkBaichuanIntercom {
                 }
             })
             .catch((e) => {
-                logger.warn("Intercom PCM->ADPCM pipeline error", e);
+                logger.warn("Intercom PCM->ADPCM pipeline error", e?.message || String(e));
             });
     }
 

@@ -10,16 +10,12 @@ export enum DebugLogOption {
     DebugRtsp = 'debugRtsp',
     /** Low-level tracing for recording-related commands */
     TraceRecordings = 'traceRecordings',
-    /** Stream command tracing */
-    TraceStream = 'traceStream',
+    /** Native stream tracing (stream tx/rx + H264/H265 + param sets) */
+    TraceNativeStream = 'traceNativeStream',
     /** Talkback tracing */
     TraceTalk = 'traceTalk',
     /** Event tracing */
     TraceEvents = 'traceEvents',
-    /** H.264 debug logs */
-    DebugH264 = 'debugH264',
-    /** SPS/PPS parameter sets debug logs */
-    DebugParamSets = 'debugParamSets',
 }
 
 /**
@@ -30,11 +26,9 @@ export function mapDebugLogToApiOption(option: DebugLogOption): keyof DebugOptio
         [DebugLogOption.General]: 'general',
         [DebugLogOption.DebugRtsp]: 'debugRtsp',
         [DebugLogOption.TraceRecordings]: 'traceRecordings',
-        [DebugLogOption.TraceStream]: 'traceStream',
+        [DebugLogOption.TraceNativeStream]: 'traceNativeStream',
         [DebugLogOption.TraceTalk]: 'traceTalk',
         [DebugLogOption.TraceEvents]: 'traceEvents',
-        [DebugLogOption.DebugH264]: 'debugH264',
-        [DebugLogOption.DebugParamSets]: 'debugParamSets',
     };
     return mapping[option];
 }
@@ -81,11 +75,9 @@ export const DebugLogDisplayNames: Record<DebugLogOption, string> = {
     [DebugLogOption.General]: 'General',
     [DebugLogOption.DebugRtsp]: 'RTSP',
     [DebugLogOption.TraceRecordings]: 'Trace recordings',
-    [DebugLogOption.TraceStream]: 'Trace stream',
+    [DebugLogOption.TraceNativeStream]: 'Trace native stream',
     [DebugLogOption.TraceTalk]: 'Trace talk',
     [DebugLogOption.TraceEvents]: 'Trace events XML',
-    [DebugLogOption.DebugH264]: 'H264',
-    [DebugLogOption.DebugParamSets]: 'Video param sets',
 };
 
 /**

@@ -366,7 +366,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                 }
             }
             catch (e) {
-                logger.debug(`Could not get connection state: ${e}`);
+                logger.debug(`Could not get connection state: ${e?.message || String(e)}`);
             }
 
             const now = Date.now();
@@ -500,7 +500,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             logger.log('Subscribed to Baichuan events');
         }
         catch (e) {
-            logger.warn('Failed to subscribe to events', e);
+            logger.warn('Failed to subscribe to events', e?.message || String(e));
             this.eventSubscriptionActive = false;
         }
     }
@@ -519,7 +519,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                 logger.debug('Unsubscribed from Baichuan events');
             }
             catch (e) {
-                logger.warn('Error unsubscribing from events', e);
+                logger.warn('Error unsubscribing from events', e?.message || String(e));
             }
         }
 

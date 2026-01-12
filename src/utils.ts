@@ -1043,7 +1043,7 @@ export async function vodSearchResultsToVideoClips(
                     videoHref = videoUrl;
                     thumbnailHref = thumbnailUrl;
                 } catch (e) {
-                    logger?.debug('Failed to generate webhook URLs for VOD file', fileName, e);
+                    logger?.debug('Failed to generate webhook URLs for VOD file', fileName, e?.message || String(e));
                 }
 
                 const clip: VideoClip = {
@@ -1060,7 +1060,7 @@ export async function vodSearchResultsToVideoClips(
 
                 clips.push(clip);
             } catch (e) {
-                logger?.warn(`Failed to convert VOD file to clip: ${file.name}`, e);
+                logger?.warn(`Failed to convert VOD file to clip: ${file.name}`, e?.message || String(e));
             }
         }
     }

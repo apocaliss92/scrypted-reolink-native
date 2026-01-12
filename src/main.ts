@@ -324,7 +324,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 return;
             }
         } catch (e: any) {
-            logger.error('Error in onRequest', e);
+            logger.error('Error in onRequest', e?.message || String(e));
             response.send(`Error: ${e.message}`, {
                 code: 500,
             });
@@ -374,7 +374,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 logger.log(`[Thumbnail] Download completed: fileId=${request.fileId}`);
                 request.resolve(thumbnail);
             } catch (error) {
-                logger.error(`[Thumbnail] Error: fileId=${request.fileId}`, error);
+                logger.error(`[Thumbnail] Error: fileId=${request.fileId}`, error?.message || String(error));
                 request.reject(error instanceof Error ? error : new Error(String(error)));
             }
 

@@ -17,10 +17,7 @@ import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
 import { ReolinkPtzPresets } from "./presets";
 import {
-    createRfc4571CompositeMediaObjectFromStreamManager,
     createRfc4571MediaObjectFromStreamManager,
-    extractVariantFromStreamId,
-    parseStreamProfileFromId,
     selectStreamOption,
     StreamManager,
     StreamManagerOptions
@@ -48,7 +45,7 @@ class ReolinkCameraSiren extends ScryptedDeviceBase implements OnOff {
             this.camera.getBaichuanLogger().log(`Siren toggle: turnOff ok (device=${this.nativeId})`);
         }
         catch (e) {
-            this.camera.getBaichuanLogger().warn(`Siren toggle: turnOff failed (device=${this.nativeId})`, e?.message || String(e));
+            this.camera.getBaichuanLogger().error(`Siren toggle: turnOff failed (device=${this.nativeId})`, e?.message || String(e));
             throw e;
         }
     }
@@ -61,7 +58,7 @@ class ReolinkCameraSiren extends ScryptedDeviceBase implements OnOff {
             this.camera.getBaichuanLogger().log(`Siren toggle: turnOn ok (device=${this.nativeId})`);
         }
         catch (e) {
-            this.camera.getBaichuanLogger().warn(`Siren toggle: turnOn failed (device=${this.nativeId})`, e?.message || String(e));
+            this.camera.getBaichuanLogger().error(`Siren toggle: turnOn failed (device=${this.nativeId})`, e?.message || String(e));
             throw e;
         }
     }
@@ -513,6 +510,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             subgroup: 'Diagnostics',
             description: "Directory where diagnostics files will be saved (default: plugin volume).",
             type: "string",
+            hide: true,
             defaultValue: path.join(process.env.SCRYPTED_PLUGIN_VOLUME, 'diagnostics', this.name),
         },
         enableVideoclips: {
@@ -521,6 +519,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             type: "boolean",
             defaultValue: false,
             immediate: true,
+            hide: true,
             onPut: async () => {
                 this.updateVideoClipsAutoLoad();
             },
@@ -532,6 +531,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             type: "string",
             choices: ["NVR", "Device"],
             immediate: true,
+            hide: true,
         },
         loadVideoclips: {
             title: "Auto-load Video Clips",
@@ -540,6 +540,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             type: "boolean",
             defaultValue: false,
             immediate: true,
+            hide: true,
             onPut: async () => {
                 this.updateVideoClipsAutoLoad();
             },
@@ -550,6 +551,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             description: "How often to check for new video clips and download thumbnails (default: 30 minutes).",
             type: "number",
             defaultValue: 30,
+            hide: true,
             onPut: async () => {
                 this.updateVideoClipsAutoLoad();
             },
@@ -561,6 +563,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             type: "boolean",
             defaultValue: false,
             immediate: true,
+            hide: true,
             onPut: async () => {
                 this.updateVideoClipsAutoLoad();
             },
@@ -571,6 +574,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             description: "Number of days to preload video clips and thumbnails (default: 1, only today).",
             type: "number",
             defaultValue: 3,
+            hide: true,
             onPut: async () => {
                 this.updateVideoClipsAutoLoad();
             },
@@ -580,6 +584,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             title: 'Run Diagnostics',
             description: 'Run all diagnostics and save results to the output path.',
             type: 'button',
+            hide: true,
             immediate: true,
             onPut: async () => {
                 await this.runDiagnostics();
@@ -785,18 +790,16 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                 // Fetch from NVR using listEnrichedVodFiles (library handles parsing correctly)
                 const channel = this.storageSettings.values.rtspChannel ?? 0;
 
-                // Use listEnrichedVodFiles which properly parses filenames and extracts detection info
-                logger.debug(`[NVR VOD] Searching for video clips: channel=${channel}, start=${start.toISOString()}, end=${end.toISOString()}`);
-                // Filter to only include recordings within the requested time window
-                const enrichedRecordings = await api.listNvrRecordings({
-                    channel,
+                // Prefer Hub-like event listing (alarm events) instead of full VOD.
+                logger.debug(`[NVR EVENTS] Searching for alarm events: channel=${channel}, start=${start.toISOString()}, end=${end.toISOString()}`);
+                const enrichedRecordings = await api.listNvrAlarmEventsEnrichedViaBaichuan({
                     start,
                     end,
-                    streamType: "main",
-                    source: "baichuan"
+                    channels: [channel],
+                    streamType: "mainStream",
                 });
 
-                logger.debug(`[NVR VOD] Found ${enrichedRecordings.length} enriched recordings from NVR`);
+                logger.debug(`[NVR EVENTS] Found ${enrichedRecordings.length} enriched alarm events from NVR`);
 
                 // Convert enriched recordings to VideoClip array using the shared parser
                 const clips = await recordingsToVideoClips(enrichedRecordings, {
@@ -808,7 +811,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     count,
                 });
 
-                logger.debug(`[NVR VOD] Converted ${clips.length} video clips (limit: ${count || 'none'})`);
+                logger.debug(`[NVR EVENTS] Converted ${clips.length} video clips (limit: ${count || 'none'})`);
 
                 return clips;
             } else {
@@ -893,7 +896,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     try {
                         await fs.promises.unlink(cachePath);
                     } catch (unlinkErr) {
-                        logger.warn(`[VideoClip] Failed to delete small cached file: fileId=${videoId}`, unlinkErr);
+                        logger.warn(`[VideoClip] Failed to delete small cached file: fileId=${videoId}`, unlinkErr?.message || String(unlinkErr));
                     }
                 } else {
                     logger.debug(`[VideoClip] Using cached file: fileId=${videoId}, size=${stats.size} bytes`);
@@ -1011,7 +1014,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     });
 
                     ffmpeg.on('error', (error) => {
-                        logger.error(`ffmpeg spawn error for video clip ${videoId}`, error);
+                        logger.error(`ffmpeg spawn error for video clip ${videoId}`, error?.message || String(error));
                         reject(error);
                     });
 
@@ -1079,7 +1082,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     try {
                         await fs.promises.unlink(cachePath);
                     } catch (unlinkErr) {
-                        logger.warn(`[Thumbnail] Failed to delete small cached thumbnail: fileId=${thumbnailId}`, unlinkErr);
+                        logger.warn(`[Thumbnail] Failed to delete small cached thumbnail: fileId=${thumbnailId}`, unlinkErr?.message || String(unlinkErr));
                     }
                 } else {
                     logger.debug(`[Thumbnail] Using cached: fileId=${thumbnailId}, size=${stats.size} bytes`);
@@ -1645,14 +1648,9 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     this.lastPicture = undefined;
                 }
 
-                // Notify consumers (e.g. prebuffer) that stream configuration changed.
-                try {
-                    this.onDeviceEvent(ScryptedInterface.VideoCamera, undefined);
-                } catch {
-                    // best-effort
-                }
+                this.onDeviceEvent(ScryptedInterface.VideoCamera, undefined);
             } catch (e) {
-                logger.warn('Failed to restart StreamManager after settings change', e);
+                logger.error('Failed to restart StreamManager after settings change', e?.message || String(e));
             }
         }, 500);
     }
@@ -1713,14 +1711,14 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                         reason: ev?.type === 'sleeping' ? 'sleeping' : 'awake',
                         state: ev.type === 'sleeping' ? 'sleeping' : 'awake',
                     }).catch((e) => {
-                        logger.warn('Error updating sleeping state', e);
+                        logger.warn('Error updating sleeping state', e?.message || String(e));
                     });
                     return;
 
                 case 'offline':
                 case 'online':
                     this.updateOnlineState(ev.type === 'online').catch((e) => {
-                        logger.warn('Error updating online state', e);
+                        logger.warn('Error updating online state', e?.message || String(e));
                     });
                     return;
 
@@ -1749,11 +1747,11 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             }
 
             this.processEvents({ motion, objects }).catch((e) => {
-                logger.warn('Error processing events', e);
+                logger.warn('Error processing events', e?.message || String(e));
             });
         }
         catch (e) {
-            logger.warn('Error in onSimpleEvent handler', e);
+            logger.warn('Error in onSimpleEvent handler', e?.message || String(e));
         }
     }
 
@@ -1801,7 +1799,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             logger.log(`Subscribed to events (${selection.join(', ')}) on ${this.protocol} connection`);
         }
         catch (e) {
-            logger.warn('Failed to subscribe to Baichuan events', e);
+            logger.warn('Failed to subscribe to Baichuan events', e?.message || String(e));
             return;
         }
     }
@@ -2141,7 +2139,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     return await this.takePictureInternal(client);
                 });
             } catch (e) {
-                this.getBaichuanLogger().error('Error taking snapshot', e);
+                this.getBaichuanLogger().error('Error taking snapshot', e?.message || String(e));
                 throw e;
             }
         } else {
@@ -2217,7 +2215,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             });
 
         } catch (e) {
-            logger.warn('Failed to fetch device info', e);
+            logger.warn('Failed to fetch device info', e?.message || String(e));
         }
     }
 
@@ -2440,37 +2438,32 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     // logger.log({ supportedStreams, variantType, lensParam, rtspChannel, onNvr: this.isOnNvr, nativeStreams: nativeStreams.map(s => ({ id: s.id, nativeVariant: s.nativeVariant, lens: s.lens })), rtspStreams: rtspStreams.map(s => ({ id: s.id, lens: s.lens })), rtmpStreams: rtmpStreams.map(s => ({ id: s.id, lens: s.lens })) });
 
                     for (const supportedStream of supportedStreams) {
-                        const { id, metadata, url, name, container, nativeVariant, lens } = supportedStream;
+                        const { id, metadata, url, name, container, lens } = supportedStream;
 
                         // Composite streams are re-encoded to H.264 by the library (ffmpeg/libx264).
                         // Do not infer codec from underlying camera metadata.
                         const isComposite = id.startsWith('composite_') || lens === 'composite';
-                        const codec = isComposite
-                            ? 'h264'
-                            : String(metadata.videoEncType || "").includes("264")
-                                ? "h264"
-                                : String(metadata.videoEncType || "").includes("265")
-                                    ? "h265"
-                                    : String(metadata.videoEncType || "").toLowerCase();
+                        const codec = (() => {
+                            if (isComposite) return 'h264';
 
-                        // Preserve variant information for native RTP streams by ensuring the URL contains it.
-                        let finalUrl = url;
-                        const variantFromIdOrUrl = extractVariantFromStreamId(id, url);
-                        const variantToInject = (nativeVariant && nativeVariant !== 'default')
-                            ? nativeVariant
-                            : variantFromIdOrUrl;
-
-                        if (variantToInject && container === 'rtp') {
-                            try {
-                                const urlObj = new URL(url);
-                                if (!urlObj.searchParams.has('variant')) {
-                                    urlObj.searchParams.set('variant', variantToInject);
-                                    finalUrl = urlObj.toString();
-                                }
-                            } catch {
-                                // Invalid URL, use original
+                            const enc = (metadata as any)?.videoEncType;
+                            // Many firmwares expose videoEncType as a numeric enum.
+                            // Observed: 0 => H.264, 1 => H.265.
+                            if (typeof enc === 'number') {
+                                if (enc === 0) return 'h264';
+                                if (enc === 1) return 'h265';
                             }
-                        }
+
+                            const s = String(enc ?? '').toLowerCase();
+                            if (s === '0') return 'h264';
+                            if (s === '1') return 'h265';
+                            if (s.includes('264')) return 'h264';
+                            if (s.includes('265')) return 'h265';
+                            return s;
+                        })();
+
+                        // For RTP (native RFC4571), stream identification happens via `id` (streamKey), not URL.
+                        const finalUrl = url;
 
                         streams.push({
                             id,
@@ -2513,43 +2506,6 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
 
         const selected = selectStreamOption(vsos, vso);
 
-        // If the request explicitly asks for a variant (e.g. native_telephoto_main),
-        // never override it with the device's variantType preference.
-        // const requestedVariant = vso?.id ? extractVariantFromStreamId(vso.id, undefined) : undefined;
-
-        // If we have variantType set and the selected stream doesn't have the variant,
-        // try to find a stream with the correct variant that matches the profile
-        // const variantType = this.storageSettings.values.variantType;
-        // if (!requestedVariant && variantType && variantType !== 'default') {
-        //     const profile = parseStreamProfileFromId(selected.id) || 'main';
-
-        //     // On NVR, firmwares vary: some expose the tele lens as 'autotrack', others as 'telephoto'.
-        //     // When variantType is set, prefer that variant but fall back to the other tele variant if present.
-        //     const preferred = variantType as 'autotrack' | 'telephoto';
-        //     const fallbacks: Array<'autotrack' | 'telephoto'> = this.isOnNvr && preferred === 'telephoto'
-        //         ? ['telephoto', 'autotrack']
-        //         : this.isOnNvr && preferred === 'autotrack'
-        //             ? ['autotrack', 'telephoto']
-        //             : [preferred];
-
-        //     const extractedVariant = extractVariantFromStreamId(selected.id, selected.url);
-        //     for (const v of fallbacks) {
-        //         const variantId = `native_${v}_${profile}`;
-        //         const variantStream = vsos?.find(s => s.id === variantId);
-        //         if (!variantStream) {
-        //             logger.debug(`Variant stream '${variantId}' not found in available streams`);
-        //             continue;
-        //         }
-        //         // Only use variant stream if the selected one doesn't already have a variant,
-        //         // or if the selected one has a different variant than what we want.
-        //         if (!extractedVariant || extractedVariant !== v) {
-        //             logger.log(`Preferring variant stream: '${variantId}' over '${selected.id}' (variantType='${variantType}')`);
-        //             selected = variantStream;
-        //         }
-        //         break;
-        //     }
-        // }
-
         logger.log(`Selected stream: id='${selected.id}', url='${selected.url}'`);
 
         if (selected.url && (selected.container === 'rtsp' || selected.container === 'rtmp')) {
@@ -2566,76 +2522,21 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             throw new Error('StreamManager not initialized');
         }
 
-        // Check if this is a composite stream request (for multifocal devices)
-        // const isComposite = selected.id?.startsWith('composite_');
-        // if (isComposite && this.options && (this.options.type === 'multi-focal' || this.options.type === 'multi-focal-battery')) {
-        if (selected.id?.startsWith('composite_')) {
-            const profile = parseStreamProfileFromId(selected.id.replace('composite_', '')) || 'main';
-            // Include variantType in streamKey to ensure each variantType has its own unique socket
-            // This is important for multifocal devices where different variantTypes may request composite streams
-            const variantType = this.storageSettings.values.variantType || 'default';
-            const streamKey = `composite_${variantType}_${profile}`;
-
-            logger.log(`Creating composite stream: profile=${profile}, variantType=${variantType}, streamKey=${streamKey}`);
-
-            const createStreamFn = async () => {
-                return await createRfc4571CompositeMediaObjectFromStreamManager({
-                    streamManager: this.streamManager,
-                    profile,
-                    streamKey,
-                    selected,
-                    sourceId: this.id,
-                    variantType,
-                });
-            };
-
-            return await this.withBaichuanRetry(createStreamFn);
+        const streamKey = selected.id;
+        if (!streamKey) {
+            throw new Error('Missing streamKey (selected.id) for RTP stream');
         }
 
-        // Regular stream for single channel
-        const profile = parseStreamProfileFromId(selected.id) || 'main';
-        const channel = this.storageSettings.values.rtspChannel;
-        // Extract variant from stream ID or URL if present (e.g., "autotrack" from "native_autotrack_main" or "?variant=autotrack")
-        let variant = extractVariantFromStreamId(selected.id, selected.url);
+        logger.log(`Creating RFC4571 stream: streamKey='${streamKey}'`);
 
-        // Fallback: if no variant found in stream ID/URL, use variantType from device settings.
-        // IMPORTANT:
-        // - On NVR/Hub multifocal setups, the tele lens is often selected via a variant (autotrack/telephoto) on the same channel.
-        // - On standalone TrackMix (no NVR), the tele lens is selected via channel=1 (no variant).
-        // Forcing a variant on standalone can result in a started stream with no frames.
-        if (!variant && this.storageSettings.values.variantType && this.storageSettings.values.variantType !== 'default') {
-            if (this.isOnNvr) {
-                variant = this.storageSettings.values.variantType as 'autotrack' | 'telephoto';
-                logger.log(`Using variant from device settings: '${variant}' (not found in stream ID/URL)`);
-            } else {
-                logger.log(
-                    `Ignoring device variantType '${this.storageSettings.values.variantType}' for standalone stream (channel-based lens selection)`
-                );
-            }
-        }
-
-        logger.log(`Stream selection: id='${selected.id}', profile='${profile}', channel=${channel}, variant='${variant || 'default'}'`);
-
-        // Include variant in streamKey to distinguish streams with different variants
-        const streamKey = variant ? `${channel}_${variant}_${profile}` : `${channel}_${profile}`;
-
-        const createStreamFn = async () => {
-            // Honor the requested variant. Some NVR firmwares label the tele lens as either
-            // 'autotrack' or 'telephoto', and the library exposes both when available.
-            logger.log(`Creating RFC4571 stream: channel=${channel}, profile=${profile}, variant=${variant || 'default'}, streamKey=${streamKey}`);
-
+        return await this.withBaichuanRetry(async () => {
             return await createRfc4571MediaObjectFromStreamManager({
                 streamManager: this.streamManager!,
-                channel,
-                profile,
                 streamKey,
-                variant,
                 selected,
                 sourceId: this.id,
             });
-        };
-
-        return await this.withBaichuanRetry(createStreamFn);
+        });
     }
 
     async ensureClient(): Promise<ReolinkBaichuanApi> {
@@ -2646,7 +2547,6 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             return await this.multiFocalDevice.ensureClient();
         }
 
-        // Use base class implementation
         return await this.ensureBaichuanClient();
     }
 
@@ -2654,7 +2554,6 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         this.cachedVideoStreamOptions = undefined;
     }
 
-    // PTZ Presets methods
     getSelectedPresetId(): number | undefined {
         const s = this.storageSettings.values.ptzSelectedPreset;
         if (!s) return undefined;
@@ -2767,16 +2666,9 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         this.storageSettings.settings.clipsSource.hide = !this.nvrDevice;
         this.storageSettings.settings.clipsSource.defaultValue = this.nvrDevice ? "NVR" : "Device";
 
-        // if (!!this.multiFocalDevice) {
-        //     const allSettingKeys = Object.keys(this.storageSettings.settings);
+        this.storageSettings.settings.diagnosticsRun.hide = !!this.multiFocalDevice;
+        this.storageSettings.settings.diagnosticsOutputPath.hide = !!this.multiFocalDevice;
 
-        //     for (const key of allSettingKeys) {
-        //         const setting = this.storageSettings.settings[key];
-        //         if (['Videoclips', 'PTZ'].includes(setting.subgroup)) {
-        //             setting.hide = true;
-        //         }
-        //     }
-        // }
         this.storageSettings.settings.enableVideoclips.hide = !!this.multiFocalDevice;
         this.storageSettings.settings.videoclipsDaysToPreload.hide = !!this.multiFocalDevice;
         this.storageSettings.settings.videoclipsRegularChecks.hide = !!this.multiFocalDevice;
@@ -2817,14 +2709,14 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             await this.subscribeToEvents();
         }
         catch (e) {
-            logger.warn('Failed to subscribe to Baichuan events', e);
+            logger.error('Failed to subscribe to Baichuan events', e?.message || String(e));
         }
 
         try {
             this.initStreamManager();
         }
         catch (e) {
-            logger.warn('Failed to initialize StreamManager', e);
+            logger.error('Failed to initialize StreamManager', e?.message || String(e));
         }
 
         const { hasIntercom, hasPtz } = this.getAbilities();
@@ -2833,7 +2725,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             this.intercom = new ReolinkBaichuanIntercom(this);
         }
 
-        if (hasPtz && !this.multiFocalDevice) {
+        if (hasPtz) {
             const choices = (this.presets || []).map((preset: any) => preset.id + '=' + preset.name);
 
             this.storageSettings.settings.presets.choices = choices;
@@ -2897,7 +2789,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             }
         } catch (e) {
             // Silently ignore errors in sleep check to avoid spam
-            this.getBaichuanLogger().debug('Error in updateSleepingState:', e);
+            this.getBaichuanLogger().debug('Error in updateSleepingState:', e?.message || String(e));
         }
     }
 
@@ -2912,7 +2804,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             }
         } catch (e) {
             // Silently ignore errors in sleep check to avoid spam
-            this.getBaichuanLogger().debug('Error in updateOnlineState:', e);
+            this.getBaichuanLogger().debug('Error in updateOnlineState:', e?.message || String(e));
         }
     }
 
@@ -2922,7 +2814,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             await this.baichuanApi?.close();
         }
         catch (e) {
-            this.getBaichuanLogger().warn('Error closing Baichuan client during reset', e?.message || String(e));
+            this.getBaichuanLogger().error('Error closing Baichuan client during reset', e?.message || String(e));
         }
         finally {
             this.baichuanApi = undefined;
@@ -2932,7 +2824,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
 
         if (reason) {
             const message = reason?.message || reason?.toString?.() || reason;
-            this.getBaichuanLogger().warn(`Baichuan client reset requested: ${message}`);
+            this.getBaichuanLogger().error(`Baichuan client reset requested: ${message}`);
         }
     }
 
@@ -3022,7 +2914,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                 // Ensure we have a client connection
                 const api = await this.ensureClient();
                 if (!api) {
-                    this.getBaichuanLogger().warn('Failed to ensure client connection for battery update');
+                    this.getBaichuanLogger().error('Failed to ensure client connection for battery update');
                     return;
                 }
 
@@ -3036,7 +2928,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                         await api.wakeUp(channel, { waitAfterWakeMs: 2000 });
                         logger.log('Wake command sent, waiting for camera to wake up...');
                     } catch (wakeError) {
-                        logger.warn('Failed to wake up camera:', wakeError);
+                        logger.error('Failed to wake up camera:', wakeError?.message || String(wakeError));
                         return;
                     }
 
@@ -3057,7 +2949,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     }
 
                     if (!awake) {
-                        logger.warn('Camera did not wake up within timeout, skipping update');
+                        logger.error('Camera did not wake up within timeout, skipping update');
                         return;
                     }
                 } else if (sleepStatus.state === 'awake') {
@@ -3069,14 +2961,14 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                 try {
                     await this.updateBatteryInfo();
                 } catch (e) {
-                    logger.warn('Failed to get battery info during periodic update:', e);
+                    logger.error('Failed to get battery info during periodic update:', e?.message || String(e));
                 }
 
                 // 2. Align auxiliary devices state
                 try {
                     await this.alignAuxDevicesState();
                 } catch (e) {
-                    logger.warn('Failed to align auxiliary devices state:', e);
+                    logger.error('Failed to align auxiliary devices state:', e?.message || String(e));
                 }
 
                 // 3. Update snapshot
@@ -3085,10 +2977,10 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     await this.takePicture();
                     logger.log('Snapshot updated during periodic update');
                 } catch (snapshotError) {
-                    logger.warn('Failed to update snapshot during periodic update:', snapshotError);
+                    logger.error('Failed to update snapshot during periodic update:', snapshotError?.message || String(snapshotError));
                 }
             } catch (e) {
-                logger.warn('Failed to update battery and snapshot', e);
+                logger.error('Failed to update battery and snapshot', e?.message || String(e));
             } finally {
                 // Clear the promise when done (success or failure)
                 this.batteryUpdatePromise = undefined;
@@ -3123,7 +3015,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                         const sleepStatus = api.getSleepStatus({ channel });
                         await this.updateSleepingState(sleepStatus);
                     } catch (e) {
-                        logger.warn('Error checking sleeping state:', e?.message || String(e));
+                        logger.error('Error checking sleeping state:', e?.message || String(e));
                     }
                 }, 5_000);
             }
@@ -3135,7 +3027,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                 try {
                     await this.updateBatteryAndSnapshot();
                 } catch (e) {
-                    logger.warn('Error updating battery and snapshot:', e?.message || String(e));
+                    logger.error('Error updating battery and snapshot:', e?.message || String(e));
                 }
             }, updateIntervalMs);
 
@@ -3145,7 +3037,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                 try {
                     await this.alignAuxDevicesState();
                 } catch (e) {
-                    logger.warn('Error aligning auxiliary devices state:', e?.message || String(e));
+                    logger.error('Error aligning auxiliary devices state:', e?.message || String(e));
                 }
             }, 10_000);
 
