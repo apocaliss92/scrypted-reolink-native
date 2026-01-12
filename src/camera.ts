@@ -2438,11 +2438,11 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     // logger.log({ supportedStreams, variantType, lensParam, rtspChannel, onNvr: this.isOnNvr, nativeStreams: nativeStreams.map(s => ({ id: s.id, nativeVariant: s.nativeVariant, lens: s.lens })), rtspStreams: rtspStreams.map(s => ({ id: s.id, lens: s.lens })), rtmpStreams: rtmpStreams.map(s => ({ id: s.id, lens: s.lens })) });
 
                     for (const supportedStream of supportedStreams) {
-                        const { id, metadata, url, name, container, lens } = supportedStream;
+                        const { id, metadata, url, name, container, lens, channel, profile, nativeVariant } = supportedStream;
 
                         // Composite streams are re-encoded to H.264 by the library (ffmpeg/libx264).
                         // Do not infer codec from underlying camera metadata.
-                        const isComposite = id.startsWith('composite_') || lens === 'composite';
+                        const isComposite = lens === 'composite' || channel === undefined;
                         const codec = (() => {
                             if (isComposite) return 'h264';
 
@@ -2472,7 +2472,14 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                             container,
                             video: { codec, width: metadata.width, height: metadata.height },
                             // audio: { codec: metadata.audioCodec }
-                        })
+
+                            // Provide explicit RFC4571 metadata so stream-utils can avoid parsing the streamKey.
+                            reolinkRfc4571: {
+                                channel,
+                                profile,
+                                variant: nativeVariant,
+                            },
+                        } as any)
                     }
                 } catch (e) {
                     if (!this.isRecoverableBaichuanError?.(e)) {
@@ -2725,7 +2732,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             this.intercom = new ReolinkBaichuanIntercom(this);
         }
 
-        if (hasPtz) {
+        if (hasPtz && !this.multiFocalDevice) {
             const choices = (this.presets || []).map((preset: any) => preset.id + '=' + preset.name);
 
             this.storageSettings.settings.presets.choices = choices;
