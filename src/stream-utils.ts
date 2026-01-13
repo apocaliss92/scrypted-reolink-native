@@ -177,20 +177,21 @@ export async function createRfc4571MediaObjectFromStreamManager(params: {
 }): Promise<MediaObject> {
     const { streamManager, streamKey, selected, sourceId } = params;
 
-    const meta = (selected as any)?.reolinkRfc4571 as ReolinkRfc4571Metadata | undefined;
+    // Try to get metadata from StreamManager first, fallback to stream options for backward compatibility
+    const meta = streamManager.getRfc4571Metadata(streamKey);
+
     if (!meta?.profile) {
         throw new Error(`Missing RFC4571 metadata/profile for streamKey='${streamKey}'`);
     }
 
     const { host, port, sdp, audio, username, password } = await streamManager.getRfcServer(streamKey, meta);
 
-    const { url: _ignoredUrl, ...mso }: any = selected;
+    const { url: _ignoredUrl, ...mso } = selected;
     mso.container = 'rtp';
     if (audio) {
         mso.audio ||= {};
         mso.audio.codec = audio.codec;
         mso.audio.sampleRate = audio.sampleRate;
-        mso.audio.channels = audio.channels;
     }
 
     const url = new URL(`tcp://${host}`);
@@ -225,6 +226,7 @@ type RfcServerInfo = {
 export class StreamManager {
     private nativeRfcServers = new Map<string, Rfc4571TcpServer>();
     private nativeRfcServerCreatePromises = new Map<string, Promise<RfcServerInfo>>();
+    private rfc4571Metadata = new Map<string, ReolinkRfc4571Metadata>();
 
     constructor(private opts: StreamManagerOptions) {
         // Ensure logger is always valid
@@ -235,6 +237,22 @@ export class StreamManager {
 
     private getLogger(): Console {
         return this.opts.logger || console;
+    }
+
+    /**
+     * Set RFC4571 metadata for a stream ID.
+     * This allows the camera to provide explicit metadata instead of embedding it in the stream options.
+     */
+    setRfc4571Metadata(streamId: string, metadata: ReolinkRfc4571Metadata): void {
+        this.rfc4571Metadata.set(streamId, metadata);
+    }
+
+    /**
+     * Get RFC4571 metadata for a stream ID.
+     * Returns undefined if no metadata has been set for this stream ID.
+     */
+    getRfc4571Metadata(streamId: string): ReolinkRfc4571Metadata | undefined {
+        return this.rfc4571Metadata.get(streamId);
     }
 
     /**
@@ -337,8 +355,8 @@ export class StreamManager {
                     const teleApi = await this.opts.createStreamClient(compositeTeleStreamKey);
 
                     const sameApiObject = widerApi === teleApi;
-                    const sameUnderlyingClient = (widerApi as any)?.client && (teleApi as any)?.client
-                        ? (widerApi as any).client === (teleApi as any).client
+                    const sameUnderlyingClient = widerApi?.client && teleApi?.client
+                        ? widerApi.client === teleApi.client
                         : false;
 
                     if (!sameApiObject && !sameUnderlyingClient) {
@@ -377,7 +395,7 @@ export class StreamManager {
                 ? (Boolean(compositeApis) && !(this.opts.sharedConnection ?? false))
                 : !(this.opts.sharedConnection ?? false);
 
-            let created: any;
+            let created: Rfc4571TcpServer;
             try {
                 const compositeOptions = isComposite ? options.compositeOptions : undefined;
 

@@ -792,17 +792,14 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
 
                 // Prefer Hub-like event listing (alarm events) instead of full VOD.
                 logger.debug(`[NVR EVENTS] Searching for alarm events: channel=${channel}, start=${start.toISOString()}, end=${end.toISOString()}`);
-                const enrichedRecordings = await api.listNvrAlarmEventsEnrichedViaBaichuan({
+                const events = await api.listNvrAlarmEventsEnrichedViaBaichuan({
                     start,
                     end,
                     channels: [channel],
                     streamType: "mainStream",
                 });
 
-                logger.debug(`[NVR EVENTS] Found ${enrichedRecordings.length} enriched alarm events from NVR`);
-
-                // Convert enriched recordings to VideoClip array using the shared parser
-                const clips = await recordingsToVideoClips(enrichedRecordings, {
+                const clips = await recordingsToVideoClips(events, {
                     fallbackStart: start,
                     logger,
                     plugin: this,
@@ -811,7 +808,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     count,
                 });
 
-                logger.debug(`[NVR EVENTS] Converted ${clips.length} video clips (limit: ${count || 'none'})`);
+                logger.debug(`[NVR EVENTS] Events found: ${JSON.stringify(events)}`);
 
                 return clips;
             } else {
@@ -918,60 +915,8 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             }
 
             const { clipsSource } = this.storageSettings.values;
-            const useNvr = clipsSource === "NVR" && this.nvrDevice && videoId.includes('/');
+            const useNvr = clipsSource === "NVR" && this.nvrDevice;
 
-            // NVR/HUB case: prefer Download endpoint (HTTP) instead of RTMP
-            if (useNvr && this.nvrDevice) {
-                // Reuse centralized logic for NVR VOD URL (Download)
-                const downloadUrl = await this.getVideoClipRtmpUrl(videoId);
-
-                // If caching is enabled, download via HTTP and cache as file
-                if (cacheEnabled) {
-                    const cachePath = this.getVideoClipCachePath(videoId);
-                    logger.log(`Downloading video clip from NVR to cache: fileId=${videoId}, path=${cachePath}`);
-
-                    await new Promise<void>((resolve, reject) => {
-                        const urlObj = new URL(downloadUrl);
-                        const httpModule = urlObj.protocol === 'https:' ? https : http;
-
-                        const fileStream = fs.createWriteStream(cachePath);
-
-                        const req = httpModule.get(downloadUrl, (res) => {
-                            if (!res.statusCode || res.statusCode >= 400) {
-                                reject(new Error(`NVR download failed: ${res.statusCode} ${res.statusMessage}`));
-                                return;
-                            }
-
-                            res.pipe(fileStream);
-
-                            res.on('error', (err) => {
-                                reject(err);
-                            });
-
-                            fileStream.on('finish', () => {
-                                resolve();
-                            });
-
-                            fileStream.on('error', (err) => {
-                                reject(err);
-                            });
-                        });
-
-                        req.on('error', (err) => {
-                            reject(err);
-                        });
-                    });
-
-                    const mo = await sdk.mediaManager.createMediaObjectFromUrl(`file://${cachePath}`);
-                    return mo;
-                } else {
-                    // Caching disabled: return HTTP Download URL directly
-                    const mo = await sdk.mediaManager.createMediaObjectFromUrl(downloadUrl);
-                    return mo;
-                }
-            }
-
-            // Standalone camera (or fallback): reuse getVideoClipRtmpUrl (Baichuan RTMP)
             const playbackUrl = await this.getVideoClipRtmpUrl(videoId);
 
             // If caching is enabled, download and cache the video via ffmpeg
@@ -1098,6 +1043,37 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             // Ensure cache directory exists
             await fs.promises.mkdir(cacheDir, { recursive: true });
 
+            const { clipsSource } = this.storageSettings.values;
+            const useNvr = clipsSource === "NVR" && this.nvrDevice;
+
+            if (useNvr) {
+                // Use sequential queue on nvrDevice to avoid parallel thumbnail generation
+                const mo = await this.nvrDevice!.queueThumbnailGeneration(async () => {
+                    const api = await this.ensureClient();
+                    const ffmpegPath = await sdk.mediaManager.getFFmpegPath();
+                    const jpeg = await api.snapshotJpegFromNvrEventId({
+                        idOrFileName: thumbnailId,
+                        ffmpegPath,
+                        timeoutMs: 30_000,
+                        ffmpegTimeoutMs: 30_000,
+                    });
+
+                    const mediaObject = await sdk.mediaManager.createMediaObject(jpeg, 'image/jpeg');
+
+                    // Cache the thumbnail
+                    try {
+                        await fs.promises.writeFile(cachePath, jpeg);
+                        logger.debug(`[Thumbnail] Cached (NVR snapshot): fileId=${thumbnailId}, size=${jpeg.length} bytes`);
+                    } catch (e) {
+                        logger.warn(`[Thumbnail] Failed to cache (NVR snapshot): fileId=${thumbnailId}`, e?.message || String(e));
+                    }
+
+                    return mediaObject;
+                });
+
+                return mo;
+            }
+
             // Check if video clip is already cached locally - use it instead of calling camera
             const videoCachePath = this.getVideoClipCachePath(thumbnailId);
             let useLocalVideo = false;
@@ -1159,26 +1135,15 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
     async getVideoClipRtmpUrl(fileId: string, forThumbnail: boolean = false): Promise<string> {
         const logger = this.getBaichuanLogger();
         const { clipsSource } = this.storageSettings.values;
-        const useNvr = clipsSource === "NVR" && this.nvrDevice && fileId.includes('/');
+        const useNvr = clipsSource === "NVR" && this.nvrDevice;
 
         if (useNvr) {
-            logger.debug(`[getVideoClipRtmpUrl] Using NVR API for fileId="${fileId}", forThumbnail=${forThumbnail}`);
+            logger.debug(`[getVideoClipRtmpUrl] Using NVR eventId VOD API for fileId="${fileId}"`);
             const api = await this.ensureClient();
-            const channel = this.storageSettings.values.rtspChannel ?? 0;
-
-            try {
-                logger.debug(`[getVideoClipRtmpUrl] Trying getVodUrl with Download requestType...`);
-                const url = await api.getVodUrl(fileId, channel, {
-                    requestType: "Download",
-                    streamType: "main",
-                });
-                logger.debug(`[getVideoClipRtmpUrl] NVR getVodUrl Download URL received: url="${url || 'none'}"`);
-                if (url) return url;
-            } catch (e: any) {
-                logger.error(`[getVideoClipRtmpUrl] getVodUrl Download failed: ${e?.message || String(e)}`);
-            }
-
-            throw new Error(`No streaming URL found from NVR for file ${fileId} after trying Playback and Download methods`);
+            return await api.getVodRtmpUrlFromEventId({
+                eventId: fileId,
+                streamType: 'mainStream',
+            });
         } else {
             // Camera standalone: DEVE usare RTMP da Baichuan API
             logger.debug(`[getVideoClipRtmpUrl] Getting RTMP URL from Baichuan API for fileId="${fileId}" (camera standalone)`);
@@ -2403,6 +2368,11 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             return this.fetchingStreamsPromise;
         }
 
+        // Ensure streamManager is initialized
+        if (!this.streamManager) {
+            this.initStreamManager(logger);
+        }
+
         // Create and save the promise
         this.fetchingStreamsPromise = (async (): Promise<UrlMediaStreamOptions[]> => {
             try {
@@ -2431,22 +2401,16 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                         compositeOnly: this.isMultiFocal,
                     })}`);
 
-                    // const urls = client.getRtspUrl(rtspChannel);
-
-                    // let supportedStreams: ReolinkSupportedStream[] = [];
                     const supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
-                    // logger.log({ supportedStreams, variantType, lensParam, rtspChannel, onNvr: this.isOnNvr, nativeStreams: nativeStreams.map(s => ({ id: s.id, nativeVariant: s.nativeVariant, lens: s.lens })), rtspStreams: rtspStreams.map(s => ({ id: s.id, lens: s.lens })), rtmpStreams: rtmpStreams.map(s => ({ id: s.id, lens: s.lens })) });
 
                     for (const supportedStream of supportedStreams) {
                         const { id, metadata, url, name, container, lens, channel, profile, nativeVariant } = supportedStream;
 
-                        // Composite streams are re-encoded to H.264 by the library (ffmpeg/libx264).
-                        // Do not infer codec from underlying camera metadata.
                         const isComposite = lens === 'composite' || channel === undefined;
                         const codec = (() => {
                             if (isComposite) return 'h264';
 
-                            const enc = (metadata as any)?.videoEncType;
+                            const enc = metadata?.videoEncType;
                             // Many firmwares expose videoEncType as a numeric enum.
                             // Observed: 0 => H.264, 1 => H.265.
                             if (typeof enc === 'number') {
@@ -2462,7 +2426,6 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                             return s;
                         })();
 
-                        // For RTP (native RFC4571), stream identification happens via `id` (streamKey), not URL.
                         const finalUrl = url;
 
                         streams.push({
@@ -2472,14 +2435,16 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                             container,
                             video: { codec, width: metadata.width, height: metadata.height },
                             // audio: { codec: metadata.audioCodec }
+                        });
 
-                            // Provide explicit RFC4571 metadata so stream-utils can avoid parsing the streamKey.
-                            reolinkRfc4571: {
+                        // Set RFC4571 metadata in StreamManager instead of embedding it in the stream options
+                        if (this.streamManager && id) {
+                            this.streamManager.setRfc4571Metadata(id, {
                                 channel,
                                 profile,
                                 variant: nativeVariant,
-                            },
-                        } as any)
+                            });
+                        }
                     }
                 } catch (e) {
                     if (!this.isRecoverableBaichuanError?.(e)) {

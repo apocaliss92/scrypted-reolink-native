@@ -148,7 +148,7 @@ export const updateDeviceInfo = async (props: {
  * Convert a Reolink RecordingFile or EnrichedRecordingFile to a Scrypted VideoClip
  */
 export async function recordingFileToVideoClip(
-    rec: RecordingFile | EnrichedRecordingFile,
+    rec: EnrichedRecordingFile,
     options: {
         /** Fallback start date if recording doesn't have one */
         fallbackStart: Date;
@@ -192,7 +192,7 @@ export async function recordingFileToVideoClip(
     const recEndMs = Math.max(recEnd.getTime(), recStartMs);
     const duration = recEndMs - recStartMs;
 
-    const id = rec.id || rec.fileName;
+    const id = rec.eventId || rec.id || rec.fileName;
 
     // Get video URL if not provided
     let videoHref: string | undefined = providedVideoHref;
@@ -359,7 +359,7 @@ export async function recordingsToVideoClips(
     const { fallbackStart, api, logger, plugin, deviceId, useWebhook, count } = options;
     const clips: VideoClip[] = [];
 
-    for (const rec of recordings) {
+    for (const rec of recordings.filter((r): r is EnrichedRecordingFile => 'startTimeMs' in r)) {
         try {
             const clip = await recordingFileToVideoClip(rec, {
                 fallbackStart,
@@ -681,9 +681,9 @@ export async function handleVideoClipRequest(props: {
                                 // Pipe httpResponse to ffmpeg stdin
                                 httpResponse.pipe(ffmpeg.stdin);
 
-                                ffmpeg.stdin.on('error', (err) => {
+                                ffmpeg.stdin.on('error', (err: any) => {
                                     // Ignore EPIPE errors when ffmpeg closes
-                                    if ((err as any).code !== 'EPIPE') {
+                                    if (err.code !== 'EPIPE') {
                                         logger.error(`FFmpeg stdin error: fileId=${fileId}`, err?.message || String(err));
                                     }
                                 });

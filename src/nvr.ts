@@ -107,6 +107,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
     processing = false;
     private initReinitTimeout: NodeJS.Timeout | undefined;
     private debugLogsResetTimeout: NodeJS.Timeout | undefined;
+    private thumbnailQueue: Promise<any> = Promise.resolve();
 
     constructor(nativeId: string, plugin: ReolinkNativePlugin) {
         super(nativeId, "tcp");
@@ -506,6 +507,28 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
 
         this.discoveredDevices.delete(adopt.nativeId);
         return device?.id;
+    }
+
+    /**
+     * Queue a thumbnail generation task to run sequentially.
+     * This ensures that thumbnail generation requests don't run in parallel,
+     * which can overwhelm the NVR.
+     */
+    async queueThumbnailGeneration<T>(task: () => Promise<T>): Promise<T> {
+        // Chain the new task after the previous one
+        const queuedTask = this.thumbnailQueue.then(async () => {
+            return await task();
+        }, async () => {
+            // Even if previous task failed, continue the chain
+            return await task();
+        });
+
+        // Update the queue to point to the new task
+        this.thumbnailQueue = queuedTask.catch(() => {
+            // Ignore errors in the queue chain itself
+        });
+
+        return queuedTask;
     }
 }
 
