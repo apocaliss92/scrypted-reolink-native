@@ -32,6 +32,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
     nvrDeviceId: string;
     private thumbnailQueue: ThumbnailRequest[] = [];
     private thumbnailProcessing = false;
+    private thumbnailPendingRequests = new Map<string, Promise<MediaObject>>();
 
     constructor(nativeId: string) {
         super(nativeId);
@@ -340,12 +341,23 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
      * Add a thumbnail generation request to the queue
      */
     async generateThumbnail(request: ThumbnailRequestInput): Promise<MediaObject> {
+        // Create a unique key for this request (deviceId:fileId)
+        const requestKey = `${request.deviceId}:${request.fileId}`;
+
+        // Check if this thumbnail is already in queue or being processed
+        const existingRequest = this.thumbnailPendingRequests.get(requestKey);
+        if (existingRequest) {
+            const logger = request.device?.getBaichuanLogger?.() || request.logger || console;
+            logger.debug(`[Thumbnail] Request already in queue: fileId=${request.fileId}, reusing existing promise`);
+            return existingRequest;
+        }
+
         const queueLength = this.thumbnailQueue.length;
         // Use device logger if available, otherwise fallback to provided logger
         const logger = request.device?.getBaichuanLogger?.() || request.logger || console;
         logger.log(`[Thumbnail] Download start: fileId=${request.fileId}, queuePosition=${queueLength + 1}`);
 
-        return new Promise((resolve, reject) => {
+        const promise = new Promise<MediaObject>((resolve, reject) => {
             this.thumbnailQueue.push({
                 ...request,
                 resolve,
@@ -353,6 +365,16 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             });
             this.processThumbnailQueue();
         });
+
+        // Track this request
+        this.thumbnailPendingRequests.set(requestKey, promise);
+
+        // Remove from tracking when the promise resolves or rejects
+        promise.finally(() => {
+            this.thumbnailPendingRequests.delete(requestKey);
+        });
+
+        return promise;
     }
 
     /**

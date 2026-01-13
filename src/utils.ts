@@ -192,17 +192,22 @@ export async function recordingFileToVideoClip(
     const recEndMs = Math.max(recEnd.getTime(), recStartMs);
     const duration = recEndMs - recStartMs;
 
-    const id = rec.id || rec.fileName;
+    // IMPORTANT: For NVR/Hub, ensure the clip id (fileId) is the actual recording path (/mnt/...) when available.
+    // Some sources may provide an alternate id (e.g. eventId/Baichuan id); we prefer the filesystem path because
+    // downstream VOD download/playback endpoints expect it.
+    const id = typeof rec.fileName === 'string' && rec.fileName.startsWith('/mnt/')
+        ? rec.fileName
+        : (rec.id || rec.fileName);
 
     // Get video URL if not provided
     let videoHref: string | undefined = providedVideoHref;
     let thumbnailHref: string | undefined;
 
-    logger?.debug(`[recordingFileToVideoClip] URL generation: useWebhook=${useWebhook}, hasPlugin=${!!plugin}, deviceId=${deviceId}, providedVideoHref=${providedVideoHref || 'none'}, hasApi=${!!api}`);
+    // logger?.debug(`[recordingFileToVideoClip] URL generation: useWebhook=${useWebhook}, hasPlugin=${!!plugin}, deviceId=${deviceId}, providedVideoHref=${providedVideoHref || 'none'}, hasApi=${!!api}`);
 
     // If webhook is enabled, generate webhook URLs
     if (useWebhook && plugin && deviceId) {
-        logger?.debug(`[recordingFileToVideoClip] Generating webhook URLs for fileId=${id}`);
+        // logger?.debug(`[recordingFileToVideoClip] Generating webhook URLs for fileId=${id}`);
         try {
             const { videoUrl, thumbnailUrl } = await getVideoClipWebhookUrls({
                 deviceId,
@@ -212,24 +217,24 @@ export async function recordingFileToVideoClip(
             });
             videoHref = videoUrl;
             thumbnailHref = thumbnailUrl;
-            logger?.debug(`[recordingFileToVideoClip] Webhook URLs generated successfully: videoHref="${videoHref}", thumbnailHref="${thumbnailHref}"`);
+            // logger?.debug(`[recordingFileToVideoClip] Webhook URLs generated successfully: videoHref="${videoHref}", thumbnailHref="${thumbnailHref}"`);
         } catch (e) {
             logger?.error(`[recordingFileToVideoClip] Failed to generate webhook URLs for fileId=${id}:`, e?.message || String(e));
         }
     } else if (!videoHref && api) {
         // Fallback to direct RTMP URL if webhook is not used
-        logger?.debug(`[recordingFileToVideoClip] Fetching RTMP playback URL for fileName=${rec.fileName}`);
+        // logger?.debug(`[recordingFileToVideoClip] Fetching RTMP playback URL for fileName=${rec.fileName}`);
         try {
             const { rtmpVodUrl } = await api.getRecordingPlaybackUrls({
                 fileName: rec.fileName,
             });
             videoHref = rtmpVodUrl;
-            logger?.debug(`[recordingFileToVideoClip] RTMP URL fetched successfully: videoHref="${videoHref}"`);
+            // logger?.debug(`[recordingFileToVideoClip] RTMP URL fetched successfully: videoHref="${videoHref}"`);
         } catch (e) {
             logger?.debug(`[recordingFileToVideoClip] Failed to build playback URL for recording fileName=${rec.fileName}:`, e?.message || String(e));
         }
     } else {
-        logger?.debug(`[recordingFileToVideoClip] No URL generation: useWebhook=${useWebhook}, hasPlugin=${!!plugin}, deviceId=${deviceId}, providedVideoHref=${providedVideoHref || 'none'}, hasApi=${!!api}`);
+        // logger?.debug(`[recordingFileToVideoClip] No URL generation: useWebhook=${useWebhook}, hasPlugin=${!!plugin}, deviceId=${deviceId}, providedVideoHref=${providedVideoHref || 'none'}, hasApi=${!!api}`);
     }
 
     const description = ('name' in rec && typeof rec.name === 'string' && rec.name) ? rec.name : (rec.fileName ?? rec.id ?? '');
