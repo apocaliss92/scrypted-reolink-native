@@ -787,7 +787,6 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             const api = await this.ensureClient();
 
             if (useNvr) {
-                // Fetch from NVR using VOD listing so clip.id/fileId is a real file path (e.g. /mnt/sda/...)
                 const channel = this.storageSettings.values.rtspChannel ?? 0;
 
                 logger.debug(`[NVR VOD] Listing recordings: channel=${channel}, start=${start.toISOString()}, end=${end.toISOString()}`);
@@ -2098,7 +2097,18 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             }
         } else {
             const logger = this.getBaichuanLogger();
-            const shouldTakeNewSnapshot = this.forceNewSnapshot;
+            let shouldTakeNewSnapshot = this.forceNewSnapshot;
+
+            if (this.lastPicture) {
+                const batteryUpdateIntervalMinutes = this.storageSettings.values.batteryUpdateIntervalMinutes ?? 60;
+                const updateIntervalMs = batteryUpdateIntervalMinutes * 60_000;
+                const timeSinceLastSnapshot = Date.now() - this.lastPicture.atMs;
+
+                if (timeSinceLastSnapshot >= updateIntervalMs) {
+                    shouldTakeNewSnapshot = true;
+                    logger.log(`Snapshot expired: ${Math.round(timeSinceLastSnapshot / 60_000)} minutes since last snapshot (interval: ${batteryUpdateIntervalMinutes} minutes)`);
+                }
+            }
 
             if (!shouldTakeNewSnapshot && this.lastPicture) {
                 logger.log(`Returning cached snapshot, taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
@@ -2112,6 +2122,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
 
             this.takePictureInFlight = (async () => {
                 const client = await this.ensureClient();
+                await client.wakeUp();
                 const mo = await this.takePictureInternal(client);
                 this.lastPicture = { mo, atMs: Date.now() };
                 logger.log(`Snapshot taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
