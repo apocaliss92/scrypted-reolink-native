@@ -235,6 +235,14 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             defaultValue: 'default',
             choices: ['default', 'autotrack', 'telephoto'] as NativeVideoStreamVariant[],
         },
+        preferredStreams: {
+            type: 'string',
+            title: 'Preferred Stream Order',
+            description: 'Order preference for video streams. Default: RTSP -> RTMP -> Native',
+            defaultValue: 'Default',
+            choices: ['Default', 'Native', 'RTSP', 'RTMP'],
+            subgroup: 'Streaming',
+        },
         // capabilities: {
         //     json: true,
         //     hide: true,
@@ -2406,11 +2414,31 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                         compositeOnly: this.isMultiFocal,
                     })}`);
 
-                    // const urls = client.getRtspUrl(rtspChannel);
+                    // Update preferredStreams choices based on supported stream types
+                    const availableChoices = ['Default'];
+                    if (nativeStreams.length > 0) availableChoices.push('Native');
+                    if (rtspStreams.length > 0) availableChoices.push('RTSP');
+                    if (rtmpStreams.length > 0) availableChoices.push('RTMP');
 
-                    // let supportedStreams: ReolinkSupportedStream[] = [];
-                    const supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
-                    // logger.log({ supportedStreams, variantType, lensParam, rtspChannel, onNvr: this.isOnNvr, nativeStreams: nativeStreams.map(s => ({ id: s.id, nativeVariant: s.nativeVariant, lens: s.lens })), rtspStreams: rtspStreams.map(s => ({ id: s.id, lens: s.lens })), rtmpStreams: rtmpStreams.map(s => ({ id: s.id, lens: s.lens })) });
+                    this.storageSettings.settings.preferredStreams.choices = availableChoices;
+
+                    // Order streams based on preferredStreams setting
+                    const preferredOrder = this.storageSettings.values.preferredStreams || 'Default';
+                    let supportedStreams: any[] = [];
+
+                    if (preferredOrder === 'Default') {
+                        // Default: RTSP -> RTMP -> Native
+                        supportedStreams = [...rtspStreams, ...rtmpStreams, ...nativeStreams];
+                    } else if (preferredOrder === 'Native') {
+                        supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
+                    } else if (preferredOrder === 'RTSP') {
+                        supportedStreams = [...rtspStreams, ...rtmpStreams, ...nativeStreams];
+                    } else if (preferredOrder === 'RTMP') {
+                        supportedStreams = [...rtmpStreams, ...rtspStreams, ...nativeStreams];
+                    } else {
+                        // Fallback to default
+                        supportedStreams = [...rtspStreams, ...rtmpStreams, ...nativeStreams];
+                    }
 
                     for (const supportedStream of supportedStreams) {
                         const { id, metadata, url, name, container, lens, channel, profile, nativeVariant } = supportedStream;
