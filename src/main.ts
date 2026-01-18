@@ -5,6 +5,7 @@ import { ReolinkNativeNvrDevice } from "./nvr";
 import { batteryCameraSuffix, batteryMultifocalSuffix, cameraSuffix, extractThumbnailFromVideo, getDeviceInterfaces, handleVideoClipRequest, multifocalSuffix, nvrSuffix } from "./utils";
 import { randomBytes } from "crypto";
 import { ReolinkCamera } from "./camera";
+import type { AutoDetectMode } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 
 interface ThumbnailRequest {
     deviceId: string;
@@ -65,8 +66,19 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             throw new Error('IP address, username, and password are required');
         }
 
-        this.console.log(`[AutoDetect] Starting device type detection for ${ipAddress}...`);
+        const deviceTypeSetting = settings.deviceType?.toString() || 'Auto';
+        const forceType = deviceTypeSetting === 'Auto' ? undefined : deviceTypeSetting.toLowerCase();
+
+        this.console.log(`[AutoDetect] Starting device type detection for ${ipAddress}...${forceType ? ` (forcing type: ${forceType})` : ''}`);
         const { autoDetectDeviceType } = await import("@apocaliss92/reolink-baichuan-js");
+        // 'Auto', 'NVR', 'Battery Camera', 'Regular Camera
+        const mode: AutoDetectMode = forceType === 'Auto' ? 'auto' :
+            forceType === 'Battery Camera' ? 'udp' :
+                forceType === 'Regular Camera' ? 'tcp' :
+                    forceType === 'NVR' ? 'tcp' :
+                        'auto';
+
+        const maxRetries = mode === 'auto' ? 2 : 10;
 
         const detection = await autoDetectDeviceType(
             {
@@ -75,6 +87,8 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 password,
                 uid,
                 logger: this.console,
+                mode,
+                maxRetries,
             },
         );
         const { ip, mac } = detection.hostNetworkInfo ?? {}
@@ -235,6 +249,14 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
                 key: 'uid',
                 title: 'UID',
                 description: 'Reolink UID (optional, required for battery cameras if TCP connection fails)',
+            },
+            {
+                key: 'deviceType',
+                title: 'Device Type',
+                description: 'Device type detection mode. Use "Auto" for automatic detection, or force a specific type.',
+                type: 'string',
+                choices: ['Auto', 'NVR', 'Battery Camera', 'Regular Camera'],
+                value: 'Auto',
             }
         ]
     }
