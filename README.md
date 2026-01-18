@@ -17,3 +17,8 @@ All the devices will be offered of RTSP and RTMP streams when available, and Nat
 Videoclips are available as opt-in with auto-download possibilites to fasten the loading. Since Reolink does nto store snapshots, scrypted will generate them when the clip is requested for the first time or on a schedule (settings available for that)
 
 Multifocal cameras (such as Trackmix) will be provided with a combined stream in PIP-mode
+
+☕️ If this extension works well for you, consider buying me a coffee. Thanks!
+[Buy me a coffee!](https://buymeacoffee.com/apocaliss92)
+
+[For requests and bugs](https://github.com/apocaliss92/scrypted-reolink-native)
