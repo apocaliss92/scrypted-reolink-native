@@ -8,11 +8,10 @@ The plugin will automatically distinguish between:
 - NVRs
 
 Battery cameras will be automatically set-up to disable prebuffer streams and snapshots (to preserve battery).
+If the battery cams are not attached to an hub, it won't be possible to detect motino during the camera standby, this is due to the mechanism they use to communicate the pir events, which is through a subGhZ signal (which the the HOMEHUB is able to catch)
 
 All the devices will be offered of RTSP and RTMP streams when available, and Native streams built upon the native reolink protocolos
 
 Videoclips are available as opt-in with auto-download possibilites to fasten the loading. Since Reolink does nto store snapshots, scrypted will generate them when the clip is requested for the first time or on a schedule (settings available for that)
 
 Multifocal cameras (such as Trackmix) will be provided with a combined stream in PIP-mode
-
-## Currently motion on standalone battery cams is not reliable, once the camera goes to sleep there is no known way (at least to me) to catch the motion events coming from PIR. The hub is able to get this informaion, will investigate further.
