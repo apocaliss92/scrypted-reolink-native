@@ -2528,8 +2528,11 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             return await this.createMediaObject(ret, ScryptedMimeTypes.MediaStreamUrl);
         }
 
+        // Ensure streamManager is initialized before use
         if (!this.streamManager) {
-            throw new Error('StreamManager not initialized');
+            const logger = this.getBaichuanLogger();
+            logger.warn('StreamManager not initialized, initializing now...');
+            this.initStreamManager(logger);
         }
 
         const streamKey = selected.id;
