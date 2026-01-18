@@ -25,9 +25,10 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
         return this.name || 'Multi-Focal Device';
     }
 
-    getInterfaces(lensType?: NativeVideoStreamVariant) {
+    async getInterfaces(lensType?: NativeVideoStreamVariant) {
         const logger = this.getBaichuanLogger();
-        const { capabilities: caps, multifocalInfo } = this.storageSettings.values;
+        const { multifocalInfo } = this.storageSettings.values;
+        const caps = await this.getAbilities();
 
         let capabilities: DeviceCapabilities = { ...caps };
 
@@ -77,7 +78,6 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
             logger.debug({ multifocalInfo, capabilities });
 
             this.storageSettings.values.multifocalInfo = multifocalInfo;
-            this.storageSettings.values.capabilities = capabilities;
 
             for (const channelInfo of multifocalInfo?.channels ?? []) {
                 const { channel, lensType, variantType } = channelInfo;
@@ -86,7 +86,7 @@ export class ReolinkNativeMultiFocalDevice extends ReolinkCamera implements Sett
                 const nativeId = `${this.nativeId}-${lensType}${this.isBattery ? batteryCameraSuffix : cameraSuffix}`;
 
                 this.channelToNativeIdMap.set(channel, nativeId);
-                const { interfaces, capabilities: deviceCapabilities } = this.getInterfaces();
+                const { interfaces, capabilities: deviceCapabilities } = await this.getInterfaces();
 
                 const device: Device = {
                     providerNativeId: this.nativeId,

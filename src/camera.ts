@@ -5,8 +5,6 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { spawn } from 'node:child_process';
-import http from 'http';
-import https from 'https';
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import { BaseBaichuanClass, type BaichuanConnectionCallbacks, type BaichuanConnectionConfig } from "./baichuan-base";
 import { createBaichuanApi, normalizeUid, type BaichuanTransport } from "./connect";
@@ -237,10 +235,10 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             defaultValue: 'default',
             choices: ['default', 'autotrack', 'telephoto'] as NativeVideoStreamVariant[],
         },
-        capabilities: {
-            json: true,
-            hide: true,
-        },
+        // capabilities: {
+        //     json: true,
+        //     hide: true,
+        // },
         multifocalInfo: {
             json: true,
             hide: true,
@@ -672,6 +670,8 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
     private takePictureInFlight: Promise<MediaObject> | undefined;
     forceNewSnapshot: boolean = false;
 
+    public cachedCapabilities: DeviceCapabilities | undefined;
+
     // Video stream properties
     protected cachedVideoStreamOptions?: UrlMediaStreamOptions[];
     protected fetchingStreamsPromise: Promise<UrlMediaStreamOptions[]> | undefined;
@@ -915,8 +915,8 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                 await fs.promises.mkdir(cacheDir, { recursive: true });
             }
 
-            const { clipsSource } = this.storageSettings.values;
-            const useNvr = clipsSource === "NVR" && this.nvrDevice;
+            // const { clipsSource } = this.storageSettings.values;
+            // const useNvr = clipsSource === "NVR" && this.nvrDevice;
 
             // Both standalone and NVR now use a URL-based playback path.
             // In NVR mode, `videoId` is expected to be a full recording path (e.g. /mnt/sda/...).
@@ -1046,8 +1046,8 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             // Ensure cache directory exists
             await fs.promises.mkdir(cacheDir, { recursive: true });
 
-            const { clipsSource } = this.storageSettings.values;
-            const useNvr = clipsSource === "NVR" && this.nvrDevice;
+            // const { clipsSource } = this.storageSettings.values;
+            // const useNvr = clipsSource === "NVR" && this.nvrDevice;
 
             // NVR mode: `thumbnailId` is expected to be a full recording path (e.g. /mnt/sda/...).
             // Use the same ffmpeg-based thumbnail extraction flow as other sources.
@@ -1468,32 +1468,40 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         return await super.createStreamClient(streamKey);
     }
 
-    public getAbilities(): DeviceCapabilities {
-        if (this.multiFocalDevice) {
-            const variantType = this.storageSettings.values.variantType;
-            const ifaces = this.multiFocalDevice.getInterfaces(variantType);
-            if (ifaces?.capabilities) return ifaces.capabilities;
-        } else {
-            const caps = this.storageSettings.values.capabilities;
-            if (caps) return caps;
-        }
+    public async getAbilities(): Promise<DeviceCapabilities> {
+        const logger = this.getBaichuanLogger();
 
-        // Safe fallback to avoid crashes during init when connection hasn't succeeded yet.
-        return {
-            channel: this.storageSettings.values.rtspChannel ?? 0,
-            ptzMode: 'none',
-            hasPan: false,
-            hasTilt: false,
-            hasZoom: false,
-            hasPresets: false,
-            hasPtz: false,
-            hasBattery: !!this.isBattery,
-            hasIntercom: false,
-            hasSiren: false,
-            hasFloodlight: false,
-            hasPir: false,
-            isDoorbell: false,
-        };
+        try {
+            if (this.multiFocalDevice) {
+                const variantType = this.storageSettings.values.variantType;
+                const ifaces = await this.multiFocalDevice.getInterfaces(variantType);
+                if (ifaces?.capabilities) return ifaces.capabilities;
+            } else {
+                if (this.cachedCapabilities) return this.cachedCapabilities;
+
+                const client = await this.ensureClient();
+                const { capabilities } = await client.getDeviceCapabilities(this.storageSettings.values.rtspChannel ?? 0);
+                this.cachedCapabilities = capabilities;
+                return capabilities;
+            }
+        } catch (e) {
+            logger.error('Failed to get abilities', e);
+            return {
+                channel: this.storageSettings.values.rtspChannel ?? 0,
+                ptzMode: 'none',
+                hasPan: false,
+                hasTilt: false,
+                hasZoom: false,
+                hasPresets: false,
+                hasPtz: false,
+                hasBattery: !!this.isBattery,
+                hasIntercom: false,
+                hasSiren: false,
+                hasFloodlight: false,
+                hasPir: false,
+                isDoorbell: false,
+            };
+        }
     }
 
     getBaichuanDebugOptions(): any | undefined {
@@ -1620,8 +1628,8 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         );
     }
 
-    updatePtzCaps() {
-        const { hasPan, hasTilt, hasZoom } = this.getAbilities();
+    async updatePtzCaps() {
+        const { hasPan, hasTilt, hasZoom } = await this.getAbilities();
         this.ptzCapabilities = {
             ...this.ptzCapabilities,
             pan: hasPan,
@@ -1994,7 +2002,9 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
     }
 
     async reportDevices(): Promise<void> {
-        const abilities = this.getAbilities();
+        const abilities = await this.getAbilities();
+        const logger = this.getBaichuanLogger();
+        logger.debug(`Reporting devices: ${JSON.stringify(abilities)}`);
 
         const { hasSiren, hasFloodlight, hasPir } = abilities;
 
@@ -2269,7 +2279,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         const api = await this.ensureClient();
 
         const channel = this.storageSettings.values.rtspChannel;
-        const { hasSiren, hasFloodlight, hasPir } = this.getAbilities();
+        const { hasSiren, hasFloodlight, hasPir } = await this.getAbilities();
 
         try {
             // Align siren state
@@ -2691,7 +2701,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             logger.error('Failed to initialize StreamManager', e?.message || String(e));
         }
 
-        const { hasIntercom, hasPtz } = this.getAbilities();
+        const { hasIntercom, hasPtz } = await this.getAbilities();
 
         if (hasIntercom) {
             this.intercom = new ReolinkBaichuanIntercom(this);

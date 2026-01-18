@@ -119,7 +119,7 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             device.storageSettings.values.username = username;
             device.storageSettings.values.password = password;
             device.storageSettings.values.uid = uid;
-            device.storageSettings.values.capabilities = capabilities;
+            device.cachedCapabilities = capabilities;
 
             return nativeId;
         }
@@ -190,9 +190,10 @@ class ReolinkNativePlugin extends ScryptedDeviceBase implements DeviceProvider, 
             device.storageSettings.values.password = password;
             device.storageSettings.values.rtspChannel = rtspChannel;
             device.storageSettings.values.ipAddress = ipAddress;
-            device.storageSettings.values.capabilities = capabilities;
             device.storageSettings.values.uid = uid;
             device.storageSettings.values.discoveryMethod = detection.udpDiscoveryMethod;
+
+            device.cachedCapabilities = capabilities;
 
             return nativeId;
         }

@@ -501,8 +501,9 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
         device.storageSettings.values.password = password;
         device.storageSettings.values.rtspChannel = entry.rtspChannel;
         device.storageSettings.values.ipAddress = ipAddress;
-        device.storageSettings.values.capabilities = capabilities;
         device.storageSettings.values.uid = uid;
+
+        device.cachedCapabilities = capabilities;
 
         this.discoveredDevices.delete(adopt.nativeId);
         return device?.id;
