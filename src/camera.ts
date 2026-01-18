@@ -2534,7 +2534,12 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         if (!this.streamManager) {
             const logger = this.getBaichuanLogger();
             logger.warn('StreamManager not initialized, initializing now...');
-            this.initStreamManager(logger);
+            try {
+                this.initStreamManager(logger);
+            } catch (e) {
+                logger.error('Failed to initialize StreamManager in getVideoStream', e?.message || String(e), e);
+                throw e;
+            }
         }
 
         const streamKey = selected.id;
@@ -2731,7 +2736,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             this.initStreamManager();
         }
         catch (e) {
-            logger.error('Failed to initialize StreamManager', e?.message || String(e));
+            logger.error('Failed to initialize StreamManager in init', e?.message || String(e), e);
         }
 
         const { hasIntercom, hasPtz } = await this.getAbilities();
