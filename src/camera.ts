@@ -2427,8 +2427,10 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     let supportedStreams: any[] = [];
 
                     if (preferredOrder === 'Default') {
-                        // Default: RTSP -> RTMP -> Native
-                        supportedStreams = [...rtspStreams, ...rtmpStreams, ...nativeStreams];
+                        // Default: Native -> RTSP -> RTMP
+                        supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
+                        // // Default: RTSP -> RTMP -> Native
+                        // supportedStreams = [...rtspStreams, ...rtmpStreams, ...nativeStreams];
                     } else if (preferredOrder === 'Native') {
                         supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
                     } else if (preferredOrder === 'RTSP') {
