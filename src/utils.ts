@@ -1,4 +1,4 @@
-import type { DeviceCapabilities, EnrichedRecordingFile, NativeVideoStreamVariant, ParsedRecordingFileName, RecordingFile, ReolinkBaichuanApi, ReolinkDeviceInfo, VodFile, VodSearchResponse } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { DeviceCapabilities, EnrichedRecordingFile, NativeVideoStreamVariant, ParsedRecordingFileName, RecordingFile, ReolinkBaichuanApi, ReolinkDeviceInfo, ReolinkSupportedStream, VodFile, VodSearchResponse } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, { DeviceBase, HttpRequest, HttpResponse, MediaObject, ScryptedDeviceBase, ScryptedDeviceType, ScryptedInterface, ScryptedMimeTypes, VideoClip, VideoClips } from "@scrypted/sdk";
 import { spawn } from "node:child_process";
 import { Readable } from "stream";
@@ -1072,3 +1072,5 @@ export async function vodSearchResultsToVideoClips(
 
     return clips;
 }
+
+export const removeAuthUrls = (streams: ReolinkSupportedStream[]) => streams.map(({ urlWithAuth, ...rest }) => ({ rest }));

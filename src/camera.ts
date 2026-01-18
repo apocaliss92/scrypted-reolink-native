@@ -20,7 +20,7 @@ import {
     StreamManager,
     StreamManagerOptions
 } from "./stream-utils";
-import { floodlightSuffix, getDeviceInterfaces, pirSuffix, recordingsToVideoClips, sanitizeFfmpegOutput, sirenSuffix, updateDeviceInfo } from "./utils";
+import { floodlightSuffix, getDeviceInterfaces, pirSuffix, recordingsToVideoClips, removeAuthUrls, sanitizeFfmpegOutput, sirenSuffix, updateDeviceInfo } from "./utils";
 
 export type CameraType = 'battery' | 'regular' | 'multi-focal' | 'multi-focal-battery';
 
@@ -2405,9 +2405,9 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                     });
 
                     logger.debug(`Supported streams: ${JSON.stringify({
-                        nativeStreams,
-                        rtmpStreams,
-                        rtspStreams,
+                        nativeStreams: removeAuthUrls(nativeStreams),
+                        rtmpStreams: removeAuthUrls(rtmpStreams),
+                        rtspStreams: removeAuthUrls(rtspStreams),
                         variantType,
                         onNvr: this.isOnNvr,
                         channel: rtspChannel,
