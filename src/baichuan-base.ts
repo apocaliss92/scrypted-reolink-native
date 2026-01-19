@@ -485,7 +485,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
      */
     private getAllActiveConnections(): ReolinkBaichuanApi[] {
         const connections: ReolinkBaichuanApi[] = [];
-        
+
         // Add main connection if exists and is valid
         if (this.baichuanApi) {
             const isConnected = this.baichuanApi.client.isSocketConnected();
@@ -494,7 +494,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                 connections.push(this.baichuanApi);
             }
         }
-        
+
         // Add all stream clients that are valid
         for (const streamClient of this.streamClients.values()) {
             const isConnected = streamClient.client.isSocketConnected();
@@ -503,7 +503,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                 connections.push(streamClient);
             }
         }
-        
+
         return connections;
     }
 
@@ -512,7 +512,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
      */
     private startConnectionMaintenance(api: ReolinkBaichuanApi): void {
         const logger = this.getBaichuanLogger();
-        
+
         // Stop any existing intervals
         this.stopConnectionMaintenance();
 
@@ -526,11 +526,11 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                 // Get all active connections (main + stream clients)
                 const allConnections = this.getAllActiveConnections();
                 logger.debug(`Pinging ${allConnections.length} connections`);
-                
+
                 if (allConnections.length === 0) {
                     this.consecutivePingFailures++;
                     logger.debug(`No active connections found, failures=${this.consecutivePingFailures}`);
-                    
+
                     if (this.consecutivePingFailures >= 3) {
                         logger.log('No active connections detected, renewing connection');
                         await this.cleanupBaichuanApi();
@@ -557,7 +557,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                 if (failedPings.length > 0) {
                     this.consecutivePingFailures++;
                     logger.debug(`Ping failed for ${failedPings.length}/${allConnections.length} connections, failures=${this.consecutivePingFailures}`);
-                    
+
                     if (this.consecutivePingFailures >= 3) {
                         logger.log(`Multiple ping failures detected (${failedPings.length} connections), renewing connection`);
                         await this.cleanupBaichuanApi();
@@ -584,7 +584,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             try {
                 // Check if there are active streams
                 const hasActiveStreams = this.getStreamManager?.()?.hasActiveStreams() ?? false;
-                
+
                 if (!hasActiveStreams) {
                     logger.log('No active streams detected, renewing connection (auto-renewal)');
                     await this.cleanupBaichuanApi();
@@ -617,7 +617,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
      */
     private startEventCheck(api: ReolinkBaichuanApi): void {
         const logger = this.getBaichuanLogger();
-        
+
         // Stop any existing interval
         this.stopEventCheck();
 
@@ -717,13 +717,11 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                 // Call original handler
                 originalHandler(ev);
             };
-            
+
             await api.onSimpleEvent(wrappedHandler);
             this.eventSubscriptionActive = true;
             this.lastEventTime = Date.now(); // Initialize on subscription
-            if (!silent) {
-                logger.debug('Subscribed to Baichuan events');
-            }
+            logger.debug('Subscribed to Baichuan events');
         }
         catch (e) {
             logger.warn('Failed to subscribe to events', e?.message || String(e));
@@ -743,14 +741,10 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         if (this.eventSubscriptionActive && this.baichuanApi && callbacks.onSimpleEvent) {
             try {
                 this.baichuanApi.offSimpleEvent(callbacks.onSimpleEvent);
-                if (!silent) {
-                    logger.debug('Unsubscribed from Baichuan events');
-                }
+                logger.debug('Unsubscribed from Baichuan events');
             }
             catch (e) {
-                if (!silent) {
-                    logger.warn('Error unsubscribing from events', e?.message || String(e));
-                }
+                logger.warn('Error unsubscribing from events', e?.message || String(e));
             }
         }
 

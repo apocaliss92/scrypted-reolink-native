@@ -1731,7 +1731,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
      * If this device has a parent (nvrDevice or multiFocalDevice), events will be forwarded from the parent.
      * This ensures that only the root device in the hierarchy subscribes to events, avoiding duplicate subscriptions.
      */
-    async subscribeToEvents(): Promise<void> {
+    async subscribeToEvents(silent: boolean = false): Promise<void> {
         // If this device has a parent (NVR or MultiFocal), don't subscribe - events will be forwarded from parent
         if (this.nvrDevice || this.multiFocalDevice) {
             const logger = this.getBaichuanLogger();
@@ -1754,7 +1754,9 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         }
 
         if (!enabled) {
-            logger.log('Event subscription disabled, unsubscribing');
+            if (!silent) {
+                logger.log('Event subscription disabled, unsubscribing');
+            }
             if (this.doorbellBinaryTimeout) {
                 clearTimeout(this.doorbellBinaryTimeout);
                 this.doorbellBinaryTimeout = undefined;
@@ -1766,8 +1768,10 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
         // IMPORTANT: use base subscription logic so the callback is properly bound.
         // Passing `this.onSimpleEvent` directly would lose `this` and can result in silent failures.
         try {
-            await super.subscribeToEvents();
-            logger.log(`Subscribed to events (${selection.join(', ')}) on ${this.protocol} connection`);
+            await super.subscribeToEvents(silent);
+            if (!silent) {
+                logger.log(`Subscribed to events (${selection.join(', ')}) on ${this.protocol} connection`);
+            }
         }
         catch (e) {
             logger.warn('Failed to subscribe to Baichuan events', e?.message || String(e));
