@@ -307,7 +307,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
 
                 // Start ping and auto-renewal for TCP connections
                 if (this.transport === 'tcp') {
-                    this.startConnectionMaintenance(api);
+                    // this.startConnectionMaintenance(api);
                 }
 
                 // Start event check for all connections
@@ -821,6 +821,31 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         });
 
         return api;
+    }
+
+    /**
+     * Teardown a single stream client by streamKey.
+     *
+     * This is useful for non-stream features (e.g. intercom) that still use createStreamClient()
+     * and need to ensure the underlying Baichuan session is torn down at the end of the operation.
+     */
+    async teardownStreamClient(streamKey: string, options?: { timeoutMs?: number }): Promise<void> {
+        const api = this.streamClients.get(streamKey);
+        // Remove first to avoid re-use while closing (and to ensure teardown even if close hangs).
+        this.streamClients.delete(streamKey);
+        if (!api) return;
+
+        const timeoutMs = options?.timeoutMs ?? 2000;
+        const sleepMs = async (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+        try {
+            await Promise.race([
+                api.close({ reason: `teardownStreamClient:${streamKey}` }),
+                sleepMs(timeoutMs),
+            ]);
+        } catch {
+            // ignore
+        }
     }
 
     /**
