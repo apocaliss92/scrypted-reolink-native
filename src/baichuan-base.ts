@@ -177,8 +177,10 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
     private lastDisconnectTime: number = 0;
     private readonly reconnectBackoffMs: number = 2000; // 2 seconds minimum between reconnects
     private eventSubscriptionActive: boolean = false;
+    private lastEventTime: number = 0;
     private pingInterval?: NodeJS.Timeout;
     private autoRenewInterval?: NodeJS.Timeout;
+    private eventCheckInterval?: NodeJS.Timeout;
     private consecutivePingFailures: number = 0;
 
     /**
@@ -307,6 +309,9 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                 if (this.transport === 'tcp') {
                     this.startConnectionMaintenance(api);
                 }
+
+                // Start event check for all connections
+                this.startEventCheck(api);
 
                 return api;
             }
@@ -467,6 +472,9 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         // Stop ping and auto-renewal intervals
         this.stopConnectionMaintenance();
 
+        // Stop event check interval
+        this.stopEventCheck();
+
         // Reset state
         this.baichuanApi = undefined;
         this.ensureClientPromise = undefined;
@@ -605,6 +613,63 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
     }
 
     /**
+     * Start event check to monitor if events are being received
+     */
+    private startEventCheck(api: ReolinkBaichuanApi): void {
+        const logger = this.getBaichuanLogger();
+        
+        // Stop any existing interval
+        this.stopEventCheck();
+
+        // Check every minute if events are being received
+        this.eventCheckInterval = setInterval(async () => {
+            if (!this.baichuanApi || this.baichuanApi !== api) {
+                return; // Connection changed, stop this interval
+            }
+
+            // Only check if event subscription is active
+            if (!this.eventSubscriptionActive) {
+                return;
+            }
+
+            try {
+                const now = Date.now();
+                const timeSinceLastEvent = now - this.lastEventTime;
+                const fiveMinutesMs = 5 * 60 * 1000;
+
+                if (this.lastEventTime > 0 && timeSinceLastEvent > fiveMinutesMs) {
+                    logger.log(`No events received in the last ${Math.round(timeSinceLastEvent / 60_000)} minutes, restarting event listener`);
+                    // Restart event subscription
+                    await this.unsubscribeFromEvents();
+                    await this.subscribeToEvents();
+                } else if (this.lastEventTime === 0) {
+                    // If lastEventTime is 0, it means we just subscribed but haven't received any events yet
+                    // Wait a bit longer before considering it a problem
+                    const timeSinceSubscription = now - (this.connectionTime || now);
+                    if (timeSinceSubscription > fiveMinutesMs) {
+                        logger.log(`No events received since subscription (${Math.round(timeSinceSubscription / 60_000)} minutes ago), restarting event listener`);
+                        await this.unsubscribeFromEvents();
+                        await this.subscribeToEvents();
+                    }
+                }
+            } catch (e) {
+                logger.debug(`Error in event check: ${e?.message || String(e)}`);
+            }
+        }, 5_000); // Check every minute
+    }
+
+    /**
+     * Stop event check interval
+     */
+    private stopEventCheck(): void {
+        if (this.eventCheckInterval) {
+            clearInterval(this.eventCheckInterval);
+            this.eventCheckInterval = undefined;
+        }
+        this.lastEventTime = 0;
+    }
+
+    /**
      * Subscribe to Baichuan simple events
      */
     async subscribeToEvents(): Promise<void> {
@@ -643,10 +708,19 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             return;
         }
 
-        // Subscribe to events
+        // Subscribe to events with wrapper to track last event time
         try {
-            await api.onSimpleEvent(callbacks.onSimpleEvent);
+            const originalHandler = callbacks.onSimpleEvent;
+            const wrappedHandler = (ev: ReolinkSimpleEvent) => {
+                // Update last event time
+                this.lastEventTime = Date.now();
+                // Call original handler
+                originalHandler(ev);
+            };
+            
+            await api.onSimpleEvent(wrappedHandler);
             this.eventSubscriptionActive = true;
+            this.lastEventTime = Date.now(); // Initialize on subscription
             logger.log('Subscribed to Baichuan events');
         }
         catch (e) {
