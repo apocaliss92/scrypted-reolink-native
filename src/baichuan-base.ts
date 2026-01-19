@@ -640,16 +640,16 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
                 if (this.lastEventTime > 0 && timeSinceLastEvent > fiveMinutesMs) {
                     logger.log(`No events received in the last ${Math.round(timeSinceLastEvent / 60_000)} minutes, restarting event listener`);
                     // Restart event subscription
-                    await this.unsubscribeFromEvents();
-                    await this.subscribeToEvents();
+                    await this.unsubscribeFromEvents(true);
+                    await this.subscribeToEvents(true);
                 } else if (this.lastEventTime === 0) {
                     // If lastEventTime is 0, it means we just subscribed but haven't received any events yet
                     // Wait a bit longer before considering it a problem
                     const timeSinceSubscription = now - (this.connectionTime || now);
                     if (timeSinceSubscription > fiveMinutesMs) {
                         logger.log(`No events received since subscription (${Math.round(timeSinceSubscription / 60_000)} minutes ago), restarting event listener`);
-                        await this.unsubscribeFromEvents();
-                        await this.subscribeToEvents();
+                        await this.unsubscribeFromEvents(true);
+                        await this.subscribeToEvents(true);
                     }
                 }
             } catch (e) {
@@ -672,7 +672,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
     /**
      * Subscribe to Baichuan simple events
      */
-    async subscribeToEvents(): Promise<void> {
+    async subscribeToEvents(silent: boolean = false): Promise<void> {
         const logger = this.getBaichuanLogger();
         const callbacks = this.getConnectionCallbacks();
 
@@ -691,7 +691,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         }
 
         // Unsubscribe first if handler exists (idempotent)
-        await this.unsubscribeFromEvents();
+        await this.unsubscribeFromEvents(silent);
 
         // Get Baichuan client connection
         const api = await this.ensureBaichuanClient();
@@ -721,7 +721,9 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             await api.onSimpleEvent(wrappedHandler);
             this.eventSubscriptionActive = true;
             this.lastEventTime = Date.now(); // Initialize on subscription
-            logger.debug('Subscribed to Baichuan events');
+            if (!silent) {
+                logger.debug('Subscribed to Baichuan events');
+            }
         }
         catch (e) {
             logger.warn('Failed to subscribe to events', e?.message || String(e));
@@ -731,8 +733,9 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
 
     /**
      * Unsubscribe from Baichuan simple events
+     * @param silent If true, don't log unsubscription messages
      */
-    async unsubscribeFromEvents(): Promise<void> {
+    async unsubscribeFromEvents(silent: boolean = false): Promise<void> {
         const logger = this.getBaichuanLogger();
         const callbacks = this.getConnectionCallbacks();
 
@@ -740,10 +743,14 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         if (this.eventSubscriptionActive && this.baichuanApi && callbacks.onSimpleEvent) {
             try {
                 this.baichuanApi.offSimpleEvent(callbacks.onSimpleEvent);
-                logger.debug('Unsubscribed from Baichuan events');
+                if (!silent) {
+                    logger.debug('Unsubscribed from Baichuan events');
+                }
             }
             catch (e) {
-                logger.warn('Error unsubscribing from events', e?.message || String(e));
+                if (!silent) {
+                    logger.warn('Error unsubscribing from events', e?.message || String(e));
+                }
             }
         }
 
