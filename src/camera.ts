@@ -2444,13 +2444,16 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
 
                     // Order streams based on preferredStreams setting
                     const preferredOrder = this.storageSettings.values.preferredStreams || 'Default';
-                    let supportedStreams: any[] = [];
+                    let supportedStreams: ReolinkSupportedStream[] = [];
 
                     if (preferredOrder === 'Default') {
                         // Default: Native -> RTSP -> RTMP
-                        supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
-                        // // Default: RTSP -> RTMP -> Native
-                        // supportedStreams = [...rtspStreams, ...rtmpStreams, ...nativeStreams];
+                        // BUT for multifocal cameras without NVR, prefer RTSP -> RTMP -> Native
+                        if (this.multiFocalDevice && !this.nvrDevice) {
+                            supportedStreams = [...rtspStreams, ...rtmpStreams, ...nativeStreams];
+                        } else {
+                            supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
+                        }
                     } else if (preferredOrder === 'Native') {
                         supportedStreams = [...nativeStreams, ...rtspStreams, ...rtmpStreams];
                     } else if (preferredOrder === 'RTSP') {
