@@ -1513,6 +1513,13 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
     }
 
     /**
+     * Get StreamManager if available
+     */
+    protected getStreamManager(): StreamManager | undefined {
+        return this.streamManager;
+    }
+
+    /**
      * Initialize or recreate the StreamManager, taking into account multifocal composite options.
      */
     protected initStreamManager(logger?: Console, forceRecreate: boolean = false): void {
@@ -2790,6 +2797,9 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
                 if (wasSleeping) {
                     this.getBaichuanLogger().log(`Camera is awake`);
                     this.sleeping = false;
+                    const client = await this.ensureClient();
+                    await client.wakeUp();
+                    await this.takePictureInternal(client);
                 }
 
                 if (wasSleeping) {

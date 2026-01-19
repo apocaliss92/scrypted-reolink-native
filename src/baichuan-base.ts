@@ -1,6 +1,7 @@
 import type { BaichuanClientOptions, ReolinkBaichuanApi, ReolinkSimpleEvent } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import { ScryptedDeviceBase } from "@scrypted/sdk";
 import { createBaichuanApi, type BaichuanTransport } from "./connect";
+import { StreamManager } from "./stream-utils";
 
 export interface BaichuanConnectionConfig {
     host: string;
@@ -176,6 +177,9 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
     private lastDisconnectTime: number = 0;
     private readonly reconnectBackoffMs: number = 2000; // 2 seconds minimum between reconnects
     private eventSubscriptionActive: boolean = false;
+    private pingInterval?: NodeJS.Timeout;
+    private autoRenewInterval?: NodeJS.Timeout;
+    private consecutivePingFailures: number = 0;
 
     /**
      * Get the connection configuration for this instance
@@ -203,6 +207,12 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
      * @param streamKey The unique stream key (e.g., "composite_default_main", "channel_0_main", etc.)
      */
     protected abstract getStreamClientInputs(): BaichuanConnectionConfig;
+
+    /**
+     * Get StreamManager if available (optional, only for devices that support streaming)
+     * Override in subclasses that have a StreamManager
+     */
+    protected getStreamManager?(): StreamManager | undefined;
 
     /**
      * Get a Baichuan logger instance with formatting and debug control
@@ -292,6 +302,11 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
 
                 this.baichuanApi = api;
                 this.connectionTime = Date.now();
+
+                // Start ping and auto-renewal for TCP connections
+                if (this.transport === 'tcp') {
+                    this.startConnectionMaintenance(api);
+                }
 
                 return api;
             }
@@ -449,9 +464,144 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             // ignore
         }
 
+        // Stop ping and auto-renewal intervals
+        this.stopConnectionMaintenance();
+
         // Reset state
         this.baichuanApi = undefined;
         this.ensureClientPromise = undefined;
+    }
+
+    /**
+     * Get all active Baichuan connections (main + stream clients)
+     */
+    private getAllActiveConnections(): ReolinkBaichuanApi[] {
+        const connections: ReolinkBaichuanApi[] = [];
+        
+        // Add main connection if exists and is valid
+        if (this.baichuanApi) {
+            const isConnected = this.baichuanApi.client.isSocketConnected();
+            const isLoggedIn = this.baichuanApi.client.loggedIn;
+            if (isConnected && isLoggedIn) {
+                connections.push(this.baichuanApi);
+            }
+        }
+        
+        // Add all stream clients that are valid
+        for (const streamClient of this.streamClients.values()) {
+            const isConnected = streamClient.client.isSocketConnected();
+            const isLoggedIn = streamClient.client.loggedIn;
+            if (isConnected && isLoggedIn) {
+                connections.push(streamClient);
+            }
+        }
+        
+        return connections;
+    }
+
+    /**
+     * Start ping and auto-renewal maintenance for TCP connections
+     */
+    private startConnectionMaintenance(api: ReolinkBaichuanApi): void {
+        const logger = this.getBaichuanLogger();
+        
+        // Stop any existing intervals
+        this.stopConnectionMaintenance();
+
+        // Ping every 30 seconds to keep all connections alive
+        this.pingInterval = setInterval(async () => {
+            if (!this.baichuanApi || this.baichuanApi !== api) {
+                return; // Connection changed, stop this interval
+            }
+
+            try {
+                // Get all active connections (main + stream clients)
+                const allConnections = this.getAllActiveConnections();
+                logger.debug(`Pinging ${allConnections.length} connections`);
+                
+                if (allConnections.length === 0) {
+                    this.consecutivePingFailures++;
+                    logger.debug(`No active connections found, failures=${this.consecutivePingFailures}`);
+                    
+                    if (this.consecutivePingFailures >= 3) {
+                        logger.log('No active connections detected, renewing connection');
+                        await this.cleanupBaichuanApi();
+                        this.consecutivePingFailures = 0;
+                    }
+                    return;
+                }
+
+                // Ping all connections using the specific ping method
+                const pingResults = await Promise.allSettled(
+                    allConnections.map(async (conn) => {
+                        try {
+                            await conn.ping();
+                            return { success: true, conn };
+                        } catch (e) {
+                            return { success: false, conn, error: e };
+                        }
+                    })
+                );
+
+                // Check results
+                const failedPings = pingResults.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.success));
+
+                if (failedPings.length > 0) {
+                    this.consecutivePingFailures++;
+                    logger.debug(`Ping failed for ${failedPings.length}/${allConnections.length} connections, failures=${this.consecutivePingFailures}`);
+                    
+                    if (this.consecutivePingFailures >= 3) {
+                        logger.log(`Multiple ping failures detected (${failedPings.length} connections), renewing connection`);
+                        await this.cleanupBaichuanApi();
+                        this.consecutivePingFailures = 0;
+                    }
+                } else {
+                    // All pings successful, reset failure counter
+                    this.consecutivePingFailures = 0;
+                    if (allConnections.length > 1) {
+                        logger.debug(`Ping successful for all ${allConnections.length} connections`);
+                    }
+                }
+            } catch (e) {
+                logger.debug(`Error in ping check: ${e?.message || String(e)}`);
+            }
+        }, 30_000); // Every 30 seconds
+
+        // Auto-renewal every 5 minutes if no active streams
+        this.autoRenewInterval = setInterval(async () => {
+            if (!this.baichuanApi || this.baichuanApi !== api) {
+                return; // Connection changed, stop this interval
+            }
+
+            try {
+                // Check if there are active streams
+                const hasActiveStreams = this.getStreamManager?.()?.hasActiveStreams() ?? false;
+                
+                if (!hasActiveStreams) {
+                    logger.log('No active streams detected, renewing connection (auto-renewal)');
+                    await this.cleanupBaichuanApi();
+                } else {
+                    logger.debug('Active streams detected, skipping auto-renewal');
+                }
+            } catch (e) {
+                logger.debug(`Error in auto-renewal check: ${e?.message || String(e)}`);
+            }
+        }, 5 * 60_000); // Every 5 minutes
+    }
+
+    /**
+     * Stop ping and auto-renewal maintenance
+     */
+    private stopConnectionMaintenance(): void {
+        if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+            this.pingInterval = undefined;
+        }
+        if (this.autoRenewInterval) {
+            clearInterval(this.autoRenewInterval);
+            this.autoRenewInterval = undefined;
+        }
+        this.consecutivePingFailures = 0;
     }
 
     /**

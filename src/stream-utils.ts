@@ -457,6 +457,18 @@ export class StreamManager {
     }
 
     /**
+     * Check if there are any active streams (servers that are listening).
+     */
+    hasActiveStreams(): boolean {
+        for (const server of this.nativeRfcServers.values()) {
+            if (server?.server?.listening) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Close all active stream servers.
      * Useful when the main connection is reset and streams need to be recreated.
      */
