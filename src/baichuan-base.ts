@@ -721,7 +721,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             await api.onSimpleEvent(wrappedHandler);
             this.eventSubscriptionActive = true;
             this.lastEventTime = Date.now(); // Initialize on subscription
-            logger.log('Subscribed to Baichuan events');
+            logger.debug('Subscribed to Baichuan events');
         }
         catch (e) {
             logger.warn('Failed to subscribe to events', e?.message || String(e));
