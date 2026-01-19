@@ -2794,11 +2794,22 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             this.storageSettings.settings.username.defaultValue = parentDevice.storageSettings.values.username;
             this.storageSettings.settings.password.defaultValue = parentDevice.storageSettings.values.password;
             this.storageSettings.settings.ipAddress.defaultValue = parentDevice.storageSettings.values.ipAddress;
+        } else {
+            this.storageSettings.settings.username.hide = false;
+            this.storageSettings.settings.password.hide = false;
+            this.storageSettings.settings.ipAddress.hide = false;
+            this.storageSettings.settings.uid.hide = false;
         }
 
         this.updateVideoClipsAutoLoad();
 
         this.onDeviceEvent(ScryptedInterface.Settings, '');
+
+        try {
+            await this.getVideoStreamOptions();
+        } catch (e) {
+            logger.error('Failed to get video stream options in init', e?.message || String(e));
+        }
     }
 
     async updateSleepingState(sleepStatus: SleepStatus): Promise<void> {
