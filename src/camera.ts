@@ -341,11 +341,25 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             defaultValue: [],
         },
         intercomBlocksPerPayload: {
-            subgroup: 'Advanced',
-            title: 'Intercom Blocks Per Payload',
+            subgroup: 'Intercom',
+            title: 'Blocks Per Payload',
             description: 'Lower reduces latency (more packets). Typical: 1-4. Requires restarting talk session to take effect.',
             type: 'number',
             defaultValue: 1,
+        },
+        intercomMaxBacklogMs: {
+            subgroup: 'Intercom',
+            title: 'Max Backlog (ms)',
+            description: 'Maximum PCM backlog before dropping old audio to cap latency. Higher improves stability on slow systems but increases latency. Typical: 80-250. Requires restarting talk session to take effect.',
+            type: 'number',
+            defaultValue: 120,
+        },
+        intercomGain: {
+            subgroup: 'Intercom',
+            title: 'Gain',
+            description: 'Output gain multiplier applied before encoding. 1.0 = normal, 2.0 ≈ +6dB, 0.5 ≈ -6dB. Requires restarting talk session to take effect.',
+            type: 'number',
+            defaultValue: 1.0,
         },
         // PTZ Presets
         presets: {

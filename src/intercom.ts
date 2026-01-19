@@ -7,25 +7,37 @@ import { ReolinkCamera } from "./camera";
 // A small backlog avoids multi-second latency when the pipeline stalls.
 // Aim for ~1 block of latency (a block is ~64ms at 16kHz for Reolink talk).
 // This clamps the internal buffer to (approximately) one block.
-const DEFAULT_MAX_BACKLOG_MS = 40;
+const DEFAULT_MAX_BACKLOG_MS = 120;
 
 export class ReolinkBaichuanIntercom {
+    private intercomApi: ReolinkBaichuanApi | undefined;
     private session: Awaited<ReturnType<ReolinkBaichuanApi["createTalkSession"]>> | undefined;
     private ffmpeg: ChildProcessWithoutNullStreams | undefined;
     private stopping: Promise<void> | undefined;
     private loggedCodecInfo = false;
 
-    private readonly maxBacklogMs = DEFAULT_MAX_BACKLOG_MS;
+    private maxBacklogMs = DEFAULT_MAX_BACKLOG_MS;
     private maxBacklogBytes: number | undefined;
 
-    private sendChain: Promise<void> = Promise.resolve();
     private pcmBuffer: Buffer = Buffer.alloc(0);
+
+    private pumping = false;
+    private pumpPromise: Promise<void> | undefined;
+
+    private lastBacklogClampLogAtMs = 0;
 
     constructor(private camera: ReolinkCamera) {
     }
 
     get blocksPerPayload(): number {
         return Math.max(1, Math.min(8, this.camera.storageSettings.values.intercomBlocksPerPayload ?? 1));
+    }
+
+    private get outputGain(): number {
+        const configured = Number(this.camera.storageSettings.values.intercomGain);
+        // Keep safe bounds: too high can clip and distort.
+        if (Number.isFinite(configured)) return Math.max(0.1, Math.min(10, configured));
+        return 1.0;
     }
 
     async start(media: MediaObject): Promise<void> {
@@ -39,13 +51,21 @@ export class ReolinkBaichuanIntercom {
         await this.stop();
         const channel = this.camera.storageSettings.values.rtspChannel;
 
+        try {
+            // IMPORTANT: intercom must run on its own independent Baichuan session (separate socket)
+            // to avoid interference with any other sessions (streams/events/etc).
+            const intercomStreamKey = `intercom_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+            const intercomApi = await this.camera.withBaichuanRetry(async () => {
+                return await this.camera.createStreamClient(intercomStreamKey);
+            });
+            this.intercomApi = intercomApi;
+
         // Best-effort: log codec requirements exposed by the camera.
         // This mirrors neolink's source of truth: TalkAbility (cmd_id=10).
         if (!this.loggedCodecInfo) {
             this.loggedCodecInfo = true;
             try {
-                const api = await this.camera.ensureClient();
-                const ability = await api.getTalkAbility(channel);
+                const ability = await intercomApi.getTalkAbility(channel);
                 const audioConfigs = ability.audioConfigList?.map((c) => ({
                     audioType: c.audioType,
                     sampleRate: c.sampleRate,
@@ -66,7 +86,7 @@ export class ReolinkBaichuanIntercom {
         }
 
         const session = await this.camera.withBaichuanRetry(async () => {
-            const api = await this.camera.ensureClient();
+            const api = intercomApi;
             
             // For UDP/battery cameras, wake up the camera if it's sleeping before creating talk session
             if (this.camera.options?.type === 'battery') {
@@ -85,15 +105,30 @@ export class ReolinkBaichuanIntercom {
             
             return await api.createTalkSession(channel, {
                 blocksPerPayload: this.blocksPerPayload,
+                // IMPORTANT: for dedicated intercom sessions, teardown should be owned by the socket/session.
+                // This mirrors stream behavior (closeApiOnTeardown) but for talk: session.stop() will close.
+                closeSocketOnStop: true,
             });
         });
 
         this.session = session;
         this.pcmBuffer = Buffer.alloc(0);
-        this.sendChain = Promise.resolve();
+        this.pumping = false;
+        this.pumpPromise = undefined;
 
         const { audioConfig, blockSize, fullBlockSize } = session.info;
         const sampleRate = audioConfig.sampleRate;
+
+        // Configurable backlog to trade latency vs stability.
+        // If the pipeline (ffmpeg decode + encode + send) can't keep up,
+        // dropping old audio avoids accumulating multi-second latency.
+        const configuredBacklog = Number(this.camera.storageSettings.values.intercomMaxBacklogMs);
+        if (Number.isFinite(configuredBacklog)) {
+            this.maxBacklogMs = Math.max(20, Math.min(5000, configuredBacklog));
+        }
+        else {
+            this.maxBacklogMs = DEFAULT_MAX_BACKLOG_MS;
+        }
 
         // Mirror native-api.ts: receive PCM s16le from the forwarder and encode IMA ADPCM in JS.
         const samplesPerBlock = blockSize * 2 + 1;
@@ -131,9 +166,12 @@ export class ReolinkBaichuanIntercom {
 
         // IMPORTANT: incoming audio from Scrypted/WebRTC is typically Opus.
         // We must decode to PCM before IMA ADPCM encoding, otherwise it will be noise.
+        const gain = this.outputGain;
         const ffmpegArgs = this.buildFfmpegPcmArgs(ffmpegInput, {
             sampleRate,
             channels: 1,
+            gain,
+            logger,
         });
 
         logger.log("Intercom ffmpeg decode args", ffmpegArgs);
@@ -169,6 +207,12 @@ export class ReolinkBaichuanIntercom {
         });
 
         logger.log("Intercom started (ffmpeg decode -> PCM -> IMA ADPCM)");
+        }
+        catch (e) {
+            // Ensure the dedicated session gets torn down even if start fails half-way.
+            await this.stop();
+            throw e;
+        }
     }
 
     stop(): Promise<void> {
@@ -182,6 +226,9 @@ export class ReolinkBaichuanIntercom {
 
             const session = this.session;
             this.session = undefined;
+
+            const intercomApi = this.intercomApi;
+            this.intercomApi = undefined;
 
             this.pcmBuffer = Buffer.alloc(0);
 
@@ -207,12 +254,12 @@ export class ReolinkBaichuanIntercom {
             }
 
             try {
-                await Promise.race([this.sendChain, sleepMs(250)]);
+                await Promise.race([this.pumpPromise ?? Promise.resolve(), sleepMs(250)]);
             }
             catch {
                 // ignore
             }
-            this.sendChain = Promise.resolve();
+            this.pumpPromise = undefined;
 
             if (session) {
                 try {
@@ -220,6 +267,18 @@ export class ReolinkBaichuanIntercom {
                 }
                 catch (e) {
                     logger.warn("Intercom session stop error", e?.message || String(e));
+                }
+            }
+
+            // Socket teardown is handled by session.stop() (closeSocketOnStop).
+            // Fallback cleanup: if we never created a session but we did create a dedicated client,
+            // ensure it doesn't leak.
+            if (!session && intercomApi) {
+                try {
+                    await Promise.race([intercomApi.close(), sleepMs(2000)]);
+                }
+                catch (e) {
+                    logger.warn("Intercom client close error", e?.message || String(e));
                 }
             }
         })().finally(() => {
@@ -243,23 +302,43 @@ export class ReolinkBaichuanIntercom {
     ): void {
         const logger = this.camera.getBaichuanLogger();
 
-        this.sendChain = this.sendChain
-            .then(async () => {
-                if (this.session !== session) return;
+        if (this.session !== session) return;
 
-                this.pcmBuffer = this.pcmBuffer.length
-                    ? Buffer.concat([this.pcmBuffer, pcmChunk])
-                    : pcmChunk;
+        this.pcmBuffer = this.pcmBuffer.length
+            ? Buffer.concat([this.pcmBuffer, pcmChunk])
+            : pcmChunk;
 
-                // Cap backlog to keep latency bounded (drop oldest samples).
-                const maxBytes = this.maxBacklogBytes ?? bytesNeeded;
-                if (this.pcmBuffer.length > maxBytes) {
-                    // Align to 16-bit samples.
-                    const keep = maxBytes - (maxBytes % 2);
-                    this.pcmBuffer = this.pcmBuffer.subarray(this.pcmBuffer.length - keep);
-                }
+        // Cap backlog to keep latency bounded (drop oldest samples).
+        // IMPORTANT: do this on the shared buffer (not in a promise chain),
+        // otherwise old PCM chunks can pile up in queued closures and bypass
+        // this clamp, causing multi-second latency and degraded audio.
+        const maxBytes = this.maxBacklogBytes ?? bytesNeeded;
+        if (this.pcmBuffer.length > maxBytes) {
+            // Align to 16-bit samples.
+            const keep = maxBytes - (maxBytes % 2);
+            const dropped = this.pcmBuffer.length - keep;
+            this.pcmBuffer = this.pcmBuffer.subarray(this.pcmBuffer.length - keep);
 
-                while (this.pcmBuffer.length >= bytesNeeded) {
+            const now = Date.now();
+            if (now - this.lastBacklogClampLogAtMs > 2000) {
+                this.lastBacklogClampLogAtMs = now;
+                logger.warn("Intercom backlog clamped (dropping PCM)", {
+                    droppedBytes: dropped,
+                    keptBytes: keep,
+                    maxBytes,
+                });
+            }
+        }
+
+        if (this.pumping) return;
+
+        this.pumping = true;
+        this.pumpPromise = (async () => {
+            try {
+                while (true) {
+                    if (this.session !== session) return;
+                    if (this.pcmBuffer.length < bytesNeeded) return;
+
                     const chunk = this.pcmBuffer.subarray(0, bytesNeeded);
                     this.pcmBuffer = this.pcmBuffer.subarray(bytesNeeded);
 
@@ -272,10 +351,14 @@ export class ReolinkBaichuanIntercom {
                     const adpcmChunk = this.encodeImaAdpcm(pcmSamples, blockSize);
                     await session.sendAudio(adpcmChunk);
                 }
-            })
-            .catch((e) => {
+            }
+            catch (e) {
                 logger.warn("Intercom PCM->ADPCM pipeline error", e?.message || String(e));
-            });
+            }
+            finally {
+                this.pumping = false;
+            }
+        })();
     }
 
     private buildFfmpegPcmArgs(
@@ -283,6 +366,8 @@ export class ReolinkBaichuanIntercom {
         options: {
             sampleRate: number;
             channels: number;
+            gain?: number;
+            logger?: any;
         },
     ): string[] {
         const inputArgs = ffmpegInput.inputArguments ?? [];
@@ -314,6 +399,16 @@ export class ReolinkBaichuanIntercom {
             throw new Error("FFmpegInput missing url/input");
         }
 
+        const gain = options.gain ?? 1.0;
+        const hasExistingAudioFilter = sanitizedArgs.includes("-af") || sanitizedArgs.includes("-filter:a") || sanitizedArgs.includes("-filter_complex");
+        const gainArgs = (gain !== 1.0)
+            ? (
+                hasExistingAudioFilter
+                    ? (options.logger?.warn?.("Intercom gain skipped: FFmpegInput already contains audio filters") ?? undefined, [])
+                    : ["-filter:a", `volume=${gain}`]
+            )
+            : [];
+
         return [
             ...sanitizedArgs,
             "-i", url,
@@ -326,6 +421,7 @@ export class ReolinkBaichuanIntercom {
             "-flush_packets", "1",
 
             "-vn", "-sn", "-dn",
+            ...gainArgs,
             "-acodec", "pcm_s16le",
             "-ar", options.sampleRate.toString(),
             "-ac", options.channels.toString(),
