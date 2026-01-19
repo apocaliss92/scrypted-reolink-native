@@ -369,6 +369,22 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                     isMultifocal,
                     identifier,
                 });
+                
+                // Check if device already exists in cameraNativeMap with a different nativeId format
+                // (e.g., with chN- prefix). If so, use that nativeId for the mapping.
+                let actualNativeId = nativeId;
+                const existingDevice = Array.from(this.cameraNativeMap.entries()).find(([id, camera]) => {
+                    // Check if the camera matches by channel or UID
+                    const cameraChannel = camera.storageSettings.values.rtspChannel;
+                    const cameraUid = camera.storageSettings.values.uid;
+                    return cameraChannel === channel || (uid && cameraUid === uid);
+                });
+                
+                if (existingDevice) {
+                    actualNativeId = existingDevice[0];
+                    logger.debug(`[syncEntities] Using existing nativeId for channel ${channel}: ${actualNativeId} (instead of ${nativeId})`);
+                }
+                
                 const interfaces = [ScryptedInterface.VideoCamera];
                 if (isBattery) {
                     interfaces.push(ScryptedInterface.Battery);
@@ -388,7 +404,7 @@ export class ReolinkNativeNvrDevice extends BaseBaichuanClass implements Setting
                     }
                 };
 
-                this.channelToNativeIdMap.set(channel, nativeId);
+                this.channelToNativeIdMap.set(channel, actualNativeId);
 
                 const allNativeIds = sdk.deviceManager.getNativeIds().filter(nid => !!nid);
 

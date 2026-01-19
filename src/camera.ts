@@ -241,12 +241,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             description: 'Order preference for video streams. Default: RTSP -> RTMP -> Native',
             defaultValue: 'Default',
             choices: ['Default', 'Native', 'RTSP', 'RTMP'],
-            subgroup: 'Streaming',
         },
-        // capabilities: {
-        //     json: true,
-        //     hide: true,
-        // },
         multifocalInfo: {
             json: true,
             hide: true,
