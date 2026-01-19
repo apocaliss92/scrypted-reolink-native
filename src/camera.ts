@@ -2070,7 +2070,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
     async takePictureInternal(client: ReolinkBaichuanApi) {
         const { rtspChannel, variantType } = this.storageSettings.values;
         const logger = this.getBaichuanLogger();
-        logger.log(`Taking new snapshot from camera: forceNewSnapshot=${this.forceNewSnapshot} channel=${rtspChannel} variant=${variantType}`);
+        logger.debug(`Taking new snapshot from camera: forceNewSnapshot=${this.forceNewSnapshot} channel=${rtspChannel} variant=${variantType}`);
 
         const compositeOptions = this.isMultiFocal ? {
             widerChannel: this.isOnNvr ? rtspChannel : undefined,
@@ -2124,7 +2124,7 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
             }
 
             if (!shouldTakeNewSnapshot && this.lastPicture) {
-                logger.log(`Returning cached snapshot, taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
+                logger.debug(`Returning cached snapshot, taken at ${new Date(this.lastPicture.atMs).toLocaleString()}`);
                 return this.lastPicture.mo;
             }
 
@@ -2781,14 +2781,14 @@ export class ReolinkCamera extends BaseBaichuanClass implements VideoCamera, Cam
 
             if (sleepStatus.state === 'sleeping') {
                 if (!this.sleeping) {
-                    this.getBaichuanLogger().log(`Camera is sleeping: ${sleepStatus.reason}`);
+                    this.getBaichuanLogger().log(`Camera is sleeping`);
                     this.sleeping = true;
                 }
             } else if (sleepStatus.state === 'awake') {
                 // Camera is awake
                 const wasSleeping = this.sleeping;
                 if (wasSleeping) {
-                    this.getBaichuanLogger().log(`Camera woke up: ${sleepStatus.reason}`);
+                    this.getBaichuanLogger().log(`Camera is awake`);
                     this.sleeping = false;
                 }
 
