@@ -1,14 +1,9 @@
 import type {
   DeviceCapabilities,
-  EnrichedRecordingFile,
-  NativeVideoStreamVariant,
-  ParsedRecordingFileName,
   RecordingFile,
   ReolinkBaichuanApi,
   ReolinkDeviceInfo,
-  ReolinkSupportedStream,
-  VodFile,
-  VodSearchResponse,
+  ReolinkSupportedStream
 } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, {
   DeviceBase,
@@ -18,17 +13,10 @@ import sdk, {
   ScryptedDeviceBase,
   ScryptedDeviceType,
   ScryptedInterface,
-  ScryptedMimeTypes,
   VideoClip,
-  VideoClips,
 } from "@scrypted/sdk";
-import { spawn } from "node:child_process";
-import { Readable } from "stream";
-import http from "http";
-import https from "https";
-import fs from "fs";
-import path from "path";
 import crypto from "crypto";
+import path from "path";
 import { ReolinkCamera } from "./camera";
 /**
  * Sanitize FFmpeg output or URLs to avoid leaking credentials
@@ -175,10 +163,10 @@ export const updateDeviceInfo = async (props: {
 };
 
 /**
- * Convert a Reolink RecordingFile or EnrichedRecordingFile to a Scrypted VideoClip
+ * Convert a Reolink RecordingFile to a Scrypted VideoClip
  */
 export async function recordingFileToVideoClip(
-  rec: RecordingFile | EnrichedRecordingFile,
+  rec: RecordingFile,
   options: {
     /** Fallback start date if recording doesn't have one */
     fallbackStart: Date;
@@ -206,22 +194,18 @@ export async function recordingFileToVideoClip(
     useWebhook,
   } = options;
 
-  // Handle both RecordingFile (has startTime/endTime as Date) and EnrichedRecordingFile (has startTimeMs/endTimeMs as number)
+  // Handle RecordingFile (has startTime/endTime as Date)
   let recStart: Date;
   let recEnd: Date;
 
   if ("startTime" in rec && rec.startTime instanceof Date) {
     recStart = rec.startTime;
-  } else if ("startTimeMs" in rec && typeof rec.startTimeMs === "number") {
-    recStart = new Date(rec.startTimeMs);
   } else {
     recStart = rec.parsedFileName?.start ?? fallbackStart;
   }
 
   if ("endTime" in rec && rec.endTime instanceof Date) {
     recEnd = rec.endTime;
-  } else if ("endTimeMs" in rec && typeof rec.endTimeMs === "number") {
-    recEnd = new Date(rec.endTimeMs);
   } else {
     recEnd = rec.parsedFileName?.end ?? recStart;
   }
@@ -302,52 +286,41 @@ export async function recordingFileToVideoClip(
       ? rec.name
       : (rec.fileName ?? rec.id ?? "");
 
-  // Build detectionClasses from flags or recordType
+  // Build detectionClasses from parsedFileName.flags or recordType
   const detectionClasses: string[] = [];
 
-  // Check for EnrichedRecordingFile flags first (most accurate)
+  // Check parsedFileName.flags first (from filename hex decoding)
   let hasAnyDetection = false;
-  if ("hasPerson" in rec && rec.hasPerson) {
-    detectionClasses.push("Person");
-    hasAnyDetection = true;
-  }
-  if ("hasVehicle" in rec && rec.hasVehicle) {
-    detectionClasses.push("Vehicle");
-    hasAnyDetection = true;
-  }
-  if ("hasAnimal" in rec && rec.hasAnimal) {
-    detectionClasses.push("Animal");
-    hasAnyDetection = true;
-  }
-  if ("hasFace" in rec && rec.hasFace) {
-    detectionClasses.push("Face");
-    hasAnyDetection = true;
-  }
-  if ("hasMotion" in rec && rec.hasMotion) {
-    detectionClasses.push("Motion");
-    hasAnyDetection = true;
-  }
-  if ("hasDoorbell" in rec && rec.hasDoorbell) {
-    detectionClasses.push("Doorbell");
-    hasAnyDetection = true;
-  }
-  if ("hasPackage" in rec && rec.hasPackage) {
-    detectionClasses.push("Package");
-    hasAnyDetection = true;
-  }
-
-  // Log detection flags for debugging
-  if (logger) {
-    const flags = {
-      hasPerson: "hasPerson" in rec ? rec.hasPerson : undefined,
-      hasVehicle: "hasVehicle" in rec ? rec.hasVehicle : undefined,
-      hasAnimal: "hasAnimal" in rec ? rec.hasAnimal : undefined,
-      hasFace: "hasFace" in rec ? rec.hasFace : undefined,
-      hasMotion: "hasMotion" in rec ? rec.hasMotion : undefined,
-      hasDoorbell: "hasDoorbell" in rec ? rec.hasDoorbell : undefined,
-      hasPackage: "hasPackage" in rec ? rec.hasPackage : undefined,
-      recordType: rec.recordType || "none",
-    };
+  const flags = rec.parsedFileName?.flags;
+  if (flags) {
+    if (flags.aiPerson) {
+      detectionClasses.push("Person");
+      hasAnyDetection = true;
+    }
+    if (flags.aiVehicle) {
+      detectionClasses.push("Vehicle");
+      hasAnyDetection = true;
+    }
+    if (flags.aiAnimal) {
+      detectionClasses.push("Animal");
+      hasAnyDetection = true;
+    }
+    if (flags.aiFace) {
+      detectionClasses.push("Face");
+      hasAnyDetection = true;
+    }
+    if (flags.motion) {
+      detectionClasses.push("Motion");
+      hasAnyDetection = true;
+    }
+    if (flags.doorbell) {
+      detectionClasses.push("Doorbell");
+      hasAnyDetection = true;
+    }
+    if (flags.package) {
+      detectionClasses.push("Package");
+      hasAnyDetection = true;
+    }
   }
 
   // Fallback: parse recordType string if flags are not available
@@ -411,12 +384,11 @@ export async function recordingFileToVideoClip(
 }
 
 /**
- * Convert an array of RecordingFile or EnrichedRecordingFile to VideoClip array
+ * Convert an array of RecordingFile to VideoClip array
  * Uses recordingFileToVideoClip for each recording
- * Handles both NVR (EnrichedRecordingFile) and device standalone (RecordingFile) cases
  */
 export async function recordingsToVideoClips(
-  recordings: (RecordingFile | EnrichedRecordingFile)[],
+  recordings: RecordingFile[],
   options: {
     /** Fallback start date if recording doesn't have one */
     fallbackStart: Date;
@@ -528,60 +500,10 @@ export async function getVideoClipWebhookUrls(props: {
 }
 
 /**
- * Extract a thumbnail frame from video using ffmpeg
- */
-export async function extractThumbnailFromVideo(props: {
-  rtmpUrl?: string;
-  filePath?: string;
-  fileId: string;
-  deviceId: string;
-  logger?: Console;
-  device?: ReolinkCamera;
-}): Promise<MediaObject> {
-  const { rtmpUrl, filePath, fileId, deviceId, device } = props;
-  // Use device logger if available, otherwise fallback to provided logger
-  const logger = device?.getBaichuanLogger?.() || props.logger || console;
-
-  // Use file path if available, otherwise use RTMP URL
-  const inputSource = filePath || rtmpUrl;
-  if (!inputSource) {
-    throw new Error("Either rtmpUrl or filePath must be provided");
-  }
-
-  try {
-    // Use createFFmpegMediaObject which handles codec detection better
-    // For Download URLs from NVR, they might return only a short segment, so use 1 second instead of 5
-    const mo = await sdk.mediaManager.createFFmpegMediaObject({
-      inputArguments: [
-        "-ss",
-        "00:00:01", // Seek to 1 second (safer for short segments from NVR Download URLs)
-        "-i",
-        inputSource,
-      ],
-    });
-    return mo;
-  } catch (e) {
-    // Error already logged in main.ts
-    throw e?.message || String(e);
-  }
-}
-
-/**
- * Get cache file path for a video clip
- */
-function getVideoClipCachePath(deviceId: string, fileId: string): string {
-  const pluginVolume = process.env.SCRYPTED_PLUGIN_VOLUME || "";
-  // Create a safe filename from fileId using hash
-  const hash = crypto.createHash("md5").update(fileId).digest("hex");
-  // Keep original extension if present, otherwise use .mp4
-  const ext = fileId.includes(".") ? path.extname(fileId) : ".mp4";
-  const cacheDir = path.join(pluginVolume, "videoclips", deviceId);
-  return path.join(cacheDir, `${hash}${ext}`);
-}
-
-/**
  * Handle video clip webhook request
- * Checks cache first, then proxies RTMP stream if not cached
+ * Uses progressive streaming for immediate playback.
+ * Stream management (stopping previous streams, cooldown) is handled by the API layer
+ * in ReolinkBaichuanApi.createRecordingReplayMp4Stream via activeReplayStreams per channel.
  */
 export async function handleVideoClipRequest(props: {
   device: ReolinkCamera;
@@ -591,700 +513,127 @@ export async function handleVideoClipRequest(props: {
   response: HttpResponse;
   logger?: Console;
 }): Promise<void> {
-  const { device, deviceId, fileId, request, response } = props;
+  const { device, fileId, request, response } = props;
   const logger = device.getBaichuanLogger?.() || props.logger || console;
+  const useHttpSource =
+    device.storageSettings?.values?.videoclipSource === "HTTP";
 
-  // Check if file is cached
-  const cachePath = getVideoClipCachePath(deviceId, fileId);
-  const MIN_VIDEO_CACHE_BYTES = 16 * 1024; // 16KB, evita file quasi vuoti/corrotti
+  logger.log(
+    `[VideoClip] REQUEST: fileId=${fileId.slice(-40)}, isOnNvr=${device.isOnNvr}, source=${useHttpSource ? "HTTP" : "Native"}`,
+  );
 
   try {
-    // Check if cached file exists
-    const stat = await fs.promises.stat(cachePath);
-    const fileSize = stat.size;
-    const range = request.headers.range;
+    const api = await device.ensureClient();
+    const channel = device.storageSettings?.values?.rtspChannel ?? 0;
 
-    if (fileSize < MIN_VIDEO_CACHE_BYTES) {
-      logger.warn(
-        `Cached video clip too small, deleting and reloading: fileId=${fileId}, size=${fileSize} bytes`,
-      );
-      try {
-        await fs.promises.unlink(cachePath);
-      } catch (unlinkErr) {
-        logger.warn(
-          `Failed to delete small cached video clip: fileId=${fileId}`,
-          unlinkErr?.message || String(unlinkErr),
-        );
-      }
-      // Force cache miss path below
-      throw new Error("Cached video too small, deleted");
-    }
+    if (useHttpSource) {
+      // HTTP mode: use CGI API to download the video file
+      logger.debug(`[VideoClip] Using CGI API (HTTP) to download: ${fileId}`);
 
-    logger.log(
-      `Serving cached video clip: fileId=${fileId}, size=${fileSize}, range=${range}`,
-    );
+      const mp4Buffer = await api.downloadVod(fileId, {
+        output: fileId,
+      });
 
-    if (range) {
-      // Parse range header
-      const parts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      logger.debug(`[VideoClip] Downloaded via CGI: ${mp4Buffer.length} bytes`);
 
-      const chunksize = end - start + 1;
-      const file = fs.createReadStream(cachePath, { start, end });
-
-      // Send stream with range support
+      // Send the buffer as a complete response
+      const CHUNK_SIZE = 64 * 1024; // 64KB chunks
       response.sendStream(
         (async function* () {
-          for await (const chunk of file) {
-            yield chunk;
+          let offset = 0;
+          while (offset < mp4Buffer.length) {
+            const end = Math.min(offset + CHUNK_SIZE, mp4Buffer.length);
+            yield mp4Buffer.subarray(offset, end);
+            offset = end;
           }
         })(),
         {
-          code: 206,
+          code: 200,
           headers: {
-            "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-            "Accept-Ranges": "bytes",
-            "Content-Length": chunksize.toString(),
             "Content-Type": "video/mp4",
+            "Content-Length": mp4Buffer.length.toString(),
+            "Cache-Control": "no-cache",
           },
         },
       );
       return;
-    } else {
-      // No range header, send full file
-      response.sendFile(cachePath, {
-        code: 200,
-        headers: {
-          "Content-Length": fileSize.toString(),
-          "Content-Type": "video/mp4",
-          "Accept-Ranges": "bytes",
-        },
-      });
-      return;
     }
-  } catch (e) {
-    // File not cached, need to proxy RTMP stream
-    logger.log(`[VideoClip] Stream start: fileId=${fileId}`);
 
-    // Get RTMP URL using the appropriate API (NVR or Baichuan)
-    let rtmpVodUrl: string | undefined;
-    try {
-      rtmpVodUrl = await device.getVideoClipPlaybackUrl(fileId);
-    } catch (e2) {
-      logger.error(
-        `[VideoClip] Stream error: fileId=${fileId}`,
-        e2?.message || String(e2),
+    // Native mode: use Baichuan streaming replay
+    // Add error handler to prevent uncaughtException from client socket errors
+    const onClientError = (err: Error) => {
+      logger.warn?.(
+        `[VideoClip] Client error during stream: ${err?.message || "unknown"}`,
       );
-      response.send("Failed to get RTMP playback URL", { code: 500 });
-      return;
-    }
+    };
+    api.client.on("error", onClientError);
 
-    if (!rtmpVodUrl) {
-      logger.error(`[VideoClip] Stream error: fileId=${fileId} - No URL found`);
-      response.send("No RTMP playback URL found for video", { code: 404 });
-      return;
-    }
-
-    // Check if URL is HTTP (Playback/Download) or RTMP
-    const isHttpUrl =
-      rtmpVodUrl.startsWith("http://") || rtmpVodUrl.startsWith("https://");
-
-    if (isHttpUrl) {
-      // For HTTP URLs (Playback/Download from NVR), do direct HTTP proxy with ranged headers support
-      logger.debug(
-        `Proxying HTTP URL directly: fileId=${fileId}, url=${rtmpVodUrl}`,
-      );
-
-      const sendVideo = async () => {
-        // Pre-fetch ffmpeg path in case we need it for FLV conversion
-        const ffmpegPathPromise = sdk.mediaManager.getFFmpegPath();
-
-        return new Promise<void>(async (resolve, reject) => {
-          const urlObj = new URL(rtmpVodUrl);
-          const httpModule = urlObj.protocol === "https:" ? https : http;
-
-          // Filter and prepare headers (remove host, connection, etc. that shouldn't be forwarded)
-          const requestHeaders: Record<string, string> = {};
-          if (request.headers.range) {
-            requestHeaders["Range"] = request.headers.range;
-          }
-          // Add other headers that might be needed
-          if (request.headers["user-agent"]) {
-            requestHeaders["User-Agent"] = request.headers["user-agent"];
-          }
-
-          const options = {
-            hostname: urlObj.hostname,
-            port: urlObj.port || (urlObj.protocol === "https:" ? 443 : 80),
-            path: urlObj.pathname + urlObj.search,
-            method: "GET",
-            headers: requestHeaders,
-          };
-
-          logger.debug(
-            `Starting HTTP request: ${rtmpVodUrl}, headers: ${JSON.stringify(requestHeaders)}`,
-          );
-
-          httpModule
-            .get(options, async (httpResponse) => {
-              if (httpResponse.statusCode && httpResponse.statusCode >= 400) {
-                logger.error(
-                  `HTTP error: status=${httpResponse.statusCode}, message=${httpResponse.statusMessage}`,
-                );
-                reject(
-                  new Error(
-                    `Error loading the video: ${httpResponse.statusCode} - ${httpResponse.statusMessage}`,
-                  ),
-                );
-                return;
-              }
-
-              let contentType =
-                httpResponse.headers["content-type"] || "video/mp4";
-              const contentLength = httpResponse.headers["content-length"];
-              const contentRange = httpResponse.headers["content-range"];
-              const acceptRanges =
-                httpResponse.headers["accept-ranges"] || "bytes";
-
-              // Check if we need to convert FLV to MP4
-              const isFlv =
-                typeof contentType === "string" &&
-                (contentType === "video/x-flv" || contentType === "video/flv");
-
-              if (isFlv) {
-                logger.debug(
-                  `Content-Type is FLV (${contentType}), will convert to MP4 using ffmpeg`,
-                );
-              }
-
-              const responseHeaders: Record<string, string> = {
-                "Content-Type":
-                  typeof contentType === "string" ? contentType : "video/mp4",
-                "Accept-Ranges":
-                  typeof acceptRanges === "string" ? acceptRanges : "bytes",
-                "Cache-Control": "no-cache",
-              };
-
-              if (contentLength) {
-                responseHeaders["Content-Length"] =
-                  typeof contentLength === "string"
-                    ? contentLength
-                    : String(contentLength);
-              }
-
-              if (contentRange) {
-                responseHeaders["Content-Range"] =
-                  typeof contentRange === "string"
-                    ? contentRange
-                    : String(contentRange);
-              }
-
-              const statusCode = httpResponse.statusCode || 200;
-
-              logger.debug(
-                `HTTP response received: status=${statusCode}, contentType=${contentType}, contentLength=${contentLength || "unknown"}`,
-              );
-
-              try {
-                if (isFlv) {
-                  // Convert FLV to MP4 using ffmpeg
-                  const ffmpegPath = await ffmpegPathPromise;
-                  // Re-encode instead of copy because FLV codec might not be supported
-                  const ffmpegArgs: string[] = [
-                    "-i",
-                    "pipe:0", // Read from stdin (httpResponse)
-                    "-c:v",
-                    "libx264", // Re-encode video to H.264
-                    "-preset",
-                    "ultrafast", // Fast encoding for streaming
-                    "-tune",
-                    "zerolatency", // Low latency
-                    "-c:a",
-                    "aac", // Re-encode audio to AAC
-                    "-f",
-                    "mp4",
-                    "-movflags",
-                    "frag_keyframe+empty_moov", // Enable streaming
-                    "pipe:1", // Output to stdout
-                  ];
-
-                  const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
-                    stdio: ["pipe", "pipe", "pipe"],
-                  });
-
-                  let ffmpegError = "";
-                  ffmpeg.stderr.on("data", (chunk: Buffer) => {
-                    ffmpegError += chunk.toString();
-                  });
-
-                  // Pipe httpResponse to ffmpeg stdin
-                  httpResponse.pipe(ffmpeg.stdin);
-
-                  ffmpeg.stdin.on("error", (err) => {
-                    // Ignore EPIPE errors when ffmpeg closes
-                    if ((err as any).code !== "EPIPE") {
-                      logger.error(
-                        `FFmpeg stdin error: fileId=${fileId}`,
-                        err?.message || String(err),
-                      );
-                    }
-                  });
-
-                  httpResponse.on("error", (err) => {
-                    logger.error(
-                      `HTTP response error before ffmpeg: fileId=${fileId}`,
-                      err?.message || String(err),
-                    );
-                    try {
-                      ffmpeg.kill("SIGKILL");
-                    } catch (e) {
-                      // Ignore
-                    }
-                  });
-
-                  let streamStarted = false;
-
-                  // Stream ffmpeg output
-                  response.sendStream(
-                    (async function* () {
-                      try {
-                        for await (const chunk of ffmpeg.stdout) {
-                          if (!streamStarted) {
-                            streamStarted = true;
-                          }
-                          yield chunk;
-                        }
-                      } catch (e) {
-                        logger.error(
-                          `Error streaming ffmpeg output: fileId=${fileId}`,
-                          e?.message || String(e),
-                        );
-                        throw e;
-                      } finally {
-                        // Clean up ffmpeg process
-                        try {
-                          ffmpeg.kill("SIGKILL");
-                        } catch (e) {
-                          // Ignore
-                        }
-                      }
-                    })(),
-                    {
-                      code: 200,
-                      headers: {
-                        "Content-Type": "video/mp4",
-                        "Accept-Ranges": "bytes",
-                        "Cache-Control": "no-cache",
-                      },
-                    },
-                  );
-
-                  // Handle ffmpeg errors
-                  ffmpeg.on("close", (code) => {
-                    if (code !== 0 && code !== null && !streamStarted) {
-                      const sanitized = sanitizeFfmpegOutput(ffmpegError);
-                      logger.error(
-                        `FFmpeg conversion failed: fileId=${fileId}, code=${code}, error=${sanitized}`,
-                      );
-                      reject(new Error(`FFmpeg conversion failed: ${code}`));
-                    } else {
-                      logger.debug(
-                        `FFmpeg conversion completed: fileId=${fileId}, code=${code}`,
-                      );
-                      resolve();
-                    }
-                  });
-
-                  ffmpeg.on("error", (error) => {
-                    logger.error(
-                      `FFmpeg spawn error: fileId=${fileId}`,
-                      error?.message || String(error),
-                    );
-                    reject(error);
-                  });
-
-                  logger.debug(`FFmpeg conversion started: fileId=${fileId}`);
-                } else {
-                  // Direct proxy for non-FLV content (should be MP4 already)
-                  // Stream directly without buffering - yield chunks as they arrive
-                  response.sendStream(
-                    (async function* () {
-                      try {
-                        for await (const chunk of Readable.from(httpResponse)) {
-                          yield chunk;
-                        }
-                        logger.log(`[VideoClip] Stream end: fileId=${fileId}`);
-                      } catch (streamErr) {
-                        logger.error(
-                          `[VideoClip] Stream error: fileId=${fileId}`,
-                          streamErr?.message || String(streamErr),
-                        );
-                        throw streamErr;
-                      }
-                    })(),
-                    {
-                      code: statusCode,
-                      headers: responseHeaders,
-                    },
-                  );
-
-                  resolve();
-                }
-              } catch (err) {
-                logger.error(
-                  `Error sending stream: fileId=${fileId}`,
-                  err?.message || String(err),
-                );
-                reject(err);
-              }
-            })
-            .on("error", (e) => {
-              logger.error(
-                `Error fetching videoclip: fileId=${fileId}`,
-                e?.message || String(e),
-              );
-              reject(e);
-            });
-        });
-      };
-
-      try {
-        await sendVideo();
-        return;
-      } catch (e) {
-        logger.error(
-          `HTTP proxy error: fileId=${fileId}`,
-          e?.message || String(e),
-        );
-        response.send("Failed to proxy HTTP stream", { code: 500 });
-        return;
-      }
-    }
-
-    // For RTMP URLs (camera standalone), use ffmpeg
-    const ffmpegPath = await sdk.mediaManager.getFFmpegPath();
-    const ffmpegArgs: string[] = [
-      "-i",
-      rtmpVodUrl,
-      "-c",
-      "copy", // Copy codecs without re-encoding
-      "-f",
-      "mp4",
-      "-movflags",
-      "frag_keyframe+empty_moov", // Enable streaming
-      "pipe:1", // Output to stdout
-    ];
-
-    const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
-      stdio: ["ignore", "pipe", "pipe"],
+    // Use streaming replay - this starts immediately and produces fMP4 chunks
+    // Stream management (stopping previous streams, cooldown) is handled by the API layer
+    // Generate a unique session ID based on client fingerprint (UA + IP + other factors)
+    // This allows the same client to reuse the dedicated socket when switching clips
+    const clientFingerprint = [
+      request.headers?.["user-agent"] || "",
+      request.headers?.["x-forwarded-for"] ||
+        request.headers?.["x-real-ip"] ||
+        "",
+      request.headers?.["accept-language"] || "",
+      request.headers?.["accept-encoding"] || "",
+    ].join("|");
+    const sessionId =
+      request.headers?.["x-request-id"] ||
+      crypto
+        .createHash("sha256")
+        .update(clientFingerprint)
+        .digest("hex")
+        .slice(0, 16);
+    const { mp4: mp4Stream, stop } = await api.createRecordingReplayMp4Stream({
+      channel,
+      fileName: fileId,
+      isNvr: device.isOnNvr,
+      logger,
+      deviceId: sessionId,
     });
 
-    let ffmpegError = "";
-    ffmpeg.stderr.on("data", (chunk: Buffer) => {
-      ffmpegError += chunk.toString();
-    });
+    let totalSize = 0;
 
-    let streamStarted = false;
-
-    // Stream the output
+    // Simple response - no range support
     response.sendStream(
       (async function* () {
         try {
-          for await (const chunk of ffmpeg.stdout) {
-            if (!streamStarted) {
-              streamStarted = true;
-            }
+          for await (const chunk of mp4Stream) {
             yield chunk;
+            totalSize += chunk.length;
           }
-          logger.log(`[VideoClip] Stream end: fileId=${fileId}`);
-        } catch (e) {
-          logger.error(
-            `[VideoClip] Stream error: fileId=${fileId}`,
-            e?.message || String(e),
-          );
-          throw e;
+        } catch (e: any) {
+          // Stream error - library handles logging
         } finally {
-          // Clean up ffmpeg process
-          try {
-            ffmpeg.kill("SIGKILL");
-          } catch (e) {
-            // Ignore
-          }
+          // Remove the error handler
+          api.client.off("error", onClientError);
+          await stop().catch(() => {});
         }
       })(),
       {
         code: 200,
         headers: {
           "Content-Type": "video/mp4",
-          "Accept-Ranges": "bytes",
           "Cache-Control": "no-cache",
         },
       },
     );
-
-    // Handle ffmpeg errors
-    ffmpeg.on("close", (code) => {
-      if (code !== 0 && code !== null && !streamStarted) {
-        const sanitized = sanitizeFfmpegOutput(ffmpegError);
-        logger.error(
-          `FFmpeg proxy failed for video: fileId=${fileId}, code=${code}, error=${sanitized}`,
-        );
-      }
-    });
-
-    ffmpeg.on("error", (error) => {
-      logger.error(
-        `FFmpeg spawn error for video proxy: fileId=${fileId}`,
-        error?.message || String(error),
-      );
-    });
-
+    return;
+  } catch (streamErr: any) {
+    logger.error(
+      `[VideoClip] Streaming failed: ${streamErr?.message || String(streamErr)}`,
+    );
+    response.send(
+      `Streaming failed: ${streamErr?.message || "Unknown error"}`,
+      {
+        code: 500,
+      },
+    );
     return;
   }
-}
-
-/**
- * Parse recordType string to extract detection classes
- * Based on the same logic as ReolinkCgiApi.parseRecordTypeFlags
- */
-function parseRecordTypeToDetectionClasses(recordType?: string): string[] {
-  const detectionClasses: string[] = [];
-
-  if (!recordType) {
-    return ["Motion"]; // Default to Motion if no type specified
-  }
-
-  // Split by comma or whitespace and process each type
-  const types = recordType
-    .toLowerCase()
-    .split(/[,\s]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  let hasMotion = false;
-
-  for (const t of types) {
-    if (t === "people" || t === "person") {
-      detectionClasses.push("Person");
-    } else if (t === "vehicle" || t === "car") {
-      detectionClasses.push("Vehicle");
-    } else if (t === "dog_cat" || t === "animal" || t === "pet") {
-      detectionClasses.push("Animal");
-    } else if (t === "face") {
-      detectionClasses.push("Face");
-    } else if (t === "md" || t === "motion") {
-      hasMotion = true;
-    } else if (t === "visitor" || t === "doorbell") {
-      detectionClasses.push("Doorbell");
-    } else if (t === "package") {
-      detectionClasses.push("Package");
-    }
-  }
-
-  // Always include Motion as base (if not already added or if no other detections)
-  if (hasMotion || detectionClasses.length === 0) {
-    detectionClasses.unshift("Motion");
-  }
-
-  return detectionClasses;
-}
-
-/**
- * Extract detection classes from parsed filename flags (hex decoding)
- */
-function parseFilenameFlagsToDetectionClasses(
-  parsed?: ParsedRecordingFileName,
-): string[] {
-  const detectionClasses: string[] = [];
-  const flags = parsed?.flags;
-
-  if (!flags) {
-    return [];
-  }
-
-  // Extract detection types from hex flags (same logic as enrichVodFile)
-  if (flags.aiPerson) {
-    detectionClasses.push("Person");
-  }
-  if (flags.aiVehicle) {
-    detectionClasses.push("Vehicle");
-  }
-  if (flags.aiAnimal) {
-    detectionClasses.push("Animal");
-  }
-  if (flags.aiFace) {
-    detectionClasses.push("Face");
-  }
-  if (flags.motion) {
-    detectionClasses.push("Motion");
-  }
-  if (flags.doorbell) {
-    detectionClasses.push("Doorbell");
-  }
-  if (flags.package) {
-    detectionClasses.push("Package");
-  }
-
-  return detectionClasses;
-}
-
-/**
- * Convert Reolink time format to Date
- * Uses UTC to match the API's dateToReolinkTime conversion
- */
-function reolinkTimeToDate(time: {
-  year: number;
-  mon: number;
-  day: number;
-  hour: number;
-  min: number;
-  sec: number;
-}): Date {
-  return new Date(
-    Date.UTC(time.year, time.mon - 1, time.day, time.hour, time.min, time.sec),
-  );
-}
-
-/**
- * Convert VOD search results to VideoClip array
- */
-export async function vodSearchResultsToVideoClips(
-  vodResults: Array<VodSearchResponse>,
-  options: {
-    deviceId: string;
-    plugin: ScryptedDeviceBase;
-    logger?: Console;
-  },
-): Promise<VideoClip[]> {
-  const { deviceId, plugin, logger } = options;
-  const clips: VideoClip[] = [];
-
-  // Import parseRecordingFileName once (it's exported from the package)
-  const reolinkModule = await import("@apocaliss92/reolink-baichuan-js");
-  const parseRecordingFileName = reolinkModule.parseRecordingFileName;
-
-  // Process VOD search results
-  for (const result of vodResults) {
-    if (result.code !== 0) {
-      logger?.debug(`VOD search result code: ${result.code}`, result.error);
-      continue;
-    }
-
-    const searchResult = result.value?.SearchResult;
-    if (!searchResult?.File || !Array.isArray(searchResult.File)) {
-      continue;
-    }
-
-    // Convert each VOD file to VideoClip
-    for (const file of searchResult.File) {
-      try {
-        // Parse filename to extract flags (like enrichVodFile does)
-        const parsed = parseRecordingFileName(file.name);
-
-        // Get times from parsed filename or from StartTime/EndTime
-        // Camera times in StartTime/EndTime are in local timezone (not UTC)
-        // Use local time constructor to preserve the timezone
-        const fileStart =
-          parsed?.start ??
-          new Date(
-            file.StartTime.year,
-            file.StartTime.mon - 1,
-            file.StartTime.day,
-            file.StartTime.hour,
-            file.StartTime.min,
-            file.StartTime.sec,
-          );
-        const fileEnd =
-          parsed?.end ??
-          new Date(
-            file.EndTime.year,
-            file.EndTime.mon - 1,
-            file.EndTime.day,
-            file.EndTime.hour,
-            file.EndTime.min,
-            file.EndTime.sec,
-          );
-
-        const duration = fileEnd.getTime() - fileStart.getTime();
-        const fileName = file.name || "";
-
-        // Extract detection classes from both filename flags (hex) and file.type
-        const filenameFlags = parseFilenameFlagsToDetectionClasses(parsed);
-        const typeFlags = parseRecordTypeToDetectionClasses(file.type);
-
-        // Debug: log file.type to see what we're parsing
-        if (logger && file.type) {
-          logger.debug(
-            `[VOD] Parsing file.type="${file.type}" for file=${fileName}, filenameFlags=${filenameFlags.join(",")}, typeFlags=${typeFlags.join(",")}`,
-          );
-        }
-
-        // Merge both sources (OR them together, like enrichVodFile does)
-        // Remove duplicates and ensure Motion is included if any detection is found
-        const allDetections = [...filenameFlags, ...typeFlags];
-        const detectionClasses = [...new Set(allDetections)];
-
-        // If we have detections from filename flags, use those (they're more accurate)
-        // Otherwise use type flags, or default to Motion
-        if (detectionClasses.length === 0) {
-          detectionClasses.push("Motion");
-        } else if (
-          !detectionClasses.includes("Motion") &&
-          (filenameFlags.length > 0 ||
-            typeFlags.some(
-              (t) =>
-                t.toLowerCase().includes("motion") ||
-                t.toLowerCase().includes("md"),
-            ))
-        ) {
-          // Add Motion if we have other detections but Motion is not explicitly included
-          detectionClasses.push("Motion");
-        }
-
-        // Generate webhook URLs
-        let videoHref: string | undefined;
-        let thumbnailHref: string | undefined;
-        try {
-          const { videoUrl, thumbnailUrl } = await getVideoClipWebhookUrls({
-            deviceId,
-            fileId: fileName,
-            plugin,
-            logger,
-          });
-          videoHref = videoUrl;
-          thumbnailHref = thumbnailUrl;
-        } catch (e) {
-          logger?.debug(
-            "Failed to generate webhook URLs for VOD file",
-            fileName,
-            e?.message || String(e),
-          );
-        }
-
-        const clip: VideoClip = {
-          id: fileName,
-          description: fileName,
-          startTime: fileStart.getTime(),
-          duration,
-          resources: {
-            video: videoHref ? { href: videoHref } : undefined,
-            thumbnail: thumbnailHref ? { href: thumbnailHref } : undefined,
-          },
-          detectionClasses,
-        };
-
-        clips.push(clip);
-      } catch (e) {
-        logger?.warn(
-          `Failed to convert VOD file to clip: ${file.name}`,
-          e?.message || String(e),
-        );
-      }
-    }
-  }
-
-  return clips;
 }
 
 export const removeAuthUrls = (streams: ReolinkSupportedStream[]) =>

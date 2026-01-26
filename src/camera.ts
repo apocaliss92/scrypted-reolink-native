@@ -6,6 +6,7 @@ import type {
   PtzCommand,
   PtzPreset,
   ReolinkBaichuanApi,
+  ReolinkCgiApi,
   ReolinkSimpleEvent,
   ReolinkSupportedStream,
   SleepStatus,
@@ -81,6 +82,7 @@ import {
 import {
   floodlightSuffix,
   getDeviceInterfaces,
+  getVideoClipWebhookUrls,
   motionFloodlightSuffix,
   motionSirenSuffix,
   pirSuffix,
@@ -126,7 +128,9 @@ class ReolinkCameraMotionSiren extends ScryptedDeviceBase implements OnOff {
         const mdEnabled = await api.getMotionState(channel);
         this.on = mdEnabled;
       });
-      this.logger.log(`Motion-siren toggle: turnOff ok (device=${this.nativeId})`);
+      this.logger.log(
+        `Motion-siren toggle: turnOff ok (device=${this.nativeId})`,
+      );
     } catch (e) {
       this.logger.error(
         `Motion-siren toggle: turnOff failed (device=${this.nativeId})`,
@@ -147,7 +151,9 @@ class ReolinkCameraMotionSiren extends ScryptedDeviceBase implements OnOff {
         const mdEnabled = await api.getMotionState(channel);
         this.on = mdEnabled;
       });
-      this.logger.log(`Motion-siren toggle: turnOn ok (device=${this.nativeId})`);
+      this.logger.log(
+        `Motion-siren toggle: turnOn ok (device=${this.nativeId})`,
+      );
     } catch (e) {
       this.logger.error(
         `Motion-siren toggle: turnOn failed (device=${this.nativeId})`,
@@ -257,7 +263,9 @@ class ReolinkCameraMotionFloodlight
   }
 
   async turnOff(): Promise<void> {
-    this.logger.log(`Motion-floodlight toggle: turnOff (device=${this.nativeId})`);
+    this.logger.log(
+      `Motion-floodlight toggle: turnOff (device=${this.nativeId})`,
+    );
     this.on = false;
     try {
       const channel = this.camera.storageSettings.values.rtspChannel;
@@ -273,7 +281,9 @@ class ReolinkCameraMotionFloodlight
           this.brightness = state.brightness;
         }
       });
-      this.logger.log(`Motion-floodlight toggle: turnOff ok (device=${this.nativeId})`);
+      this.logger.log(
+        `Motion-floodlight toggle: turnOff ok (device=${this.nativeId})`,
+      );
     } catch (e) {
       this.logger.warn(
         `Motion-floodlight toggle: turnOff failed (device=${this.nativeId})`,
@@ -284,7 +294,9 @@ class ReolinkCameraMotionFloodlight
   }
 
   async turnOn(): Promise<void> {
-    this.logger.log(`Motion-floodlight toggle: turnOn (device=${this.nativeId})`);
+    this.logger.log(
+      `Motion-floodlight toggle: turnOn (device=${this.nativeId})`,
+    );
     this.on = true;
     try {
       const channel = this.camera.storageSettings.values.rtspChannel;
@@ -300,7 +312,9 @@ class ReolinkCameraMotionFloodlight
           this.brightness = state.brightness;
         }
       });
-      this.logger.log(`Motion-floodlight toggle: turnOn ok (device=${this.nativeId})`);
+      this.logger.log(
+        `Motion-floodlight toggle: turnOn ok (device=${this.nativeId})`,
+      );
     } catch (e) {
       this.logger.warn(
         `Motion-floodlight toggle: turnOn failed (device=${this.nativeId})`,
@@ -369,7 +383,9 @@ class ReolinkCameraFloodlight
           this.brightness = state.brightness;
         }
       });
-      this.logger.log(`Floodlight toggle: turnOff ok (device=${this.nativeId})`);
+      this.logger.log(
+        `Floodlight toggle: turnOff ok (device=${this.nativeId})`,
+      );
     } catch (e) {
       this.logger.warn(
         `Floodlight toggle: turnOff failed (device=${this.nativeId})`,
@@ -670,7 +686,7 @@ export class ReolinkCamera
       defaultValue: [],
     },
     intercomBlocksPerPayload: {
-      subgroup: "Intercom",
+      group: "Intercom",
       title: "Blocks Per Payload",
       description:
         "Lower reduces latency (more packets). Typical: 1-4. Requires restarting talk session to take effect.",
@@ -678,7 +694,7 @@ export class ReolinkCamera
       defaultValue: 1,
     },
     intercomMaxBacklogMs: {
-      subgroup: "Intercom",
+      group: "Intercom",
       title: "Max Backlog (ms)",
       description:
         "Maximum PCM backlog before dropping old audio to cap latency. Higher improves stability on slow systems but increases latency. Typical: 80-250. Requires restarting talk session to take effect.",
@@ -686,7 +702,7 @@ export class ReolinkCamera
       defaultValue: 120,
     },
     intercomGain: {
-      subgroup: "Intercom",
+      group: "Intercom",
       title: "Gain",
       description:
         "Output gain multiplier applied before encoding. 1.0 = normal, 2.0 ≈ +6dB, 0.5 ≈ -6dB. Requires restarting talk session to take effect.",
@@ -695,7 +711,7 @@ export class ReolinkCamera
     },
     // PTZ Presets
     presets: {
-      subgroup: "PTZ",
+      group: "PTZ",
       title: "Presets to enable",
       description:
         'PTZ Presets in the format "id=name". Where id is the PTZ Preset identifier and name is a friendly name.',
@@ -725,11 +741,11 @@ export class ReolinkCamera
         "How long a PTZ command moves before sending stop. Higher = more movement per click.",
       type: "number",
       defaultValue: 300,
-      subgroup: "PTZ",
+      group: "PTZ",
       hide: true,
     },
     ptzZoomStep: {
-      subgroup: "PTZ",
+      group: "PTZ",
       title: "PTZ Zoom Step",
       description:
         "How much to change zoom per zoom command (in zoom factor units, where 1.0 is normal).",
@@ -738,7 +754,7 @@ export class ReolinkCamera
       hide: true,
     },
     ptzCreatePreset: {
-      subgroup: "PTZ",
+      group: "PTZ",
       title: "Create Preset",
       description:
         "Enter a name and press Save to create a new PTZ preset at the current position.",
@@ -778,7 +794,7 @@ export class ReolinkCamera
       },
     },
     ptzSelectedPreset: {
-      subgroup: "PTZ",
+      group: "PTZ",
       title: "Selected Preset",
       description: 'Select the preset to update or delete. Format: "id=name".',
       type: "string",
@@ -787,7 +803,7 @@ export class ReolinkCamera
       hide: true,
     },
     ptzUpdateSelectedPreset: {
-      subgroup: "PTZ",
+      group: "PTZ",
       title: "Update Selected Preset Position",
       description:
         "Overwrite the selected preset with the current PTZ position.",
@@ -815,7 +831,7 @@ export class ReolinkCamera
       },
     },
     ptzDeleteSelectedPreset: {
-      subgroup: "PTZ",
+      group: "PTZ",
       title: "Delete Selected Preset",
       description: "Delete the selected preset (firmware dependent).",
       type: "button",
@@ -891,19 +907,20 @@ export class ReolinkCamera
         this.updateVideoClipsAutoLoad();
       },
     },
-    clipsSource: {
-      title: "Clips Source",
-      subgroup: "Videoclips",
+    videoclipSource: {
+      title: "Video Clips Source",
+      group: "Videoclips",
       description:
-        "Source for fetching video clips: NVR (fetch from NVR device) or Device (fetch directly from camera).",
+        "Select the source for video clips: Native (Baichuan protocol) or HTTP (CGI API). HTTP may be more reliable on some devices.",
       type: "string",
-      choices: ["NVR", "Device"],
+      defaultValue: "Native",
+      choices: ["Native", "HTTP"],
       immediate: true,
       hide: true,
     },
     loadVideoclips: {
       title: "Auto-load Video Clips",
-      subgroup: "Videoclips",
+      group: "Videoclips",
       description:
         "Automatically fetch today's video clips and download missing thumbnails at regular intervals.",
       type: "boolean",
@@ -916,7 +933,7 @@ export class ReolinkCamera
     },
     videoclipsRegularChecks: {
       title: "Video Clips Check Interval (minutes)",
-      subgroup: "Videoclips",
+      group: "Videoclips",
       description:
         "How often to check for new video clips and download thumbnails (default: 30 minutes).",
       type: "number",
@@ -928,7 +945,7 @@ export class ReolinkCamera
     },
     downloadVideoclipsLocally: {
       title: "Download Video Clips Locally",
-      subgroup: "Videoclips",
+      group: "Videoclips",
       description:
         "Automatically download and cache video clips to local filesystem during auto-load.",
       type: "boolean",
@@ -941,7 +958,7 @@ export class ReolinkCamera
     },
     videoclipsDaysToPreload: {
       title: "Days to Preload",
-      subgroup: "Videoclips",
+      group: "Videoclips",
       description:
         "Number of days to preload video clips and thumbnails (default: 1, only today).",
       type: "number",
@@ -949,6 +966,40 @@ export class ReolinkCamera
       hide: true,
       onPut: async () => {
         this.updateVideoClipsAutoLoad();
+      },
+    },
+    clearVideoclipsCache: {
+      title: "Clear All Video Clips Cache",
+      group: "Videoclips",
+      description:
+        "Delete all cached video clips and thumbnails from local storage. This will free up disk space but clips will need to be re-downloaded when accessed.",
+      type: "button",
+      immediate: true,
+      onPut: async () => {
+        await this.clearAllVideoclipsCache();
+      },
+    },
+    userSessions: {
+      title: "Active User Sessions",
+      subgroup: "Sessions",
+      description:
+        "List of currently active user sessions connected to the device via Baichuan socket. Click 'Refresh Sessions' to update.",
+      type: "string",
+      multiple: true,
+      combobox: false,
+      readonly: true,
+      hide: true,
+      defaultValue: [],
+    },
+    refreshUserSessions: {
+      title: "Refresh Sessions",
+      subgroup: "Sessions",
+      description: "Refresh the list of active user sessions from the device.",
+      type: "button",
+      immediate: true,
+      hide: true,
+      onPut: async () => {
+        await this.refreshUserSessionsList();
       },
     },
     diagnosticsRun: {
@@ -1166,68 +1217,72 @@ export class ReolinkCamera
     const end = new Date(endMs);
     start.setHours(0, 0, 0, 0);
 
+    // Ensure end is at 23:59:59 of the same day for proper day-based queries
+    // Reolink cameras organize recordings per-day, so we need to query within a single day
+    const endOfDay = new Date(end);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    // If end is exactly at midnight (00:00:00), it means the previous day's end
+    // In this case, we should query the previous day ending at 23:59:59
+    if (
+      end.getHours() === 0 &&
+      end.getMinutes() === 0 &&
+      end.getSeconds() === 0
+    ) {
+      // end is at midnight, move back 1ms to get 23:59:59 of the previous day
+      end.setTime(end.getTime() - 1);
+    } else if (endOfDay.getTime() <= nowMs) {
+      end.setTime(endOfDay.getTime());
+    }
+
     try {
-      const { clipsSource } = this.storageSettings.values;
-      const useNvr = clipsSource === "NVR" && this.nvrDevice;
-
       const api = await this.ensureClient();
+      const channel = this.storageSettings.values.rtspChannel ?? 0;
+      const useHttpSource =
+        this.storageSettings.values.videoclipSource === "HTTP";
 
-      if (useNvr) {
-        const channel = this.storageSettings.values.rtspChannel ?? 0;
+      logger.debug(
+        `[getVideoClips] Listing recordings: channel=${channel}, start=${start.toISOString()}, end=${end.toISOString()}, source=${useHttpSource ? "HTTP" : "Native"}`,
+      );
 
-        logger.debug(
-          `[NVR VOD] Listing recordings: channel=${channel}, start=${start.toISOString()}, end=${end.toISOString()}`,
-        );
-        const recordings = await api.listNvrRecordings({
+      // Use HTTP CGI API or native Baichuan API based on videoclipSource setting
+      let recordings;
+      if (useHttpSource) {
+        // HTTP mode: use CGI API
+        recordings = await api.getVideoclipsCgi({
           channel,
           start,
           end,
           streamType: "main",
           autoSearchByDay: true,
-          fetchStreamUrls: false,
         });
-
-        // Convert VOD recordings to VideoClip array using the shared parser
-        const clips = await recordingsToVideoClips(recordings, {
-          fallbackStart: start,
-          logger,
-          plugin: this,
-          deviceId: this.id,
-          useWebhook: true,
-          count,
-        });
-
-        logger.debug(
-          `[NVR VOD] Converted ${clips.length} video clips (limit: ${count || "none"})`,
-        );
-
-        return clips;
       } else {
-        const recordings = await api.listDeviceRecordings({
+        // Native mode: use Baichuan protocol
+        // Request mainStream recordings (RecM03) for better quality and reliable replay
+        recordings = await api.getVideoclips({
+          channel,
           start,
           end,
-          count,
-          channel: this.storageSettings.values.rtspChannel,
           streamType: "mainStream",
-          httpFallback: false,
-          fetchRtmpUrls: false,
         });
-
-        // Convert recordings to VideoClip array using the shared parser
-        const clips = await recordingsToVideoClips(recordings, {
-          fallbackStart: start,
-          api,
-          logger,
-          plugin: this,
-          deviceId: this.id,
-          useWebhook: true,
-          count,
-        });
-
-        logger.debug(`Videoclips found: ${clips.length}`);
-
-        return clips;
       }
+
+      // Convert VOD recordings to VideoClip array using the shared parser
+      const clips = await recordingsToVideoClips(recordings, {
+        fallbackStart: start,
+        api,
+        logger,
+        plugin: this,
+        deviceId: this.id,
+        useWebhook: true,
+        count,
+      });
+
+      logger.debug(
+        `[getVideoClips] Converted ${clips.length} video clips (limit: ${count || "none"})`,
+      );
+
+      return clips;
     } catch (e: any) {
       const message = e instanceof Error ? e.message : String(e);
 
@@ -1271,143 +1326,23 @@ export class ReolinkCamera
   async getVideoClip(videoId: string): Promise<MediaObject> {
     const logger = this.getBaichuanLogger();
     try {
-      const cacheEnabled =
-        this.storageSettings.values.downloadVideoclipsLocally;
-      const MIN_VIDEO_CACHE_BYTES = 16 * 1024;
+      // Use webhook URL - this will be handled by handleVideoClipRequest in main.ts
+      // which provides progressive streaming with caching
+      logger.log(`[VideoClip] Getting webhook URL: ${videoId.slice(-40)}`);
 
-      // Always check cache first, even if caching is disabled (in case user enabled it before)
-      const cachePath = this.getVideoClipCachePath(videoId);
-      const cacheDir = this.getVideoClipCacheDir();
+      const { videoUrl } = await getVideoClipWebhookUrls({
+        deviceId: this.id,
+        fileId: videoId,
+        plugin: this,
+        logger,
+      });
 
-      // Check if cached file exists
-      try {
-        await fs.promises.access(cachePath, fs.constants.F_OK);
-        const stats = await fs.promises.stat(cachePath);
-        if (stats.size < MIN_VIDEO_CACHE_BYTES) {
-          logger.warn(
-            `[VideoClip] Cached file too small, deleting and re-downloading: fileId=${videoId}, size=${stats.size} bytes`,
-          );
-          try {
-            await fs.promises.unlink(cachePath);
-          } catch (unlinkErr) {
-            logger.warn(
-              `[VideoClip] Failed to delete small cached file: fileId=${videoId}`,
-              unlinkErr?.message || String(unlinkErr),
-            );
-          }
-        } else {
-          logger.debug(
-            `[VideoClip] Using cached file: fileId=${videoId}, size=${stats.size} bytes`,
-          );
-          // Return cached file as MediaObject
-          const mo = await sdk.mediaManager.createMediaObjectFromUrl(
-            `file://${cachePath}`,
-          );
-          return mo;
-        }
-      } catch (e) {
-        // File doesn't exist or error accessing it
-        logger.debug(
-          `[VideoClip] Cache miss: fileId=${videoId}, error=${e instanceof Error ? e.message : String(e)}`,
-        );
-        if (cacheEnabled) {
-          logger.debug(
-            `[VideoClip] Will download and cache: fileId=${videoId}`,
-          );
-        }
-      }
+      logger.log(`[VideoClip] Webhook URL ready: ${videoUrl.slice(0, 80)}...`);
 
-      // If caching is enabled, ensure cache directory exists
-      if (cacheEnabled) {
-        await fs.promises.mkdir(cacheDir, { recursive: true });
-      }
+      // Create MediaObject from webhook URL
+      const mo = await sdk.mediaManager.createMediaObjectFromUrl(videoUrl);
 
-      // const { clipsSource } = this.storageSettings.values;
-      // const useNvr = clipsSource === "NVR" && this.nvrDevice;
-
-      // Both standalone and NVR now use a URL-based playback path.
-      // In NVR mode, `videoId` is expected to be a full recording path (e.g. /mnt/sda/...).
-      const playbackUrl = await this.getVideoClipPlaybackUrl(videoId);
-
-      // If caching is enabled, download and cache the video via ffmpeg
-      if (cacheEnabled) {
-        const cachePath = this.getVideoClipCachePath(videoId);
-
-        // Download and convert RTMP to MP4 using ffmpeg
-        const ffmpegPath = await sdk.mediaManager.getFFmpegPath();
-        const ffmpegArgs = [
-          "-i",
-          playbackUrl,
-          "-c",
-          "copy", // Copy codecs without re-encoding
-          "-f",
-          "mp4",
-          "-movflags",
-          "frag_keyframe+empty_moov", // Enable streaming
-          cachePath,
-        ];
-
-        logger.log(`Downloading video clip to cache: ${cachePath}`);
-
-        await new Promise<void>((resolve, reject) => {
-          const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
-            stdio: ["ignore", "pipe", "pipe"],
-          });
-
-          let errorOutput = "";
-
-          ffmpeg.stderr.on("data", (chunk: Buffer) => {
-            errorOutput += chunk.toString();
-          });
-
-          ffmpeg.on("close", (code) => {
-            if (code !== 0) {
-              const sanitized = sanitizeFfmpegOutput(errorOutput);
-              logger.error(
-                `ffmpeg failed to download video clip: ${sanitized}`,
-              );
-              reject(
-                new Error(`ffmpeg failed with code ${code}: ${sanitized}`),
-              );
-              return;
-            }
-
-            logger.log(`Video clip cached successfully: ${cachePath}`);
-            resolve();
-          });
-
-          ffmpeg.on("error", (error) => {
-            logger.error(
-              `ffmpeg spawn error for video clip ${videoId}`,
-              error?.message || String(error),
-            );
-            reject(error);
-          });
-
-          // Timeout after 5 minutes
-          const timeout = setTimeout(
-            () => {
-              ffmpeg.kill("SIGKILL");
-              reject(new Error("Video clip download timeout"));
-            },
-            5 * 60 * 1000,
-          );
-
-          ffmpeg.on("close", () => {
-            clearTimeout(timeout);
-          });
-        });
-
-        // Return cached file as MediaObject
-        const mo = await sdk.mediaManager.createMediaObjectFromUrl(
-          `file://${cachePath}`,
-        );
-        return mo;
-      } else {
-        // Caching disabled, return playback URL directly (RTMP for standalone camera)
-        const mo = await sdk.mediaManager.createMediaObjectFromUrl(playbackUrl);
-        return mo;
-      }
+      return mo;
     } catch (e) {
       logger.error(
         `getVideoClip: failed to get video clip ${videoId}`,
@@ -1484,9 +1419,6 @@ export class ReolinkCamera
       // Ensure cache directory exists
       await fs.promises.mkdir(cacheDir, { recursive: true });
 
-      // const { clipsSource } = this.storageSettings.values;
-      // const useNvr = clipsSource === "NVR" && this.nvrDevice;
-
       // NVR mode: `thumbnailId` is expected to be a full recording path (e.g. /mnt/sda/...).
       // Use the same ffmpeg-based thumbnail extraction flow as other sources.
 
@@ -1500,34 +1432,78 @@ export class ReolinkCamera
           `[Thumbnail] Using local video file for thumbnail extraction: fileId=${thumbnailId}`,
         );
       } catch {
-        // Video not cached locally, will use RTMP URL
+        // Video not cached locally, will use native API
       }
 
       let thumbnail: MediaObject;
 
       if (useLocalVideo) {
-        // Extract thumbnail from local video file
-        thumbnail = await this.plugin.generateThumbnail({
-          deviceId: this.id,
-          fileId: thumbnailId,
-          filePath: videoCachePath,
-          device: this,
+        // Extract thumbnail from local video file using ffmpeg
+        const ffmpegPath = await sdk.mediaManager.getFFmpegPath();
+        const mo = await sdk.mediaManager.createFFmpegMediaObject({
+          inputArguments: ["-ss", "00:00:01", "-i", videoCachePath],
         });
+        thumbnail = mo;
       } else {
-        // Get RTMP URL using the appropriate API (NVR or Baichuan)
-        // Use forThumbnail=true to prefer Download over Playback (better for ffmpeg)
-        const rtmpVodUrl = await this.getVideoClipPlaybackUrl(
-          thumbnailId,
-          true,
-        );
+        const api = await this.ensureClient();
+        const channel = this.storageSettings.values.rtspChannel ?? 0;
+        const ffmpegPath = await sdk.mediaManager.getFFmpegPath();
+        const useHttpSource =
+          this.storageSettings.values.videoclipSource === "HTTP";
 
-        // Use the plugin's thumbnail generation queue with RTMP URL
-        thumbnail = await this.plugin.generateThumbnail({
-          deviceId: this.id,
-          fileId: thumbnailId,
-          rtmpUrl: rtmpVodUrl,
-          device: this,
-        });
+        if (useHttpSource) {
+          // HTTP mode: use CGI API with ffmpeg to extract thumbnail from VOD stream
+          logger.debug(
+            `[Thumbnail] Using CGI API (HTTP): fileId=${thumbnailId}`,
+          );
+
+          const jpegBuffer = await api.getVideoclipThumbnailJpegCgi({
+            channel,
+            filename: thumbnailId,
+            ffmpegPath,
+            timeoutMs: 30000,
+            seekSeconds: 0,
+          });
+
+          thumbnail = await sdk.mediaManager.createMediaObject(
+            jpegBuffer,
+            "image/jpeg",
+          );
+        } else {
+          // Native mode: use Baichuan CoverPreview API (cmd_id=298) - fast thumbnail extraction
+          // Dynamic import to avoid CommonJS/ESM issues
+          const { parseRecordingFileName } =
+            await import("@apocaliss92/reolink-baichuan-js");
+
+          // Parse filename to extract start time for CoverPreview
+          const parsed = parseRecordingFileName(thumbnailId);
+          if (!parsed?.start) {
+            throw new Error(
+              `[Thumbnail] Cannot parse recording filename to extract timestamp: ${thumbnailId}`,
+            );
+          }
+
+          logger.debug(
+            `[Thumbnail] Using CoverPreview API (Native): fileId=${thumbnailId}, startTime=${parsed.start.toISOString()}`,
+          );
+
+          // Use getVideoclipThumbnailJpeg which uses CoverPreview (cmd_id=298)
+          // This is faster than getRecordingThumbnail which starts a replay stream
+          // For NVR devices, we need to pass isNvr=true to include UID in the request
+          const jpegBuffer = await api.getVideoclipThumbnailJpeg({
+            channel,
+            time: parsed.start,
+            endTime: parsed.end,
+            snapType: "sub",
+            ffmpegPath,
+            isNvr: this.isOnNvr,
+          });
+
+          thumbnail = await sdk.mediaManager.createMediaObject(
+            jpegBuffer,
+            "image/jpeg",
+          );
+        }
       }
 
       // Cache the thumbnail
@@ -1573,8 +1549,7 @@ export class ReolinkCamera
     forThumbnail: boolean = false,
   ): Promise<string> {
     const logger = this.getBaichuanLogger();
-    const { clipsSource } = this.storageSettings.values;
-    const useNvr = clipsSource === "NVR" && this.nvrDevice;
+    const useNvr = !!this.nvrDevice;
 
     if (useNvr) {
       // NVR mode: `fileId` is expected to be a full recording path (e.g. /mnt/sda/...).
@@ -1653,6 +1628,215 @@ export class ReolinkCamera
 
   removeVideoClips(...videoClipIds: string[]): Promise<void> {
     throw new Error("removeVideoClips is not implemented yet.");
+  }
+
+  /**
+   * Refresh the list of active user sessions from the device
+   */
+  async refreshUserSessionsList(): Promise<void> {
+    const logger = this.getBaichuanLogger();
+
+    try {
+      const api = await this.ensureClient();
+
+      logger.log("[Sessions] Fetching active user sessions from device...");
+
+      const sessions = await api.getOnlineUserList();
+
+      // Get current socket session ID if available
+      let socketSessionId: string | undefined;
+      try {
+        socketSessionId = api.client.getSocketSessionId();
+      } catch {
+        // getSocketSessionId might not be available on all clients
+      }
+
+      // Format sessions as array of readable strings
+      const sessionStrings: string[] = [];
+
+      // Add header with timestamp and socket session ID
+      const timestamp = new Date().toLocaleString();
+      sessionStrings.push(`Last updated: ${timestamp}`);
+      if (socketSessionId) {
+        sessionStrings.push(`Current socket session ID: ${socketSessionId}`);
+      }
+      sessionStrings.push(""); // Empty line separator
+
+      // Parse sessions data (handle different response formats)
+      let sessionCount = 0;
+      const parseSessions = (data: any, prefix: string = ""): void => {
+        if (Array.isArray(data)) {
+          data.forEach((session: any, index: number) => {
+            sessionCount++;
+            const sessionInfo = formatSessionInfo(session, index + 1);
+            sessionStrings.push(sessionInfo);
+          });
+        } else if (data && typeof data === "object") {
+          // Handle nested objects
+          for (const [key, value] of Object.entries(data)) {
+            if (Array.isArray(value)) {
+              value.forEach((session: any, index: number) => {
+                sessionCount++;
+                const sessionInfo = formatSessionInfo(session, index + 1, key);
+                sessionStrings.push(sessionInfo);
+              });
+            } else if (value && typeof value === "object") {
+              parseSessions(value, prefix ? `${prefix}.${key}` : key);
+            } else {
+              // Single session object
+              sessionCount++;
+              const sessionInfo = formatSessionInfo(data, 1);
+              sessionStrings.push(sessionInfo);
+              return; // Only process once
+            }
+          }
+        }
+      };
+
+      // Helper function to format session info as readable string
+      const formatSessionInfo = (
+        session: any,
+        index: number,
+        group?: string,
+      ): string => {
+        const parts: string[] = [];
+
+        if (group) {
+          parts.push(`[${group}]`);
+        }
+        parts.push(`Session ${index}:`);
+
+        // Extract common fields
+        if (session.userName !== undefined) {
+          parts.push(`User: ${session.userName}`);
+        }
+        if (session.user !== undefined) {
+          parts.push(`User: ${session.user}`);
+        }
+        if (session.ip !== undefined) {
+          parts.push(`IP: ${session.ip}`);
+        }
+        if (session.ipAddress !== undefined) {
+          parts.push(`IP: ${session.ipAddress}`);
+        }
+        if (session.port !== undefined) {
+          parts.push(`Port: ${session.port}`);
+        }
+        if (session.sessionId !== undefined) {
+          parts.push(`Session ID: ${session.sessionId}`);
+        }
+        if (session.id !== undefined) {
+          parts.push(`ID: ${session.id}`);
+        }
+        if (session.loginTime !== undefined) {
+          parts.push(`Login Time: ${session.loginTime}`);
+        }
+        if (session.time !== undefined) {
+          parts.push(`Time: ${session.time}`);
+        }
+        if (session.status !== undefined) {
+          parts.push(`Status: ${session.status}`);
+        }
+
+        // If no common fields found, show all fields
+        if (parts.length === (group ? 2 : 1)) {
+          const allFields = Object.entries(session)
+            .map(([key, value]) => `${key}: ${value}`)
+            .join(", ");
+          parts.push(allFields);
+        }
+
+        return parts.join(" | ");
+      };
+
+      parseSessions(sessions);
+
+      // If no sessions found, add a message
+      if (sessionCount === 0) {
+        sessionStrings.push("No active sessions found");
+      }
+
+      // Update the setting with the formatted session strings
+      this.storageSettings.values.userSessions = sessionStrings;
+
+      logger.log(`[Sessions] Retrieved ${sessionCount} active session(s)`);
+      if (socketSessionId) {
+        logger.debug(
+          `[Sessions] Current socket session ID: ${socketSessionId}`,
+        );
+      }
+    } catch (e) {
+      const errorMsg = e?.message || String(e);
+      logger.error(`[Sessions] Failed to fetch user sessions: ${errorMsg}`);
+
+      // Update setting with error message
+      this.storageSettings.values.userSessions = [
+        `Error fetching sessions: ${errorMsg}`,
+        `Timestamp: ${new Date().toLocaleString()}`,
+      ];
+      throw e;
+    }
+  }
+
+  /**
+   * Clear all cached video clips and thumbnails from local storage
+   */
+  async clearAllVideoclipsCache(): Promise<void> {
+    const logger = this.getBaichuanLogger();
+    const cacheDir = this.getVideoClipCacheDir();
+
+    try {
+      // Check if directory exists
+      try {
+        await fs.promises.access(cacheDir, fs.constants.F_OK);
+      } catch {
+        logger.log(`[VideoClips] Cache directory does not exist: ${cacheDir}`);
+        return;
+      }
+
+      // Calculate total size before deletion
+      let totalSize = 0;
+      let fileCount = 0;
+
+      const calculateSize = async (dir: string): Promise<void> => {
+        const entries = await fs.promises.readdir(dir, {
+          withFileTypes: true,
+        });
+
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry.name);
+          try {
+            if (entry.isDirectory()) {
+              await calculateSize(fullPath);
+            } else {
+              const stats = await fs.promises.stat(fullPath);
+              totalSize += stats.size;
+              fileCount++;
+            }
+          } catch (e) {
+            // Ignore errors during size calculation
+          }
+        }
+      };
+
+      await calculateSize(cacheDir);
+
+      // Delete the entire cache directory recursively
+      await fs.promises.rm(cacheDir, { recursive: true, force: true });
+
+      // Recreate the cache directory for future use
+      await fs.promises.mkdir(cacheDir, { recursive: true });
+
+      const sizeMB = (totalSize / (1024 * 1024)).toFixed(2);
+      logger.log(
+        `[VideoClips] Cache cleared: ${fileCount} files, ${sizeMB} MB freed. Cache directory recreated.`,
+      );
+    } catch (e) {
+      logger.error(
+        `[VideoClips] Failed to clear cache: ${e?.message || String(e)}`,
+      );
+      throw e;
+    }
   }
 
   /**
@@ -1820,28 +2004,6 @@ export class ReolinkCamera
       password,
       uid: normalizedUid,
       transport: this.protocol,
-      debugOptions,
-      udpDiscoveryMethod:
-        discoveryMethod as BaichuanClientOptions["udpDiscoveryMethod"],
-    };
-  }
-
-  protected getStreamClientInputs(): BaichuanConnectionConfig {
-    const { ipAddress, username, password, uid, discoveryMethod } =
-      this.storageSettings.values;
-    const debugOptions = this.getBaichuanDebugOptions();
-
-    const normalizedUid = this.isBattery ? normalizeUid(uid) : undefined;
-    if (this.isBattery && !normalizedUid) {
-      throw new Error("UID is required for battery cameras (BCUDP)");
-    }
-
-    return {
-      host: ipAddress,
-      username,
-      password,
-      uid: normalizedUid,
-      transport: this.transport,
       debugOptions,
       udpDiscoveryMethod:
         discoveryMethod as BaichuanClientOptions["udpDiscoveryMethod"],
@@ -2097,6 +2259,8 @@ export class ReolinkCamera
         password,
       },
       sharedConnection: this.isBattery || !!this.nvrDevice,
+      // Pass nativeId for dedicated socket sessions (avoids stream interference)
+      deviceId: this.id,
     };
 
     if (this.isMultiFocal) {
@@ -2685,7 +2849,11 @@ export class ReolinkCamera
         info: {
           ...(this.info || {}),
         },
-        interfaces: [ScryptedInterface.OnOff, ScryptedInterface.Brightness, ScryptedInterface.Settings],
+        interfaces: [
+          ScryptedInterface.OnOff,
+          ScryptedInterface.Brightness,
+          ScryptedInterface.Settings,
+        ],
         type: ScryptedDeviceType.Light,
       };
       sdk.deviceManager.onDeviceDiscovered(device);
@@ -2701,7 +2869,11 @@ export class ReolinkCamera
         info: {
           ...(this.info || {}),
         },
-        interfaces: [ScryptedInterface.OnOff, ScryptedInterface.Brightness, ScryptedInterface.Settings],
+        interfaces: [
+          ScryptedInterface.OnOff,
+          ScryptedInterface.Brightness,
+          ScryptedInterface.Settings,
+        ],
         type: ScryptedDeviceType.Light,
       };
       sdk.deviceManager.onDeviceDiscovered(device);
@@ -2884,7 +3056,10 @@ export class ReolinkCamera
       this.siren ||= new ReolinkCameraSiren(this, nativeId);
       return this.siren;
     } else if (nativeId.endsWith(motionFloodlightSuffix)) {
-      this.motionFloodlight ||= new ReolinkCameraMotionFloodlight(this, nativeId);
+      this.motionFloodlight ||= new ReolinkCameraMotionFloodlight(
+        this,
+        nativeId,
+      );
       return this.motionFloodlight;
     } else if (nativeId.endsWith(floodlightSuffix)) {
       this.floodlight ||= new ReolinkCameraFloodlight(this, nativeId);
@@ -2916,7 +3091,6 @@ export class ReolinkCamera
       this.pirSensor = undefined;
     }
   }
-
 
   async setPirEnabled(enabled: boolean): Promise<void> {
     const channel = this.storageSettings.values.rtspChannel;
@@ -2962,7 +3136,10 @@ export class ReolinkCamera
           const mdEnabled = await api.getMotionState(channel);
           this.motionSiren.on = mdEnabled;
         } catch (e) {
-          logger.error("Failed to align motion-siren state", e?.message || String(e));
+          logger.error(
+            "Failed to align motion-siren state",
+            e?.message || String(e),
+          );
         }
       }
 
@@ -3481,10 +3658,6 @@ export class ReolinkCamera
     }
 
     this.storageSettings.settings.socketApiDebugLogs.hide = !!this.nvrDevice;
-    this.storageSettings.settings.clipsSource.hide = !this.nvrDevice;
-    this.storageSettings.settings.clipsSource.defaultValue = this.nvrDevice
-      ? "NVR"
-      : "Device";
 
     this.storageSettings.settings.diagnosticsRun.hide = !!this.multiFocalDevice;
     this.storageSettings.settings.diagnosticsOutputPath.hide =
@@ -3493,6 +3666,8 @@ export class ReolinkCamera
     this.storageSettings.settings.enableVideoclips.hide =
       !!this.multiFocalDevice;
     this.storageSettings.settings.videoclipsDaysToPreload.hide =
+      !!this.multiFocalDevice;
+    this.storageSettings.settings.clearVideoclipsCache.hide =
       !!this.multiFocalDevice;
     this.storageSettings.settings.videoclipsRegularChecks.hide =
       !!this.multiFocalDevice;
@@ -3590,6 +3765,8 @@ export class ReolinkCamera
       this.storageSettings.settings.username.hide = true;
       this.storageSettings.settings.password.hide = true;
       this.storageSettings.settings.ipAddress.hide = true;
+      this.storageSettings.settings.userSessions.hide = true;
+      this.storageSettings.settings.refreshUserSessions.hide = true;
 
       this.storageSettings.settings.username.defaultValue =
         parentDevice.storageSettings.values.username;
@@ -3602,6 +3779,8 @@ export class ReolinkCamera
       this.storageSettings.settings.password.hide = false;
       this.storageSettings.settings.ipAddress.hide = false;
       this.storageSettings.settings.uid.hide = false;
+      this.storageSettings.settings.userSessions.hide = false;
+      this.storageSettings.settings.refreshUserSessions.hide = false;
     }
 
     this.updateVideoClipsAutoLoad();
@@ -3643,12 +3822,6 @@ export class ReolinkCamera
                 await this.streamManager.closeAllStreams("camera sleeping");
               }
             }
-
-            // Close all stream client sockets (but keep main connection for wake up)
-            // For battery cameras, we need to close streaming sockets but may keep
-            // the main connection for wake up commands
-            await this.cleanupStreamClients();
-            logger.log("Closed all streaming sockets due to camera sleep");
           } catch (e) {
             logger.error(
               "Error closing streams/sockets during sleep:",
