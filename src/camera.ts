@@ -2446,6 +2446,14 @@ export class ReolinkCamera
     const pirNativeId = `${this.nativeId}${pirSuffix}`;
     const autotrackingNativeId = `${this.nativeId}${autotrackingSuffix}`;
 
+    // Helper to safely remove a device only if it exists
+    const safeRemoveDevice = (nativeId: string) => {
+      const existingIds = sdk.deviceManager.getNativeIds();
+      if (existingIds.includes(nativeId)) {
+        sdk.deviceManager.onDeviceRemoved(nativeId);
+      }
+    };
+
     // Create motion-siren device (motion detection alarm)
     if (hasSiren) {
       const device: Device = {
@@ -2461,7 +2469,7 @@ export class ReolinkCamera
       sdk.deviceManager.onDeviceDiscovered(device);
     } else {
       // Remove motion-siren device if capability is no longer available
-      sdk.deviceManager.onDeviceRemoved(motionSirenNativeId);
+      safeRemoveDevice(motionSirenNativeId);
       this.motionSiren = undefined;
     }
 
@@ -2480,7 +2488,7 @@ export class ReolinkCamera
       sdk.deviceManager.onDeviceDiscovered(device);
     } else {
       // Remove siren device if capability is no longer available
-      sdk.deviceManager.onDeviceRemoved(sirenNativeId);
+      safeRemoveDevice(sirenNativeId);
       this.siren = undefined;
     }
 
@@ -2503,7 +2511,7 @@ export class ReolinkCamera
       sdk.deviceManager.onDeviceDiscovered(device);
     } else {
       // Remove motion-floodlight device if capability is no longer available
-      sdk.deviceManager.onDeviceRemoved(motionFloodlightNativeId);
+      safeRemoveDevice(motionFloodlightNativeId);
       this.motionFloodlight = undefined;
     }
 
@@ -2526,7 +2534,7 @@ export class ReolinkCamera
       sdk.deviceManager.onDeviceDiscovered(device);
     } else {
       // Remove floodlight device if capability is no longer available
-      sdk.deviceManager.onDeviceRemoved(floodlightNativeId);
+      safeRemoveDevice(floodlightNativeId);
       this.floodlight = undefined;
     }
 
@@ -2544,7 +2552,7 @@ export class ReolinkCamera
       sdk.deviceManager.onDeviceDiscovered(device);
     } else {
       // Remove PIR device if capability is no longer available
-      sdk.deviceManager.onDeviceRemoved(pirNativeId);
+      safeRemoveDevice(pirNativeId);
       this.pirSensor = undefined;
     }
 
@@ -2563,7 +2571,7 @@ export class ReolinkCamera
       sdk.deviceManager.onDeviceDiscovered(device);
     } else {
       // Remove autotracking device if capability is no longer available
-      sdk.deviceManager.onDeviceRemoved(autotrackingNativeId);
+      safeRemoveDevice(autotrackingNativeId);
       this.autotracking = undefined;
     }
   }
