@@ -101,9 +101,7 @@ export class ReolinkNativeMultiFocalDevice
         this.storageSettings.values;
 
       const { capabilities, objects, presets } =
-        await api.getDeviceCapabilities(rtspChannel, {
-          mergeDualLensOnSameChannel: true,
-        });
+        await api.getDeviceCapabilities(rtspChannel);
       const multifocalInfo = await api.getDualLensChannelInfo(rtspChannel, {
         onNvr: !!this.nvrDevice,
       });

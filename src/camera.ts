@@ -80,6 +80,7 @@ import {
   StreamManagerOptions,
 } from "./stream-utils";
 import {
+  autotrackingSuffix,
   floodlightSuffix,
   getDeviceInterfaces,
   getVideoClipWebhookUrls,
@@ -88,10 +89,17 @@ import {
   pirSuffix,
   recordingsToVideoClips,
   removeAuthUrls,
-  sanitizeFfmpegOutput,
   sirenSuffix,
   updateDeviceInfo,
 } from "./utils";
+import {
+  ReolinkCameraAutotracking,
+  ReolinkCameraFloodlight,
+  ReolinkCameraMotionFloodlight,
+  ReolinkCameraMotionSiren,
+  ReolinkCameraPirSensor,
+  ReolinkCameraSiren,
+} from "./accessories";
 
 export type CameraType =
   | "battery"
@@ -103,410 +111,6 @@ export interface ReolinkCameraOptions {
   type: CameraType;
   nvrDevice?: ReolinkNativeNvrDevice; // Optional reference to NVR device
   multiFocalDevice?: ReolinkNativeMultiFocalDevice; // Optional reference to multi-focal device
-}
-
-// Motion-siren: controls motion detection alarm (MD alarm)
-class ReolinkCameraMotionSiren extends ScryptedDeviceBase implements OnOff {
-  private logger: Console;
-
-  constructor(
-    public camera: ReolinkCamera,
-    nativeId: string,
-  ) {
-    super(nativeId);
-    this.logger = camera.getBaichuanLogger();
-  }
-
-  async turnOff(): Promise<void> {
-    this.logger.log(`Motion-siren toggle: turnOff (device=${this.nativeId})`);
-    this.on = false;
-    try {
-      const channel = this.camera.storageSettings.values.rtspChannel;
-      await this.camera.withBaichuanRetry(async () => {
-        const api = await this.camera.ensureClient();
-        await api.setMotionAlarm(channel, false);
-        const mdEnabled = await api.getMotionState(channel);
-        this.on = mdEnabled;
-      });
-      this.logger.log(
-        `Motion-siren toggle: turnOff ok (device=${this.nativeId})`,
-      );
-    } catch (e) {
-      this.logger.error(
-        `Motion-siren toggle: turnOff failed (device=${this.nativeId})`,
-        e?.message || String(e),
-      );
-      throw e;
-    }
-  }
-
-  async turnOn(): Promise<void> {
-    this.logger.log(`Motion-siren toggle: turnOn (device=${this.nativeId})`);
-    this.on = true;
-    try {
-      const channel = this.camera.storageSettings.values.rtspChannel;
-      await this.camera.withBaichuanRetry(async () => {
-        const api = await this.camera.ensureClient();
-        await api.setMotionAlarm(channel, true);
-        const mdEnabled = await api.getMotionState(channel);
-        this.on = mdEnabled;
-      });
-      this.logger.log(
-        `Motion-siren toggle: turnOn ok (device=${this.nativeId})`,
-      );
-    } catch (e) {
-      this.logger.error(
-        `Motion-siren toggle: turnOn failed (device=${this.nativeId})`,
-        e?.message || String(e),
-      );
-      throw e;
-    }
-  }
-}
-
-// Siren: direct control (not motion-based)
-class ReolinkCameraSiren extends ScryptedDeviceBase implements OnOff {
-  private logger: Console;
-
-  constructor(
-    public camera: ReolinkCamera,
-    nativeId: string,
-  ) {
-    super(nativeId);
-    this.logger = camera.getBaichuanLogger();
-  }
-
-  async turnOff(): Promise<void> {
-    this.logger.log(`Siren toggle: turnOff (device=${this.nativeId})`);
-    this.on = false;
-    try {
-      const channel = this.camera.storageSettings.values.rtspChannel;
-      await this.camera.withBaichuanRetry(async () => {
-        const api = await this.camera.ensureClient();
-        await api.setSiren(channel, false);
-        const sirenState = await api.getSiren(channel);
-        this.on = sirenState.enabled;
-      });
-      this.logger.log(`Siren toggle: turnOff ok (device=${this.nativeId})`);
-    } catch (e) {
-      this.logger.error(
-        `Siren toggle: turnOff failed (device=${this.nativeId})`,
-        e?.message || String(e),
-      );
-      throw e;
-    }
-  }
-
-  async turnOn(): Promise<void> {
-    this.logger.log(`Siren toggle: turnOn (device=${this.nativeId})`);
-    this.on = true;
-    try {
-      const channel = this.camera.storageSettings.values.rtspChannel;
-      await this.camera.withBaichuanRetry(async () => {
-        const api = await this.camera.ensureClient();
-        await api.setSiren(channel, true);
-        const sirenState = await api.getSiren(channel);
-        this.on = sirenState.enabled;
-      });
-      this.logger.log(`Siren toggle: turnOn ok (device=${this.nativeId})`);
-    } catch (e) {
-      this.logger.error(
-        `Siren toggle: turnOn failed (device=${this.nativeId})`,
-        e?.message || String(e),
-      );
-      throw e;
-    }
-  }
-}
-
-// Motion-floodlight: controls motion detection light (MD light)
-class ReolinkCameraMotionFloodlight
-  extends ScryptedDeviceBase
-  implements OnOff, Brightness
-{
-  private logger: Console;
-
-  constructor(
-    public camera: ReolinkCamera,
-    nativeId: string,
-  ) {
-    super(nativeId);
-    this.logger = camera.getBaichuanLogger();
-  }
-
-  async setBrightness(brightness: number): Promise<void> {
-    this.logger.log(
-      `Motion-floodlight toggle: setBrightness (device=${this.nativeId} brightness=${brightness})`,
-    );
-    this.brightness = brightness;
-    try {
-      const channel = this.camera.storageSettings.values.rtspChannel;
-      await this.camera.withBaichuanRetry(async () => {
-        const api = await this.camera.ensureClient();
-        await api.setWhiteLedState(channel, undefined, brightness);
-        const state = await api.getWhiteLedState(channel);
-        this.on = !!state.enabled;
-        if (state.brightness !== undefined) {
-          this.brightness = state.brightness;
-        }
-      });
-      this.logger.log(
-        `Motion-floodlight toggle: setBrightness ok (device=${this.nativeId} brightness=${brightness})`,
-      );
-    } catch (e) {
-      this.logger.warn(
-        `Motion-floodlight toggle: setBrightness failed (device=${this.nativeId} brightness=${brightness})`,
-        e?.message || String(e),
-      );
-      throw e;
-    }
-  }
-
-  async turnOff(): Promise<void> {
-    this.logger.log(
-      `Motion-floodlight toggle: turnOff (device=${this.nativeId})`,
-    );
-    this.on = false;
-    try {
-      const channel = this.camera.storageSettings.values.rtspChannel;
-      await this.camera.withBaichuanRetry(async () => {
-        const api = await this.camera.ensureClient();
-        // For motion-floodlight, use setWhiteLedState with task (cmd 290)
-        // Get current state and modify enable field for task
-        const currentState = await api.getWhiteLedState(channel);
-        await api.setWhiteLedState(channel, false, currentState.brightness);
-        const state = await api.getWhiteLedState(channel);
-        this.on = !!state.enabled;
-        if (state.brightness !== undefined) {
-          this.brightness = state.brightness;
-        }
-      });
-      this.logger.log(
-        `Motion-floodlight toggle: turnOff ok (device=${this.nativeId})`,
-      );
-    } catch (e) {
-      this.logger.warn(
-        `Motion-floodlight toggle: turnOff failed (device=${this.nativeId})`,
-        e?.message || String(e),
-      );
-      throw e;
-    }
-  }
-
-  async turnOn(): Promise<void> {
-    this.logger.log(
-      `Motion-floodlight toggle: turnOn (device=${this.nativeId})`,
-    );
-    this.on = true;
-    try {
-      const channel = this.camera.storageSettings.values.rtspChannel;
-      await this.camera.withBaichuanRetry(async () => {
-        const api = await this.camera.ensureClient();
-        // For motion-floodlight, use setWhiteLedState with task (cmd 290)
-        // Get current state and modify enable field for task
-        const currentState = await api.getWhiteLedState(channel);
-        await api.setWhiteLedState(channel, true, currentState.brightness);
-        const state = await api.getWhiteLedState(channel);
-        this.on = !!state.enabled;
-        if (state.brightness !== undefined) {
-          this.brightness = state.brightness;
-        }
-      });
-      this.logger.log(
-        `Motion-floodlight toggle: turnOn ok (device=${this.nativeId})`,
-      );
-    } catch (e) {
-      this.logger.warn(
-        `Motion-floodlight toggle: turnOn failed (device=${this.nativeId})`,
-        e?.message || String(e),
-      );
-      throw e;
-    }
-  }
-}
-
-// Floodlight: direct control (not motion-based)
-class ReolinkCameraFloodlight
-  extends ScryptedDeviceBase
-  implements OnOff, Brightness
-{
-  private logger: Console;
-
-  constructor(
-    public camera: ReolinkCamera,
-    nativeId: string,
-  ) {
-    super(nativeId);
-    this.logger = camera.getBaichuanLogger();
-  }
-
-  async setBrightness(brightness: number): Promise<void> {
-    this.logger.log(
-      `Floodlight toggle: setBrightness (device=${this.nativeId} brightness=${brightness})`,
-    );
-    this.brightness = brightness;
-    try {
-      const channel = this.camera.storageSettings.values.rtspChannel;
-      await this.camera.withBaichuanRetry(async () => {
-        const api = await this.camera.ensureClient();
-        const currentState = await api.getWhiteLedState(channel);
-        await api.setWhiteLedState(channel, currentState.enabled, brightness);
-        const state = await api.getWhiteLedState(channel);
-        this.on = !!state.enabled;
-        if (state.brightness !== undefined) {
-          this.brightness = state.brightness;
-        }
-      });
-      this.logger.log(
-        `Floodlight toggle: setBrightness ok (device=${this.nativeId} brightness=${brightness})`,
-      );
-    } catch (e) {
-      this.logger.warn(
-        `Floodlight toggle: setBrightness failed (device=${this.nativeId} brightness=${brightness})`,
-        e?.message || String(e),
-      );
-      throw e;
-    }
-  }
-
-  async turnOff(): Promise<void> {
-    this.logger.log(`Floodlight toggle: turnOff (device=${this.nativeId})`);
-    this.on = false;
-    try {
-      const channel = this.camera.storageSettings.values.rtspChannel;
-      await this.camera.withBaichuanRetry(async () => {
-        const api = await this.camera.ensureClient();
-        await api.setWhiteLedState(channel, false);
-        const state = await api.getWhiteLedState(channel);
-        this.on = !!state.enabled;
-        if (state.brightness !== undefined) {
-          this.brightness = state.brightness;
-        }
-      });
-      this.logger.log(
-        `Floodlight toggle: turnOff ok (device=${this.nativeId})`,
-      );
-    } catch (e) {
-      this.logger.warn(
-        `Floodlight toggle: turnOff failed (device=${this.nativeId})`,
-        e?.message || String(e),
-      );
-      throw e;
-    }
-  }
-
-  async turnOn(): Promise<void> {
-    this.logger.log(`Floodlight toggle: turnOn (device=${this.nativeId})`);
-    this.on = true;
-    try {
-      const channel = this.camera.storageSettings.values.rtspChannel;
-      await this.camera.withBaichuanRetry(async () => {
-        const api = await this.camera.ensureClient();
-        await api.setWhiteLedState(channel, true);
-        const state = await api.getWhiteLedState(channel);
-        this.on = !!state.enabled;
-        if (state.brightness !== undefined) {
-          this.brightness = state.brightness;
-        }
-      });
-      this.logger.log(`Floodlight toggle: turnOn ok (device=${this.nativeId})`);
-    } catch (e) {
-      this.logger.warn(
-        `Floodlight toggle: turnOn failed (device=${this.nativeId})`,
-        e?.message || String(e),
-      );
-      throw e;
-    }
-  }
-}
-
-class ReolinkCameraPirSensor
-  extends ScryptedDeviceBase
-  implements OnOff, Settings
-{
-  storageSettings = new StorageSettings(this, {
-    sensitive: {
-      title: "PIR Sensitivity",
-      description: "Detection sensitivity/threshold (higher = more sensitive)",
-      type: "number",
-      defaultValue: 50,
-      range: [0, 100],
-    },
-    reduceAlarm: {
-      title: "Reduce False Alarms",
-      description: "Enable reduction of false alarm rate",
-      type: "boolean",
-      defaultValue: false,
-    },
-    interval: {
-      title: "PIR Detection Interval",
-      description: "Detection interval in seconds",
-      type: "number",
-      defaultValue: 5,
-      range: [1, 60],
-    },
-  });
-
-  constructor(
-    public camera: ReolinkCamera,
-    nativeId: string,
-  ) {
-    super(nativeId);
-  }
-
-  async getSettings(): Promise<Setting[]> {
-    const settings = await this.storageSettings.getSettings();
-    return settings;
-  }
-
-  async putSetting(key: string, value: SettingValue): Promise<void> {
-    await this.storageSettings.putSetting(key, value);
-
-    // Apply the new settings to the camera
-    const channel = this.camera.storageSettings.values.rtspChannel;
-    const enabled = this.on ? 1 : 0;
-    const sensitive = this.storageSettings.values.sensitive;
-    const reduceAlarm = this.storageSettings.values.reduceAlarm ? 1 : 0;
-    const interval = this.storageSettings.values.interval;
-
-    await this.camera.withBaichuanRetry(async () => {
-      const api = await this.camera.ensureClient();
-      await api.setPirInfo(channel, {
-        enable: enabled,
-        sensitive: sensitive,
-        reduceAlarm: reduceAlarm,
-        interval: interval,
-      });
-    });
-  }
-
-  async turnOff(): Promise<void> {
-    this.on = false;
-    await this.updatePirSettings();
-  }
-
-  async turnOn(): Promise<void> {
-    this.on = true;
-    await this.updatePirSettings();
-  }
-
-  private async updatePirSettings(): Promise<void> {
-    const channel = this.camera.storageSettings.values.rtspChannel;
-    const enabled = this.on ? 1 : 0;
-    const sensitive = this.storageSettings.values.sensitive;
-    const reduceAlarm = this.storageSettings.values.reduceAlarm ? 1 : 0;
-    const interval = this.storageSettings.values.interval;
-
-    await this.camera.withBaichuanRetry(async () => {
-      const api = await this.camera.ensureClient();
-      await api.setPirInfo(channel, {
-        enable: enabled,
-        sensitive: sensitive,
-        reduceAlarm: reduceAlarm,
-        interval: interval,
-      });
-    });
-  }
 }
 
 export class ReolinkCamera
@@ -897,6 +501,7 @@ export class ReolinkCamera
     },
     enableVideoclips: {
       title: "Enable Video Clips",
+      group: "Videoclips",
       description:
         "Enable video clips functionality. If disabled, getVideoClips will return empty and all other videoclip settings are ignored.",
       type: "boolean",
@@ -915,6 +520,17 @@ export class ReolinkCamera
       type: "string",
       defaultValue: "Native",
       choices: ["Native", "HTTP"],
+      immediate: true,
+      hide: true,
+    },
+    videoclipStreamType: {
+      title: "Video Clips Stream Type",
+      group: "Videoclips",
+      description:
+        "Select the stream quality for video clips: main (higher quality) or sub (smaller files).",
+      type: "string",
+      defaultValue: "main",
+      choices: ["main", "sub"],
       immediate: true,
       hide: true,
     },
@@ -1096,6 +712,7 @@ export class ReolinkCamera
   motionFloodlight?: ReolinkCameraMotionFloodlight;
   floodlight?: ReolinkCameraFloodlight;
   pirSensor?: ReolinkCameraPirSensor;
+  autotracking?: ReolinkCameraAutotracking;
 
   private lastPicture: { mo: MediaObject; atMs: number } | undefined;
   private takePictureInFlight: Promise<MediaObject> | undefined;
@@ -1133,6 +750,17 @@ export class ReolinkCamera
   private batteryUpdateTimer: NodeJS.Timeout | undefined;
   private periodicStarted = false;
   private statusPollTimer: NodeJS.Timeout | undefined;
+
+  // Cooldown timestamps to prevent alignAuxDevicesState from overwriting recently set states
+  // Camera can take 10+ seconds to reflect state changes in its API response
+  auxDeviceCooldowns: {
+    motionSiren?: number;
+    siren?: number;
+    motionFloodlight?: number;
+    floodlight?: number;
+    pir?: number;
+    autotracking?: number;
+  } = {};
 
   constructor(
     nativeId: string,
@@ -1246,6 +874,12 @@ export class ReolinkCamera
       );
 
       // Use HTTP CGI API or native Baichuan API based on videoclipSource setting
+      const streamTypeSetting =
+        this.storageSettings.values.videoclipStreamType || "main";
+      // Map "main"/"sub" to native Baichuan stream type names
+      const nativeStreamType =
+        streamTypeSetting === "sub" ? "subStream" : "mainStream";
+
       let recordings;
       if (useHttpSource) {
         // HTTP mode: use CGI API
@@ -1253,28 +887,24 @@ export class ReolinkCamera
           channel,
           start,
           end,
-          streamType: "main",
+          streamType: streamTypeSetting,
           autoSearchByDay: true,
         });
       } else {
         // Native mode: use Baichuan protocol
-        // Request mainStream recordings (RecM03) for better quality and reliable replay
         recordings = await api.getVideoclips({
           channel,
           start,
           end,
-          streamType: "mainStream",
+          streamType: nativeStreamType,
         });
       }
 
       // Convert VOD recordings to VideoClip array using the shared parser
       const clips = await recordingsToVideoClips(recordings, {
-        fallbackStart: start,
-        api,
         logger,
         plugin: this,
         deviceId: this.id,
-        useWebhook: true,
         count,
       });
 
@@ -2222,6 +1852,7 @@ export class ReolinkCamera
         hasSiren: false,
         hasFloodlight: false,
         hasPir: false,
+        hasAutotracking: false,
         isDoorbell: false,
       };
     }
@@ -2805,11 +2436,18 @@ export class ReolinkCamera
     const logger = this.getBaichuanLogger();
     logger.debug(`Reporting devices: ${JSON.stringify(abilities)}`);
 
-    const { hasSiren, hasFloodlight, hasPir } = abilities;
+    const { hasSiren, hasFloodlight, hasPir, hasAutotracking } = abilities;
+
+    // Define native IDs for all sub-devices
+    const motionSirenNativeId = `${this.nativeId}${motionSirenSuffix}`;
+    const sirenNativeId = `${this.nativeId}${sirenSuffix}`;
+    const motionFloodlightNativeId = `${this.nativeId}${motionFloodlightSuffix}`;
+    const floodlightNativeId = `${this.nativeId}${floodlightSuffix}`;
+    const pirNativeId = `${this.nativeId}${pirSuffix}`;
+    const autotrackingNativeId = `${this.nativeId}${autotrackingSuffix}`;
 
     // Create motion-siren device (motion detection alarm)
     if (hasSiren) {
-      const motionSirenNativeId = `${this.nativeId}${motionSirenSuffix}`;
       const device: Device = {
         providerNativeId: this.nativeId,
         name: `${this.name} Motion-Siren`,
@@ -2821,11 +2459,14 @@ export class ReolinkCamera
         type: ScryptedDeviceType.Siren,
       };
       sdk.deviceManager.onDeviceDiscovered(device);
+    } else {
+      // Remove motion-siren device if capability is no longer available
+      sdk.deviceManager.onDeviceRemoved(motionSirenNativeId);
+      this.motionSiren = undefined;
     }
 
     // Create siren device (direct control)
     if (hasSiren) {
-      const sirenNativeId = `${this.nativeId}${sirenSuffix}`;
       const device: Device = {
         providerNativeId: this.nativeId,
         name: `${this.name} Siren`,
@@ -2837,11 +2478,14 @@ export class ReolinkCamera
         type: ScryptedDeviceType.Siren,
       };
       sdk.deviceManager.onDeviceDiscovered(device);
+    } else {
+      // Remove siren device if capability is no longer available
+      sdk.deviceManager.onDeviceRemoved(sirenNativeId);
+      this.siren = undefined;
     }
 
     // Create motion-floodlight device (motion detection light)
     if (hasFloodlight) {
-      const motionFloodlightNativeId = `${this.nativeId}${motionFloodlightSuffix}`;
       const device: Device = {
         providerNativeId: this.nativeId,
         name: `${this.name} Motion-Floodlight`,
@@ -2857,11 +2501,14 @@ export class ReolinkCamera
         type: ScryptedDeviceType.Light,
       };
       sdk.deviceManager.onDeviceDiscovered(device);
+    } else {
+      // Remove motion-floodlight device if capability is no longer available
+      sdk.deviceManager.onDeviceRemoved(motionFloodlightNativeId);
+      this.motionFloodlight = undefined;
     }
 
     // Create floodlight device (direct control)
     if (hasFloodlight) {
-      const floodlightNativeId = `${this.nativeId}${floodlightSuffix}`;
       const device: Device = {
         providerNativeId: this.nativeId,
         name: `${this.name} Floodlight`,
@@ -2877,10 +2524,13 @@ export class ReolinkCamera
         type: ScryptedDeviceType.Light,
       };
       sdk.deviceManager.onDeviceDiscovered(device);
+    } else {
+      // Remove floodlight device if capability is no longer available
+      sdk.deviceManager.onDeviceRemoved(floodlightNativeId);
+      this.floodlight = undefined;
     }
 
     if (hasPir) {
-      const pirNativeId = `${this.nativeId}${pirSuffix}`;
       const device: Device = {
         providerNativeId: this.nativeId,
         name: `${this.name} PIR`,
@@ -2892,6 +2542,29 @@ export class ReolinkCamera
         type: ScryptedDeviceType.Switch,
       };
       sdk.deviceManager.onDeviceDiscovered(device);
+    } else {
+      // Remove PIR device if capability is no longer available
+      sdk.deviceManager.onDeviceRemoved(pirNativeId);
+      this.pirSensor = undefined;
+    }
+
+    // Create autotracking device (PTZ auto-tracking/smart track)
+    if (hasAutotracking) {
+      const device: Device = {
+        providerNativeId: this.nativeId,
+        name: `${this.name} Autotracking`,
+        nativeId: autotrackingNativeId,
+        info: {
+          ...(this.info || {}),
+        },
+        interfaces: [ScryptedInterface.OnOff, ScryptedInterface.Settings],
+        type: ScryptedDeviceType.Switch,
+      };
+      sdk.deviceManager.onDeviceDiscovered(device);
+    } else {
+      // Remove autotracking device if capability is no longer available
+      sdk.deviceManager.onDeviceRemoved(autotrackingNativeId);
+      this.autotracking = undefined;
     }
   }
 
@@ -3067,6 +2740,9 @@ export class ReolinkCamera
     } else if (nativeId.endsWith(pirSuffix)) {
       this.pirSensor ||= new ReolinkCameraPirSensor(this, nativeId);
       return this.pirSensor;
+    } else if (nativeId.endsWith(autotrackingSuffix)) {
+      this.autotracking ||= new ReolinkCameraAutotracking(this, nativeId);
+      return this.autotracking;
     }
   }
 
@@ -3089,6 +2765,8 @@ export class ReolinkCamera
       this.floodlight = undefined;
     } else if (nativeId.endsWith(pirSuffix)) {
       this.pirSensor = undefined;
+    } else if (nativeId.endsWith(autotrackingSuffix)) {
+      this.autotracking = undefined;
     }
   }
 
@@ -3118,8 +2796,10 @@ export class ReolinkCamera
   }
 
   /**
-   * Aligns auxiliary device states (siren, floodlight, PIR) with current API state.
+   * Aligns auxiliary device states (siren, floodlight, PIR, autotracking) with current API state.
+   * Fetches only the states for capabilities the device has.
    * This should be called periodically for regular cameras and once when battery cameras wake up.
+   * Respects cooldown periods after manual state changes to avoid overwriting user changes.
    */
   async alignAuxDevicesState(): Promise<void> {
     const logger = this.getBaichuanLogger();
@@ -3127,78 +2807,105 @@ export class ReolinkCamera
     const api = await this.ensureClient();
 
     const channel = this.storageSettings.values.rtspChannel;
-    const { hasSiren, hasFloodlight, hasPir } = await this.getAbilities();
+    const { hasSiren, hasFloodlight, hasPir, hasAutotracking } =
+      await this.getAbilities();
 
-    try {
-      // Align motion-siren state
-      if (hasSiren && this.motionSiren) {
+    // Cooldown period: 15 seconds after a manual state change
+    // Camera can take 10+ seconds to reflect state changes in its API response
+    const COOLDOWN_MS = 15_000;
+    const now = Date.now();
+
+    const isInCooldown = (timestamp: number | undefined): boolean =>
+      timestamp !== undefined && now - timestamp < COOLDOWN_MS;
+
+    // Align motion-siren state
+    if (hasSiren && this.motionSiren) {
+      if (isInCooldown(this.auxDeviceCooldowns.motionSiren)) {
+        logger.log(`[alignAuxDevicesState] Skipping motionSiren (in cooldown)`);
+      } else {
         try {
-          const mdEnabled = await api.getMotionState(channel);
-          this.motionSiren.on = mdEnabled;
+          const audioTask = await api.getSirenOnMotion(channel);
+          const enabled = audioTask?.body?.AudioTask?.enable === 1;
+          this.motionSiren.on = enabled;
         } catch (e) {
-          logger.error(
-            "Failed to align motion-siren state",
+          logger.warn(
+            "Failed to align motionSiren state",
             e?.message || String(e),
           );
         }
       }
+    }
 
-      // Align siren state (direct control)
-      if (hasSiren && this.siren) {
+    // Align siren state (direct control)
+    if (hasSiren && this.siren) {
+      if (isInCooldown(this.auxDeviceCooldowns.siren)) {
+        logger.log(`[alignAuxDevicesState] Skipping siren (in cooldown)`);
+      } else {
         try {
           const sirenState = await api.getSiren(channel);
           this.siren.on = sirenState.enabled;
         } catch (e) {
-          logger.error("Failed to align siren state", e?.message || String(e));
+          logger.warn("Failed to align siren state", e?.message || String(e));
         }
       }
+    }
 
-      // Align motion-floodlight state
-      if (hasFloodlight && this.motionFloodlight) {
+    // Align motion-floodlight state
+    if (hasFloodlight && this.motionFloodlight) {
+      if (isInCooldown(this.auxDeviceCooldowns.motionFloodlight)) {
+        logger.log(
+          `[alignAuxDevicesState] Skipping motionFloodlight (in cooldown)`,
+        );
+      } else {
         try {
-          const state = await api.getWhiteLedState(channel);
-          this.motionFloodlight.on = !!state.enabled;
-          if (state.brightness !== undefined) {
-            this.motionFloodlight.brightness = state.brightness;
+          const flState = await api.getFloodlightOnMotion(channel);
+          this.motionFloodlight.on = flState.floodlightOnMotion;
+          if (flState.brightness !== undefined) {
+            this.motionFloodlight.brightness = flState.brightness;
           }
         } catch (e) {
-          logger.error(
-            "Failed to align motion-floodlight state",
+          logger.warn(
+            "Failed to align motionFloodlight state",
             e?.message || String(e),
           );
         }
       }
+    }
 
-      // Align floodlight state (direct control)
-      if (hasFloodlight && this.floodlight) {
+    // Align floodlight state (direct control)
+    if (hasFloodlight && this.floodlight) {
+      if (isInCooldown(this.auxDeviceCooldowns.floodlight)) {
+        logger.log(`[alignAuxDevicesState] Skipping floodlight (in cooldown)`);
+      } else {
         try {
-          const state = await api.getWhiteLedState(channel);
-          this.floodlight.on = !!state.enabled;
-          if (state.brightness !== undefined) {
-            this.floodlight.brightness = state.brightness;
+          const ledState = await api.getWhiteLedState(channel);
+          this.floodlight.on = ledState.enabled;
+          if (ledState.brightness !== undefined) {
+            this.floodlight.brightness = ledState.brightness;
           }
         } catch (e) {
-          logger.error(
+          logger.warn(
             "Failed to align floodlight state",
             e?.message || String(e),
           );
         }
       }
+    }
 
-      // Align PIR state
-      if (hasPir && this.pirSensor) {
+    // Align PIR state
+    if (hasPir && this.pirSensor) {
+      if (isInCooldown(this.auxDeviceCooldowns.pir)) {
+        logger.log(`[alignAuxDevicesState] Skipping pir (in cooldown)`);
+      } else {
         try {
           const pirState = await api.getPirInfo(channel);
           this.pirSensor.on = pirState.enabled;
-
-          // Update storage settings with current values from API
           if (pirState.state) {
             if (pirState.state.sensitive !== undefined) {
               this.pirSensor.storageSettings.values.sensitive =
                 pirState.state.sensitive;
             }
             if (pirState.state.reduceAlarm !== undefined) {
-              // Convert number (0/1) to boolean
               this.pirSensor.storageSettings.values.reduceAlarm =
                 !!pirState.state.reduceAlarm;
             }
@@ -3208,14 +2915,28 @@ export class ReolinkCamera
             }
           }
         } catch (e) {
-          logger.error("Failed to align PIR state", e?.message || String(e));
+          logger.warn("Failed to align PIR state", e?.message || String(e));
         }
       }
-    } catch (e) {
-      logger.error(
-        "Failed to align auxiliary devices state",
-        e?.message || String(e),
-      );
+    }
+
+    // Align autotracking state
+    if (hasAutotracking && this.autotracking) {
+      if (isInCooldown(this.auxDeviceCooldowns.autotracking)) {
+        logger.log(
+          `[alignAuxDevicesState] Skipping autotracking (in cooldown)`,
+        );
+      } else {
+        try {
+          const autotracking = await api.getAutotracking(channel);
+          this.autotracking.on = autotracking.enabled;
+        } catch (e) {
+          logger.warn(
+            "Failed to align autotracking state",
+            e?.message || String(e),
+          );
+        }
+      }
     }
   }
 
@@ -3668,6 +3389,10 @@ export class ReolinkCamera
     this.storageSettings.settings.videoclipsDaysToPreload.hide =
       !!this.multiFocalDevice;
     this.storageSettings.settings.clearVideoclipsCache.hide =
+      !!this.multiFocalDevice;
+    this.storageSettings.settings.videoclipSource.hide =
+      !!this.multiFocalDevice;
+    this.storageSettings.settings.videoclipStreamType.hide =
       !!this.multiFocalDevice;
     this.storageSettings.settings.videoclipsRegularChecks.hide =
       !!this.multiFocalDevice;

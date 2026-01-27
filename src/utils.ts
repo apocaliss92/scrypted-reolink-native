@@ -1,43 +1,20 @@
 import type {
   DeviceCapabilities,
   RecordingFile,
-  ReolinkBaichuanApi,
   ReolinkDeviceInfo,
-  ReolinkSupportedStream
+  ReolinkSupportedStream,
 } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, {
   DeviceBase,
   HttpRequest,
   HttpResponse,
-  MediaObject,
   ScryptedDeviceBase,
   ScryptedDeviceType,
   ScryptedInterface,
   VideoClip,
 } from "@scrypted/sdk";
 import crypto from "crypto";
-import path from "path";
 import { ReolinkCamera } from "./camera";
-/**
- * Sanitize FFmpeg output or URLs to avoid leaking credentials
- */
-export function sanitizeFfmpegOutput(text: string): string {
-  if (!text) return text;
-
-  let sanitized = text;
-
-  // Remove user/password query parameters from URLs: ?user=xxx&password=yyy
-  sanitized = sanitized.replace(/(\buser=)[^&\s]*/gi, "$1***");
-  sanitized = sanitized.replace(/(\bpassword=)[^&\s]*/gi, "$1***");
-
-  // Remove credentials from URLs like rtmp://user:pass@host/...
-  sanitized = sanitized.replace(
-    /(rtmp:\/\/)([^:@\/\s]+):([^@\/\s]+)@/gi,
-    "$1$2:***@",
-  );
-
-  return sanitized;
-}
 
 /**
  * Enumeration of operation types that may require specific channel assignments
@@ -68,6 +45,7 @@ export const floodlightSuffix = `-floodlight`;
 export const motionSirenSuffix = `-motion-siren`;
 export const motionFloodlightSuffix = `-motion-floodlight`;
 export const pirSuffix = `-pir`;
+export const autotrackingSuffix = `-autotracking`;
 
 export const getDeviceInterfaces = (props: {
   capabilities: DeviceCapabilities;
@@ -164,273 +142,107 @@ export const updateDeviceInfo = async (props: {
 
 /**
  * Convert a Reolink RecordingFile to a Scrypted VideoClip
+ * Simple mapping - all data is already in RecordingFile
  */
 export async function recordingFileToVideoClip(
   rec: RecordingFile,
   options: {
-    /** Fallback start date if recording doesn't have one */
-    fallbackStart: Date;
-    /** API instance to get playback URLs (optional, can provide videoHref directly) */
-    api?: ReolinkBaichuanApi;
-    /** Pre-fetched video URL (optional, will fetch if not provided and api is available) */
-    videoHref?: string;
+    /** Plugin instance for generating webhook URLs */
+    plugin: ScryptedDeviceBase;
+    /** Device ID for webhook URLs */
+    deviceId: string;
     /** Logger for debug messages */
     logger?: Console;
-    /** Plugin instance for generating webhook URLs */
-    plugin?: ScryptedDeviceBase;
-    /** Device ID for webhook URLs */
-    deviceId?: string;
-    /** Use webhook URLs instead of direct RTMP URLs */
-    useWebhook?: boolean;
   },
 ): Promise<VideoClip> {
-  const {
-    fallbackStart,
-    api,
-    videoHref: providedVideoHref,
-    logger,
-    plugin,
-    deviceId,
-    useWebhook,
-  } = options;
+  const { plugin, deviceId, logger } = options;
 
-  // Handle RecordingFile (has startTime/endTime as Date)
-  let recStart: Date;
-  let recEnd: Date;
-
-  if ("startTime" in rec && rec.startTime instanceof Date) {
-    recStart = rec.startTime;
-  } else {
-    recStart = rec.parsedFileName?.start ?? fallbackStart;
-  }
-
-  if ("endTime" in rec && rec.endTime instanceof Date) {
-    recEnd = rec.endTime;
-  } else {
-    recEnd = rec.parsedFileName?.end ?? recStart;
-  }
+  // Get times from RecordingFile (already parsed)
+  const recStart = rec.startTime ?? rec.parsedFileName?.start ?? new Date();
+  const recEnd = rec.endTime ?? rec.parsedFileName?.end ?? recStart;
 
   const recStartMs = recStart.getTime();
   const recEndMs = Math.max(recEnd.getTime(), recStartMs);
   const duration = recEndMs - recStartMs;
 
-  // IMPORTANT: For NVR/Hub, ensure the clip id (fileId) is the actual recording path (/mnt/...) when available.
-  // Some sources may provide an alternate id (e.g. eventId/Baichuan id); we prefer the filesystem path because
-  // downstream VOD download/playback endpoints expect it.
-  const id =
-    typeof rec.fileName === "string" && rec.fileName.startsWith("/mnt/")
-      ? rec.fileName
-      : rec.id || rec.fileName;
+  // Use fileName as id (for NVR it's the full path like /mnt/...)
+  const id = rec.id || rec.fileName;
 
-  // Get video URL if not provided
-  let videoHref: string | undefined = providedVideoHref;
+  // Generate webhook URLs
+  let videoHref: string | undefined;
   let thumbnailHref: string | undefined;
 
-  // logger?.debug(`[recordingFileToVideoClip] URL generation: useWebhook=${useWebhook}, hasPlugin=${!!plugin}, deviceId=${deviceId}, providedVideoHref=${providedVideoHref || 'none'}, hasApi=${!!api}`);
-
-  // If webhook is enabled, generate webhook URLs
-  if (useWebhook && plugin && deviceId) {
-    // logger?.debug(`[recordingFileToVideoClip] Generating webhook URLs for fileId=${id}`);
-    try {
-      const { videoUrl, thumbnailUrl } = await getVideoClipWebhookUrls({
-        deviceId,
-        fileId: id,
-        plugin,
-        logger,
-      });
-      videoHref = videoUrl;
-      thumbnailHref = thumbnailUrl;
-      // logger?.debug(`[recordingFileToVideoClip] Webhook URLs generated successfully: videoHref="${videoHref}", thumbnailHref="${thumbnailHref}"`);
-    } catch (e) {
-      logger?.error(
-        `[recordingFileToVideoClip] Failed to generate webhook URLs for fileId=${id}:`,
-        e?.message || String(e),
-      );
-    }
-  } else if (!videoHref && api) {
-    // Fallback to direct URL if webhook is not used.
-    // Prefer HTTP Download when possible; otherwise fall back to RTMP.
-    try {
-      const channel = api.client.getConfiguredChannel?.() ?? 0;
-      try {
-        const url = await api.getVodUrl(rec.fileName, channel, {
-          requestType: "Download",
-          streamType: "main",
-          prepare: false,
-        });
-        if (url?.startsWith("http://") || url?.startsWith("https://")) {
-          videoHref = url;
-        }
-      } catch {
-        // ignore and fall back to RTMP
-      }
-
-      if (!videoHref) {
-        const { rtmpVodUrl } = await api.getRecordingPlaybackUrls({
-          fileName: rec.fileName,
-        });
-        videoHref = rtmpVodUrl;
-      }
-    } catch (e) {
-      logger?.debug(
-        `[recordingFileToVideoClip] Failed to build playback URL for recording fileName=${rec.fileName}:`,
-        e?.message || String(e),
-      );
-    }
-  } else {
-    // logger?.debug(`[recordingFileToVideoClip] No URL generation: useWebhook=${useWebhook}, hasPlugin=${!!plugin}, deviceId=${deviceId}, providedVideoHref=${providedVideoHref || 'none'}, hasApi=${!!api}`);
+  try {
+    const { videoUrl, thumbnailUrl } = await getVideoClipWebhookUrls({
+      deviceId,
+      fileId: id,
+      plugin,
+      logger,
+    });
+    videoHref = videoUrl;
+    thumbnailHref = thumbnailUrl;
+  } catch (e) {
+    logger?.error(
+      `[recordingFileToVideoClip] Failed to generate webhook URLs for fileId=${id}:`,
+      e?.message || String(e),
+    );
   }
 
-  const description =
-    "name" in rec && typeof rec.name === "string" && rec.name
-      ? rec.name
-      : (rec.fileName ?? rec.id ?? "");
-
-  // Build detectionClasses from parsedFileName.flags or recordType
-  const detectionClasses: string[] = [];
-
-  // Check parsedFileName.flags first (from filename hex decoding)
-  let hasAnyDetection = false;
-  const flags = rec.parsedFileName?.flags;
-  if (flags) {
-    if (flags.aiPerson) {
-      detectionClasses.push("Person");
-      hasAnyDetection = true;
-    }
-    if (flags.aiVehicle) {
-      detectionClasses.push("Vehicle");
-      hasAnyDetection = true;
-    }
-    if (flags.aiAnimal) {
-      detectionClasses.push("Animal");
-      hasAnyDetection = true;
-    }
-    if (flags.aiFace) {
-      detectionClasses.push("Face");
-      hasAnyDetection = true;
-    }
-    if (flags.motion) {
-      detectionClasses.push("Motion");
-      hasAnyDetection = true;
-    }
-    if (flags.doorbell) {
-      detectionClasses.push("Doorbell");
-      hasAnyDetection = true;
-    }
-    if (flags.package) {
-      detectionClasses.push("Package");
-      hasAnyDetection = true;
-    }
-  }
-
-  // Fallback: parse recordType string if flags are not available
-  if (!hasAnyDetection && rec.recordType) {
-    const recordTypeLower = rec.recordType.toLowerCase();
-    if (
-      recordTypeLower.includes("people") ||
-      recordTypeLower.includes("person")
-    ) {
-      detectionClasses.push("Person");
-    }
-    if (recordTypeLower.includes("vehicle")) {
-      detectionClasses.push("Vehicle");
-    }
-    if (
-      recordTypeLower.includes("dog_cat") ||
-      recordTypeLower.includes("animal")
-    ) {
-      detectionClasses.push("Animal");
-    }
-    if (recordTypeLower.includes("face")) {
-      detectionClasses.push("Face");
-    }
-    if (recordTypeLower.includes("md") || recordTypeLower.includes("motion")) {
-      detectionClasses.push("Motion");
-    }
-    if (
-      recordTypeLower.includes("visitor") ||
-      recordTypeLower.includes("doorbell")
-    ) {
-      detectionClasses.push("Doorbell");
-    }
-    if (recordTypeLower.includes("package")) {
-      detectionClasses.push("Package");
-    }
-  }
-
-  // Always include Motion if no other detections found
-  if (detectionClasses.length === 0) {
-    detectionClasses.push("Motion");
-  }
-
-  const resources =
-    videoHref || thumbnailHref
-      ? {
-          ...(videoHref ? { video: { href: videoHref } } : {}),
-          ...(thumbnailHref ? { thumbnail: { href: thumbnailHref } } : {}),
-        }
-      : undefined;
+  // Use detectionClasses from RecordingFile (already populated by CGI/Baichuan API)
+  // Default to motion if not available
+  const detectionClasses = rec.detectionClasses ?? ["motion"];
 
   return {
     id,
     startTime: recStartMs,
     duration,
     event: rec.recordType,
-    description,
-    detectionClasses:
-      detectionClasses.length > 0 ? detectionClasses : undefined,
-    resources,
+    description: rec.name || rec.fileName || rec.id || "",
+    detectionClasses,
+    resources:
+      videoHref || thumbnailHref
+        ? {
+            ...(videoHref ? { video: { href: videoHref } } : {}),
+            ...(thumbnailHref ? { thumbnail: { href: thumbnailHref } } : {}),
+          }
+        : undefined,
   };
 }
 
 /**
  * Convert an array of RecordingFile to VideoClip array
- * Uses recordingFileToVideoClip for each recording
+ * Simple mapping with optional limit
  */
 export async function recordingsToVideoClips(
   recordings: RecordingFile[],
   options: {
-    /** Fallback start date if recording doesn't have one */
-    fallbackStart: Date;
-    /** API instance to get playback URLs (optional, for device standalone recordings) */
-    api?: ReolinkBaichuanApi;
+    /** Plugin instance for generating webhook URLs */
+    plugin: ScryptedDeviceBase;
+    /** Device ID for webhook URLs */
+    deviceId: string;
     /** Logger for debug messages */
     logger?: Console;
-    /** Plugin instance for generating webhook URLs */
-    plugin?: ScryptedDeviceBase;
-    /** Device ID for webhook URLs */
-    deviceId?: string;
-    /** Use webhook URLs instead of direct RTMP URLs */
-    useWebhook?: boolean;
     /** Maximum number of clips to return (optional) */
     count?: number;
   },
 ): Promise<VideoClip[]> {
-  const { fallbackStart, api, logger, plugin, deviceId, useWebhook, count } =
-    options;
-  const clips: VideoClip[] = [];
+  const { plugin, deviceId, logger, count } = options;
 
-  for (const rec of recordings) {
+  const clipPromises = recordings.map(async (rec) => {
     try {
-      const clip = await recordingFileToVideoClip(rec, {
-        fallbackStart,
-        api,
-        logger,
-        plugin,
-        deviceId,
-        useWebhook,
-      });
-      clips.push(clip);
+      return await recordingFileToVideoClip(rec, { plugin, deviceId, logger });
     } catch (e) {
       logger?.warn(
         `Failed to convert recording to video clip: fileName=${rec.fileName}`,
         e?.message || String(e),
       );
+      return null;
     }
-  }
+  });
 
-  // Apply count limit if specified
-  return count ? clips.slice(0, count) : clips;
+  const clips = await Promise.all(clipPromises);
+  const validClips = clips.filter((c): c is VideoClip => c !== null);
+  return count ? validClips.slice(0, count) : validClips;
 }
 
 /**
