@@ -319,6 +319,59 @@ const getHeader = (headers: Record<string, any> | undefined, key: string) => {
   );
 };
 
+const videoclipDownloadCache = new Map<
+  string,
+  { ts: number; promise: Promise<Buffer> }
+>();
+const VIDEOCLIP_DOWNLOAD_CACHE_TTL_MS = 2 * 60 * 1000;
+
+const looksLikeMp4 = (buf: Buffer) => {
+  if (!buf || buf.length < 12) return false;
+  // ISO BMFF: [size(4)][ftyp(4)]
+  return buf.subarray(4, 8).toString("ascii") === "ftyp";
+};
+
+const bufferReadable = async (props: {
+  readable: AsyncIterable<Buffer>;
+  maxBytes: number;
+}): Promise<Buffer> => {
+  const chunks: Buffer[] = [];
+  let total = 0;
+
+  for await (const chunk of props.readable) {
+    total += chunk.length;
+    if (total > props.maxBytes) {
+      throw new Error(
+        `MP4 buffer exceeded maxBytes=${props.maxBytes} (total=${total})`,
+      );
+    }
+    chunks.push(chunk);
+  }
+
+  return Buffer.concat(chunks);
+};
+
+const getCachedDownloadedVideoclip = async (props: {
+  cacheKey: string;
+  download: () => Promise<Buffer>;
+}): Promise<Buffer> => {
+  const now = Date.now();
+  const existing = videoclipDownloadCache.get(props.cacheKey);
+  if (existing && now - existing.ts < VIDEOCLIP_DOWNLOAD_CACHE_TTL_MS) {
+    return await existing.promise;
+  }
+
+  const promise = props.download();
+  videoclipDownloadCache.set(props.cacheKey, { ts: now, promise });
+  try {
+    return await promise;
+  } catch (e) {
+    // Do not keep failed promises around.
+    videoclipDownloadCache.delete(props.cacheKey);
+    throw e;
+  }
+};
+
 export const getVideoclipClientInfo = (request: HttpRequest) => {
   return {
     userAgent:
@@ -342,6 +395,66 @@ export const getVideoclipClientInfo = (request: HttpRequest) => {
   };
 };
 
+const getQueryParam = (requestUrl: string | undefined, key: string) => {
+  if (!requestUrl) return undefined;
+  try {
+    const url = new URL(requestUrl, "http://localhost");
+    const v = url.searchParams.get(key);
+    return v === null ? undefined : v;
+  } catch {
+    return undefined;
+  }
+};
+
+const withQueryParam = (requestUrl: string, key: string, value: string) => {
+  try {
+    const url = new URL(requestUrl, "http://localhost");
+    url.searchParams.set(key, value);
+    return url.pathname + (url.search ? url.search : "");
+  } catch {
+    const sep = requestUrl.includes("?") ? "&" : "?";
+    return `${requestUrl}${sep}${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+  }
+};
+
+let baichuanRuntimePromise:
+  | Promise<{
+      detectIosClient: (userAgent: string | undefined) => {
+        isIos: boolean;
+        isIosInstalledApp: boolean;
+        needsHls: boolean;
+      };
+      HlsSessionManager: new (
+        api: any,
+        options?: {
+          logger?: any;
+          sessionTtlMs?: number;
+          cleanupIntervalMs?: number;
+        },
+      ) => any;
+    }>
+  | undefined;
+
+const getBaichuanRuntime = async () => {
+  if (!baichuanRuntimePromise) {
+    baichuanRuntimePromise = import("@apocaliss92/reolink-baichuan-js") as any;
+  }
+  return baichuanRuntimePromise;
+};
+
+const hlsManagersByApi = new WeakMap<object, any>();
+
+const videoclipLogThrottle = new Map<string, number>();
+const shouldLogThrottled = (key: string, intervalMs: number): boolean => {
+  const now = Date.now();
+  const last = videoclipLogThrottle.get(key);
+  if (last !== undefined && now - last < intervalMs) return false;
+  videoclipLogThrottle.set(key, now);
+  // Best-effort guard against unbounded growth.
+  if (videoclipLogThrottle.size > 5000) videoclipLogThrottle.clear();
+  return true;
+};
+
 /**
  * Handle video clip webhook request
  * Uses progressive streaming for immediate playback.
@@ -362,20 +475,248 @@ export async function handleVideoClipRequest(props: {
 
   // Check if iOS client
   const clientInfo = getVideoclipClientInfo(request);
-  const ua = (clientInfo.userAgent ?? "").toLowerCase();
-  const isIos = /iphone|ipad|ipod/.test(ua);
-  const isIosInstalledApp = ua.includes("installedapp");
+  const hlsPath = getQueryParam(request.url, "hls");
+  const hlsSocketMode = (getQueryParam(request.url, "hlsSocket") ?? "device")
+    .toString()
+    .toLowerCase();
 
-  // Use native download for iOS (more compatible) or if explicitly configured
-  const useDownload = isIos && isIosInstalledApp;
+  let ios: {
+    isIos: boolean;
+    isIosInstalledApp: boolean;
+    needsHls: boolean;
+  } = {
+    isIos: /iphone|ipad|ipod/i.test(clientInfo.userAgent ?? ""),
+    isIosInstalledApp: /(installedapp)/i.test(clientInfo.userAgent ?? ""),
+    needsHls: false,
+  };
 
-  logger.log(
-    `[VideoClip] REQUEST: fileId=${fileId.slice(-40)}, isOnNvr=${device.isOnNvr}, isIos=${isIos}, mode=${useDownload ? "Download" : "Stream"}`,
-  );
+  try {
+    const mod = await getBaichuanRuntime();
+    ios = mod.detectIosClient(clientInfo.userAgent);
+  } catch {
+    // If dynamic import fails, keep best-effort UA detection.
+    ios.needsHls = ios.isIos && ios.isIosInstalledApp;
+  }
+
+  // iOS InstalledApp playback is most reliable via HLS.
+  // If `?hls=` is present, always serve HLS assets (playlist/segments).
+  const shouldUseHls = ios.needsHls || hlsPath !== undefined;
+
+  // Legacy iOS InstalledApp MP4 path: Range probes (e.g. bytes=0-1) expect
+  // a proper 206 with a total size in Content-Range.
+  const hasRange = !!clientInfo.range;
+  const preferDownloadForRange =
+    !shouldUseHls && ios.isIosInstalledApp && hasRange;
+  const useDownload = !shouldUseHls && ios.isIosInstalledApp && !hasRange;
+
+  // These endpoints can be very chatty (HLS playlist polling + segment fetch).
+  // Keep important transitions visible, but push repetitive per-request noise to debug.
+  const requestMode = shouldUseHls
+    ? "HLS"
+    : useDownload
+      ? "Download"
+      : preferDownloadForRange
+        ? "Download(Range)"
+        : "Stream";
+  const requestHlsPathForLog = shouldUseHls ? (hlsPath ?? "playlist.m3u8") : "";
+  const isHlsSegmentReq =
+    shouldUseHls && requestHlsPathForLog.toString().endsWith(".ts");
+  const reqLogKey = `VideoClip:REQ:${props.deviceId}:${fileId}:${requestMode}:${requestHlsPathForLog}`;
+  const reqLine = `[VideoClip] REQUEST: fileId=${fileId.slice(-40)}, isOnNvr=${device.isOnNvr}, isIos=${ios.isIos}, isIosInstalledApp=${ios.isIosInstalledApp}, hasRange=${hasRange}, hls=${shouldUseHls}, hlsPath=${JSON.stringify(hlsPath)}, hlsSocket=${hlsSocketMode}, mode=${requestMode}`;
+  if (hasRange) {
+    logger.log(reqLine);
+  } else if (isHlsSegmentReq) {
+    logger.debug?.(reqLine);
+  } else if (shouldLogThrottled(reqLogKey, 2000)) {
+    logger.log(reqLine);
+  } else {
+    logger.debug?.(reqLine);
+  }
 
   try {
     const api = await device.ensureClient();
     const channel = device.storageSettings?.values?.rtspChannel ?? 0;
+
+    if (shouldUseHls) {
+      const mod = await getBaichuanRuntime();
+      let manager = hlsManagersByApi.get(api as any);
+      if (!manager) {
+        manager = new mod.HlsSessionManager(api as any, {
+          logger: logger as any,
+          // Keep very short: iOS HLS requests are frequent; if the client stops
+          // requesting playlists/segments we want to tear down quickly.
+          sessionTtlMs: 15 * 1000,
+          cleanupIntervalMs: 5 * 1000,
+        });
+        hlsManagersByApi.set(api as any, manager);
+      }
+      const sessionKey = `hls:${props.deviceId}:ch${channel}:${fileId}`;
+      const exclusiveKeyPrefix = `hls:${props.deviceId}:ch${channel}:`;
+
+      // Treat the base clip URL as a playlist request to avoid an extra 302
+      // round-trip on clip switches.
+      const effectiveHlsPath = hlsPath ?? "playlist.m3u8";
+
+      const result = await manager.handleRequest({
+        sessionKey,
+        hlsPath: effectiveHlsPath,
+        requestUrl: request.url ?? "",
+        exclusiveKeyPrefix,
+        createSession: () => ({
+          channel,
+          fileName: fileId,
+          isNvr: device.isOnNvr,
+          // Default: reuse a dedicated replay socket per device for fast clip switching.
+          // Override: `?hlsSocket=clip` forces a fresh socket per clip (more robust, slower).
+          deviceId:
+            hlsSocketMode === "clip"
+              ? `${props.deviceId}:${fileId}`
+              : props.deviceId,
+          // Lower duration improves startup latency on iOS.
+          hlsSegmentDuration: 1,
+          transcodeH265ToH264: true,
+        }),
+      });
+
+      const bodyLen =
+        typeof result.body === "string"
+          ? result.body.length
+          : (result.body?.length ?? 0);
+
+      const respLine = `[VideoClip] HLS RESP: hlsPath=${JSON.stringify(effectiveHlsPath)}, status=${result.statusCode}, len=${bodyLen}`;
+      const isError = result.statusCode >= 400;
+      const isSegment = effectiveHlsPath.endsWith(".ts");
+      const respLogKey = `VideoClip:RESP:${props.deviceId}:${fileId}:${effectiveHlsPath}:${result.statusCode}`;
+      if (isError) {
+        (logger.warn ?? logger.log).call(logger, respLine);
+      } else if (isSegment) {
+        logger.debug?.(respLine);
+      } else if (shouldLogThrottled(respLogKey, 2000)) {
+        logger.log(respLine);
+      } else {
+        logger.debug?.(respLine);
+      }
+
+      response.send(result.body as any, {
+        code: result.statusCode,
+        headers: result.headers,
+      });
+      return;
+    }
+
+    // Range support for iOS: serve a file-like response with known total size.
+    // This is closer to the behavior in scrypted-advanced-notifier's sendVideo.
+    if (preferDownloadForRange) {
+      const rangeHeader = String(clientInfo.range).trim();
+      const m = /^bytes=(\d+)-(\d*)$/i.exec(rangeHeader);
+      if (!m) {
+        response.send("Invalid Range", { code: 416 });
+        return;
+      }
+
+      const start = Number.parseInt(m[1], 10);
+      const endRaw = m[2];
+
+      // Obtain an MP4 buffer (cached) so we can answer arbitrary byte ranges.
+      // On some NVRs, downloadRecording() returns BcMedia/raw, not an MP4 file.
+      // In that case, generate MP4 bytes via createRecordingDownloadMp4Stream.
+      let fileBuf: Buffer;
+      try {
+        fileBuf = await getCachedDownloadedVideoclip({
+          cacheKey: `${device.id || "device"}:${channel}:${fileId}`,
+          download: async () => {
+            logger.log(
+              `[VideoClip] Range requested; preparing MP4 buffer for byte-range support: channel=${channel}, fileId=${fileId}`,
+            );
+
+            const rawOrMp4 = await api.downloadRecording({
+              channel,
+              fileName: fileId,
+            });
+
+            if (looksLikeMp4(rawOrMp4)) {
+              return rawOrMp4;
+            }
+
+            logger.warn?.(
+              `[VideoClip] downloadRecording did not look like MP4 (ftyp missing). Generating MP4 via createRecordingDownloadMp4Stream...`,
+            );
+
+            const { mp4, stop } = await api.createRecordingDownloadMp4Stream({
+              channel,
+              fileName: fileId,
+            });
+
+            try {
+              const mp4Buf = await bufferReadable({
+                readable: mp4 as any,
+                maxBytes: 250 * 1024 * 1024,
+              });
+
+              if (!looksLikeMp4(mp4Buf)) {
+                throw new Error(
+                  "createRecordingDownloadMp4Stream output did not look like MP4 (ftyp missing)",
+                );
+              }
+
+              return mp4Buf;
+            } finally {
+              await stop().catch(() => {});
+            }
+          },
+        });
+      } catch (e: any) {
+        logger.error(
+          `[VideoClip] Range download failed: ${e?.message || String(e)}`,
+        );
+        response.send(`Download failed: ${e?.message || "Unknown error"}`, {
+          code: 500,
+        });
+        return;
+      }
+
+      const fileSize = fileBuf.length;
+      const end = endRaw ? Number.parseInt(endRaw, 10) : fileSize - 1;
+      if (
+        !Number.isFinite(start) ||
+        !Number.isFinite(end) ||
+        start < 0 ||
+        end < start ||
+        start >= fileSize
+      ) {
+        response.send("Invalid Range", { code: 416 });
+        return;
+      }
+
+      const safeEnd = Math.min(end, fileSize - 1);
+      const chunkSize = safeEnd - start + 1;
+      const slice = fileBuf.subarray(start, safeEnd + 1);
+
+      response.sendStream(
+        (async function* () {
+          // Yield in chunks to avoid large single-buffer writes.
+          const CHUNK = 64 * 1024;
+          for (let offset = 0; offset < slice.length; offset += CHUNK) {
+            yield slice.subarray(
+              offset,
+              Math.min(offset + CHUNK, slice.length),
+            );
+          }
+        })(),
+        {
+          code: 206,
+          headers: {
+            "Content-Range": `bytes ${start}-${safeEnd}/${fileSize}`,
+            "Accept-Ranges": "bytes",
+            "Content-Length": chunkSize.toString(),
+            "Content-Type": "video/mp4",
+            "Content-Disposition": 'inline; filename="clip.mp4"',
+            "Cache-Control": "no-cache",
+          },
+        },
+      );
+      return;
+    }
 
     if (useDownload) {
       // Download mode: use native Baichuan download (works for both NVR and standalone)
@@ -445,7 +786,11 @@ export async function handleVideoClipRequest(props: {
       request.headers?.["accept-language"] || "",
       request.headers?.["accept-encoding"] || "",
     ].join("|");
+    const explicitSessionId =
+      getHeader(request.headers, "x-playback-session-id") ??
+      getHeader(request.headers, "X-Playback-Session-Id");
     const sessionId =
+      explicitSessionId ||
       request.headers?.["x-request-id"] ||
       crypto
         .createHash("sha256")
@@ -456,8 +801,8 @@ export async function handleVideoClipRequest(props: {
     logger.debug(
       `[VideoClip] Client info: ${JSON.stringify({
         clientInfo,
-        isIos,
-        isIosInstalledApp,
+        isIos: ios.isIos,
+        isIosInstalledApp: ios.isIosInstalledApp,
       })}`,
     );
 
@@ -471,7 +816,7 @@ export async function handleVideoClipRequest(props: {
 
     let totalSize = 0;
 
-    // Simple response - no range support
+    // No Range: stream the full fMP4 response (unknown total size)
     response.sendStream(
       (async function* () {
         try {
@@ -491,6 +836,7 @@ export async function handleVideoClipRequest(props: {
         code: 200,
         headers: {
           "Content-Type": "video/mp4",
+          "Content-Disposition": 'inline; filename="clip.mp4"',
           "Cache-Control": "no-cache",
         },
       },
