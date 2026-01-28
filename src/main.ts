@@ -356,6 +356,8 @@ class ReolinkNativePlugin
       }
 
       if (type === "video") {
+        // Use handleVideoClipRequest for all clients (including iOS)
+        // It will use HTTP download with chunks which works on all platforms
         await handleVideoClipRequest({
           device,
           deviceId,

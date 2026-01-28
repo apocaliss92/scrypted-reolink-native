@@ -311,9 +311,41 @@ export async function getVideoClipWebhookUrls(props: {
   }
 }
 
+const getHeader = (headers: Record<string, any> | undefined, key: string) => {
+  return (
+    headers?.[key] ??
+    headers?.[key.toLowerCase()] ??
+    headers?.[key.toUpperCase()]
+  );
+};
+
+export const getVideoclipClientInfo = (request: HttpRequest) => {
+  return {
+    userAgent:
+      getHeader(request.headers, "user-agent") ??
+      getHeader(request.headers, "User-Agent"),
+    accept:
+      getHeader(request.headers, "accept") ??
+      getHeader(request.headers, "Accept"),
+    range:
+      getHeader(request.headers, "range") ??
+      getHeader(request.headers, "Range"),
+    secChUa:
+      getHeader(request.headers, "sec-ch-ua") ??
+      getHeader(request.headers, "Sec-CH-UA"),
+    secChUaMobile:
+      getHeader(request.headers, "sec-ch-ua-mobile") ??
+      getHeader(request.headers, "Sec-CH-UA-Mobile"),
+    secChUaPlatform:
+      getHeader(request.headers, "sec-ch-ua-platform") ??
+      getHeader(request.headers, "Sec-CH-UA-Platform"),
+  };
+};
+
 /**
  * Handle video clip webhook request
  * Uses progressive streaming for immediate playback.
+ * For iOS clients, uses HTTP download which is more compatible.
  * Stream management (stopping previous streams, cooldown) is handled by the API layer
  * in ReolinkBaichuanApi.createRecordingReplayMp4Stream via activeReplayStreams per channel.
  */
@@ -327,51 +359,72 @@ export async function handleVideoClipRequest(props: {
 }): Promise<void> {
   const { device, fileId, request, response } = props;
   const logger = device.getBaichuanLogger?.() || props.logger || console;
-  const useHttpSource =
-    device.storageSettings?.values?.videoclipSource === "HTTP";
+
+  // Check if iOS client
+  const clientInfo = getVideoclipClientInfo(request);
+  const ua = (clientInfo.userAgent ?? "").toLowerCase();
+  const isIos = /iphone|ipad|ipod/.test(ua);
+  const isIosInstalledApp = ua.includes("installedapp");
+
+  // Use native download for iOS (more compatible) or if explicitly configured
+  const useDownload = isIos && isIosInstalledApp;
 
   logger.log(
-    `[VideoClip] REQUEST: fileId=${fileId.slice(-40)}, isOnNvr=${device.isOnNvr}, source=${useHttpSource ? "HTTP" : "Native"}`,
+    `[VideoClip] REQUEST: fileId=${fileId.slice(-40)}, isOnNvr=${device.isOnNvr}, isIos=${isIos}, mode=${useDownload ? "Download" : "Stream"}`,
   );
 
   try {
     const api = await device.ensureClient();
     const channel = device.storageSettings?.values?.rtspChannel ?? 0;
 
-    if (useHttpSource) {
-      // HTTP mode: use CGI API to download the video file
-      logger.debug(`[VideoClip] Using CGI API (HTTP) to download: ${fileId}`);
-
-      const mp4Buffer = await api.downloadVod(fileId, {
-        output: fileId,
-      });
-
-      logger.debug(`[VideoClip] Downloaded via CGI: ${mp4Buffer.length} bytes`);
-
-      // Send the buffer as a complete response
-      const CHUNK_SIZE = 64 * 1024; // 64KB chunks
-      response.sendStream(
-        (async function* () {
-          let offset = 0;
-          while (offset < mp4Buffer.length) {
-            const end = Math.min(offset + CHUNK_SIZE, mp4Buffer.length);
-            yield mp4Buffer.subarray(offset, end);
-            offset = end;
-          }
-        })(),
-        {
-          code: 200,
-          headers: {
-            "Content-Type": "video/mp4",
-            "Content-Length": mp4Buffer.length.toString(),
-            "Cache-Control": "no-cache",
-          },
-        },
+    if (useDownload) {
+      // Download mode: use native Baichuan download (works for both NVR and standalone)
+      logger.log(
+        `[VideoClip] Starting native download: channel=${channel}, fileId=${fileId}`,
       );
-      return;
+
+      try {
+        const mp4Buffer = await api.downloadRecording({
+          channel,
+          fileName: fileId,
+        });
+
+        logger.log(`[VideoClip] Downloaded: ${mp4Buffer.length} bytes`);
+
+        // Send the buffer as a complete response in chunks
+        const CHUNK_SIZE = 64 * 1024; // 64KB chunks
+        response.sendStream(
+          (async function* () {
+            let offset = 0;
+            while (offset < mp4Buffer.length) {
+              const end = Math.min(offset + CHUNK_SIZE, mp4Buffer.length);
+              yield mp4Buffer.subarray(offset, end);
+              offset = end;
+            }
+          })(),
+          {
+            code: 200,
+            headers: {
+              "Content-Type": "video/mp4",
+              "Content-Length": mp4Buffer.length.toString(),
+              "Cache-Control": "no-cache",
+            },
+          },
+        );
+        return;
+      } catch (downloadErr: any) {
+        logger.error(
+          `[VideoClip] Download failed: ${downloadErr?.message || String(downloadErr)}`,
+        );
+        response.send(
+          `Download failed: ${downloadErr?.message || "Unknown error"}`,
+          { code: 500 },
+        );
+        return;
+      }
     }
 
-    // Native mode: use Baichuan streaming replay
+    // Stream mode: use Baichuan streaming replay
     // Add error handler to prevent uncaughtException from client socket errors
     const onClientError = (err: Error) => {
       logger.warn?.(
@@ -399,6 +452,15 @@ export async function handleVideoClipRequest(props: {
         .update(clientFingerprint)
         .digest("hex")
         .slice(0, 16);
+
+    logger.debug(
+      `[VideoClip] Client info: ${JSON.stringify({
+        clientInfo,
+        isIos,
+        isIosInstalledApp,
+      })}`,
+    );
+
     const { mp4: mp4Stream, stop } = await api.createRecordingReplayMp4Stream({
       channel,
       fileName: fileId,
