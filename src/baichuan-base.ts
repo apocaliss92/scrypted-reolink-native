@@ -259,18 +259,20 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       await this.cleanupBaichuanApi();
     }
 
-    // Apply backoff to avoid aggressive reconnection after disconnection
-    if (this.lastDisconnectTime > 0) {
-      const timeSinceDisconnect = Date.now() - this.lastDisconnectTime;
-      if (timeSinceDisconnect < this.reconnectBackoffMs) {
-        const waitTime = this.reconnectBackoffMs - timeSinceDisconnect;
-        const logger = this.getBaichuanLogger();
-        logger.log(`Waiting ${waitTime}ms before reconnection (backoff)`);
-        await new Promise((resolve) => setTimeout(resolve, waitTime));
-      }
-    }
-
+    // IMPORTANT: Assign the promise BEFORE the backoff to prevent parallel reconnections
     this.ensureClientPromise = (async () => {
+      // Apply backoff to avoid aggressive reconnection after disconnection
+      // This is now INSIDE the promise so concurrent callers will wait on the same promise
+      if (this.lastDisconnectTime > 0) {
+        const timeSinceDisconnect = Date.now() - this.lastDisconnectTime;
+        if (timeSinceDisconnect < this.reconnectBackoffMs) {
+          const waitTime = this.reconnectBackoffMs - timeSinceDisconnect;
+          const logger = this.getBaichuanLogger();
+          logger.log(`Waiting ${waitTime}ms before reconnection (backoff)`);
+          await new Promise((resolve) => setTimeout(resolve, waitTime));
+        }
+      }
+
       const config = this.getConnectionConfig();
 
       // Clean up old client if exists
