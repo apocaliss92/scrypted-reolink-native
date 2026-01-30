@@ -120,8 +120,7 @@ export class ReolinkNativeNvrDevice
           this.debugLogsResetTimeout = setTimeout(async () => {
             this.debugLogsResetTimeout = undefined;
             try {
-              this.baichuanApi = undefined;
-              this.ensureClientPromise = undefined;
+              await this.cleanupBaichuanApi();
               await this.ensureBaichuanClient();
             } catch (e) {
               logger.warn(
@@ -600,9 +599,21 @@ export class ReolinkNativeNvrDevice
       channel: entry.rtspChannel,
       uid,
     });
-    await baichuanApi.login();
-    const { capabilities, objects, presets } =
-      await baichuanApi.getDeviceCapabilities(entry.rtspChannel);
+    let capabilities: any;
+    let objects: any;
+    let presets: any;
+    try {
+      await baichuanApi.login();
+      ({ capabilities, objects, presets } =
+        await baichuanApi.getDeviceCapabilities(entry.rtspChannel));
+    } finally {
+      // Ensure the temporary socket used for adoption is not leaked.
+      try {
+        await baichuanApi.close({ reason: "adoptDevice" });
+      } catch {
+        // ignore
+      }
+    }
     const { interfaces, type } = getDeviceInterfaces({
       capabilities,
       logger: this.getBaichuanLogger(),

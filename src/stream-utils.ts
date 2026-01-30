@@ -420,7 +420,7 @@ export class StreamManager {
         ? Boolean(compositeApis) && !(this.opts.sharedConnection ?? false)
         : !(this.opts.sharedConnection ?? false);
 
-      let created: any;
+      let created: Rfc4571TcpServer;
       try {
         const compositeOptions = isComposite
           ? options.compositeOptions
