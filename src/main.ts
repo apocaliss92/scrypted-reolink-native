@@ -1,3 +1,16 @@
+// Polyfill for File class if not available (required by undici in some Node.js environments)
+if (typeof globalThis.File === "undefined") {
+  (globalThis as any).File = class File extends Blob {
+    name: string;
+    lastModified: number;
+    constructor(chunks: BlobPart[], name: string, options?: FilePropertyBag) {
+      super(chunks, options);
+      this.name = name;
+      this.lastModified = options?.lastModified ?? Date.now();
+    }
+  };
+}
+
 import sdk, {
   DeviceCreator,
   DeviceCreatorSettings,
