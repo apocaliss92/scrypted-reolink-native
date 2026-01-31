@@ -72,7 +72,6 @@ export class ReolinkBaichuanIntercom {
       });
 
       // Best-effort: log codec requirements exposed by the camera.
-      // This mirrors neolink's source of truth: TalkAbility (cmd_id=10).
       if (!this.loggedCodecInfo) {
         this.loggedCodecInfo = true;
         try {
