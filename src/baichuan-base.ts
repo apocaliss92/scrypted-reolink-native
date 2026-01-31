@@ -200,6 +200,15 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   protected abstract getConnectionCallbacks(): BaichuanConnectionCallbacks;
 
   /**
+   * Check if this is an NVR/Hub device (multiple channels).
+   * Override in subclasses to return true for NVR devices.
+   * This is used for socket pooling to allocate separate sockets per channel.
+   */
+  protected isNvrDevice(): boolean {
+    return false; // Default: standalone camera
+  }
+
+  /**
    * Check if debug logging is enabled
    */
   protected abstract isDebugEnabled(): boolean;
@@ -236,8 +245,16 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
    * Ensure Baichuan client is connected and ready
    */
   async ensureBaichuanClient(): Promise<ReolinkBaichuanApi> {
+    const logger = this.getBaichuanLogger();
+    const caller = new Error().stack?.split("\n")[2]?.trim() ?? "unknown";
+
     // Prevent concurrent login storms - check promise first
-    if (this.ensureClientPromise) return await this.ensureClientPromise;
+    if (this.ensureClientPromise) {
+      logger.debug(
+        `ensureBaichuanClient: waiting on existing promise (caller: ${caller})`,
+      );
+      return await this.ensureClientPromise;
+    }
 
     // Reuse existing client if socket is still connected and logged in
     // Check this AFTER checking the promise to avoid race conditions
@@ -247,17 +264,21 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
 
       // Only reuse if both conditions are true
       if (isConnected && isLoggedIn) {
+        logger.debug(
+          `ensureBaichuanClient: reusing existing client (caller: ${caller})`,
+        );
         return this.baichuanApi;
       }
 
       // If socket is not connected or not logged in, cleanup the stale client
       // This prevents leaking connections when the socket appears connected but isn't
-      const logger = this.getBaichuanLogger();
       logger.log(
-        `Stale client detected: connected=${isConnected}, loggedIn=${isLoggedIn}, cleaning up`,
+        `Stale client detected: connected=${isConnected}, loggedIn=${isLoggedIn}, cleaning up (caller: ${caller})`,
       );
       await this.cleanupBaichuanApi();
     }
+
+    logger.log(`ensureBaichuanClient: creating NEW client (caller: ${caller})`);
 
     // IMPORTANT: Assign the promise BEFORE the backoff to prevent parallel reconnections
     this.ensureClientPromise = (async () => {
@@ -298,6 +319,10 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         });
 
         await api.login();
+
+        // Set NVR flag BEFORE any streaming to ensure correct socket pooling
+        // NVR devices need separate sockets per channel
+        api.setIsNvr(this.isNvrDevice());
 
         // Verify socket is connected before returning
         if (!api.client.isSocketConnected()) {
@@ -657,8 +682,15 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             `No events received in the last ${Math.round(timeSinceLastEvent / 60_000)} minutes, restarting event listener`,
           );
           // Restart event subscription
+          logger.debug(
+            "Restarting event listener: calling unsubscribeFromEvents...",
+          );
           await this.unsubscribeFromEvents(true);
+          logger.debug(
+            "Restarting event listener: calling subscribeToEvents...",
+          );
           await this.subscribeToEvents(true);
+          logger.debug("Restarting event listener: done");
         } else if (this.lastEventTime === 0) {
           // If lastEventTime is 0, it means we just subscribed but haven't received any events yet
           // Wait a bit longer before considering it a problem
@@ -667,8 +699,17 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             logger.log(
               `No events received since subscription (${Math.round(timeSinceSubscription / 60_000)} minutes ago), restarting event listener`,
             );
+            logger.debug(
+              "Restarting event listener (no events since sub): calling unsubscribeFromEvents...",
+            );
             await this.unsubscribeFromEvents(true);
+            logger.debug(
+              "Restarting event listener (no events since sub): calling subscribeToEvents...",
+            );
             await this.subscribeToEvents(true);
+            logger.debug(
+              "Restarting event listener (no events since sub): done",
+            );
           }
         }
       } catch (e) {
@@ -694,6 +735,13 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   async subscribeToEvents(silent: boolean = false): Promise<void> {
     const logger = this.getBaichuanLogger();
     const callbacks = this.getConnectionCallbacks();
+    const existingClientInfo = this.baichuanApi
+      ? `connected=${this.baichuanApi.client.isSocketConnected()}, loggedIn=${this.baichuanApi.client.loggedIn}`
+      : "no client";
+
+    logger.debug(
+      `subscribeToEvents() called: silent=${silent}, existingClient=[${existingClientInfo}], eventSubscriptionActive=${this.eventSubscriptionActive}`,
+    );
 
     if (!callbacks.onSimpleEvent) {
       return;
@@ -716,7 +764,11 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
     await this.unsubscribeFromEvents(silent);
 
     // Get Baichuan client connection
+    logger.debug("subscribeToEvents: calling ensureBaichuanClient...");
     const api = await this.ensureBaichuanClient();
+    logger.debug(
+      `subscribeToEvents: ensureBaichuanClient returned, reused=${api === this.baichuanApi}`,
+    );
 
     // Verify connection is ready
     if (!api.client.isSocketConnected() || !api.client.loggedIn) {
