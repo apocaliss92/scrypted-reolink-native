@@ -218,6 +218,10 @@ export class ReolinkNativeNvrDevice
     };
   }
 
+  protected isNvrDevice(): boolean {
+    return true; // NVR/Hub always returns true
+  }
+
   protected isDebugEnabled(): boolean {
     return this.storageSettings.values.debugLogs || false;
   }
