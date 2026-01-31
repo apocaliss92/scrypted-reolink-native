@@ -1,21 +1,17 @@
 import type {
-  BaichuanClientOptions,
   BatteryInfo,
   DeviceCapabilities,
   NativeVideoStreamVariant,
   PtzCommand,
   PtzPreset,
   ReolinkBaichuanApi,
-  ReolinkCgiApi,
   ReolinkSimpleEvent,
   ReolinkSupportedStream,
   SleepStatus,
-  StreamProfile,
   StreamSamplingSelection,
 } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, {
   BinarySensor,
-  Brightness,
   Camera,
   Device,
   DeviceProvider,
@@ -25,20 +21,17 @@ import sdk, {
   ObjectDetectionTypes,
   ObjectDetector,
   ObjectsDetected,
-  OnOff,
   PanTiltZoom,
   PanTiltZoomCommand,
   Reboot,
   RequestMediaStreamOptions,
   RequestPictureOptions,
   ResponsePictureOptions,
-  ScryptedDeviceBase,
   ScryptedDeviceType,
   ScryptedInterface,
   ScryptedMimeTypes,
   Setting,
   Settings,
-  SettingValue,
   VideoCamera,
   VideoClip,
   VideoClipOptions,
@@ -48,21 +41,24 @@ import sdk, {
   VideoTextOverlays,
 } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
-import path from "path";
-import fs from "fs";
 import crypto from "crypto";
-import { spawn } from "node:child_process";
+import fs from "fs";
+import path from "path";
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
+import {
+  ReolinkCameraAutotracking,
+  ReolinkCameraFloodlight,
+  ReolinkCameraMotionFloodlight,
+  ReolinkCameraMotionSiren,
+  ReolinkCameraPirSensor,
+  ReolinkCameraSiren,
+} from "./accessories";
 import {
   BaseBaichuanClass,
   type BaichuanConnectionCallbacks,
   type BaichuanConnectionConfig,
 } from "./baichuan-base";
-import {
-  createBaichuanApi,
-  normalizeUid,
-  type BaichuanTransport,
-} from "./connect";
+import { normalizeUid, type BaichuanTransport } from "./connect";
 import {
   convertDebugLogsToApiOptions,
   getApiRelevantDebugLogs,
@@ -92,14 +88,6 @@ import {
   sirenSuffix,
   updateDeviceInfo,
 } from "./utils";
-import {
-  ReolinkCameraAutotracking,
-  ReolinkCameraFloodlight,
-  ReolinkCameraMotionFloodlight,
-  ReolinkCameraMotionSiren,
-  ReolinkCameraPirSensor,
-  ReolinkCameraSiren,
-} from "./accessories";
 
 export type CameraType =
   | "battery"
@@ -2887,7 +2875,7 @@ export class ReolinkCamera
         const { rtspChannel, variantType } = this.storageSettings.values;
 
         try {
-          const { nativeStreams, rtmpStreams, rtspStreams } =
+          const { nativeStreams, rtmpStreams, rtspStreams, rawEncXml } =
             await client.buildVideoStreamOptions({
               onNvr: this.isOnNvr,
               channel: rtspChannel,
@@ -2904,6 +2892,7 @@ export class ReolinkCamera
               onNvr: this.isOnNvr,
               channel: rtspChannel,
               compositeOnly: this.isMultiFocal,
+              rawEncXml,
             })}`,
           );
 
