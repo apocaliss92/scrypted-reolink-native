@@ -37,6 +37,8 @@ import {
   handleVideoClipRequest,
   multifocalSuffix,
   nvrSuffix,
+  udpCameraSuffix,
+  udpMultifocalSuffix,
 } from "./utils";
 import { randomBytes } from "crypto";
 import { ReolinkCamera } from "./camera";
@@ -135,13 +137,24 @@ class ReolinkNativePlugin
 
     // Handle multi-focal device case
     if (detection.type === "multifocal") {
-      const isBattery = detection.transport === "udp";
-      nativeId = `${identifier}${isBattery ? batteryMultifocalSuffix : multifocalSuffix}`;
+      // Determine suffix based on transport and battery capability
+      // UDP transport does NOT always mean battery (e.g., some floodlight cameras use UDP but are AC-powered)
+      const isUdp = detection.transport === "udp";
 
-      settings.newCamera ||= name;
-
+      // Get capabilities to check if device has battery
       const { capabilities, objects, presets } =
         await detectedApi.getDeviceCapabilities();
+
+      const hasBattery = capabilities?.hasBattery === true;
+
+      // Choose suffix based on transport and battery
+      if (isUdp) {
+        nativeId = `${identifier}${hasBattery ? batteryMultifocalSuffix : udpMultifocalSuffix}`;
+      } else {
+        nativeId = `${identifier}${multifocalSuffix}`;
+      }
+
+      settings.newCamera ||= name;
 
       const { interfaces } = getDeviceInterfaces({
         capabilities,
@@ -201,10 +214,17 @@ class ReolinkNativePlugin
       return nativeId;
     }
 
-    // Create nativeId based on device type
+    // Create nativeId based on device type and transport
+    // UDP transport does NOT always mean battery (e.g., Elite Floodlight WiFi uses UDP but is AC-powered)
+    const isUdp = detection.transport === "udp";
     if (detection.type === "battery-cam") {
+      // Battery camera (always UDP)
       nativeId = `${identifier}${batteryCameraSuffix}`;
+    } else if (isUdp) {
+      // UDP camera without battery (e.g., Elite Floodlight WiFi)
+      nativeId = `${identifier}${udpCameraSuffix}`;
     } else {
+      // Regular TCP camera
       nativeId = `${identifier}${cameraSuffix}`;
     }
 
@@ -315,8 +335,18 @@ class ReolinkNativePlugin
         this,
         "multi-focal-battery",
       );
+    } else if (nativeId.endsWith(udpMultifocalSuffix)) {
+      // UDP multifocal without battery
+      return new ReolinkNativeMultiFocalDevice(
+        nativeId,
+        this,
+        "multi-focal-udp",
+      );
     } else if (nativeId.endsWith(multifocalSuffix)) {
       return new ReolinkNativeMultiFocalDevice(nativeId, this, "multi-focal");
+    } else if (nativeId.endsWith(udpCameraSuffix)) {
+      // UDP camera without battery (e.g., Elite Floodlight WiFi)
+      return new ReolinkCamera(nativeId, this, { type: "udp" });
     } else {
       return new ReolinkCamera(nativeId, this, { type: "regular" });
     }

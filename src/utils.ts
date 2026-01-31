@@ -37,8 +37,10 @@ export type OperationChannelMap = Partial<Record<OperationChannelType, number>>;
 
 export const nvrSuffix = `-nvr`;
 export const batteryCameraSuffix = `-battery-cam`;
+export const udpCameraSuffix = `-udp-cam`; // UDP camera without battery (e.g., Elite Floodlight WiFi)
 export const multifocalSuffix = `-multifocal`;
 export const batteryMultifocalSuffix = `-battery-multifocal`;
+export const udpMultifocalSuffix = `-udp-multifocal`; // UDP multifocal without battery
 export const cameraSuffix = `-cam`;
 export const sirenSuffix = `-siren`;
 export const floodlightSuffix = `-floodlight`;

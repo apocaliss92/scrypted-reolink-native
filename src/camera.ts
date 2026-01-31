@@ -104,8 +104,10 @@ import {
 export type CameraType =
   | "battery"
   | "regular"
+  | "udp" // UDP camera without battery (e.g., Elite Floodlight WiFi)
   | "multi-focal"
-  | "multi-focal-battery";
+  | "multi-focal-battery"
+  | "multi-focal-udp"; // UDP multifocal without battery
 
 export interface ReolinkCameraOptions {
   type: CameraType;
@@ -738,6 +740,7 @@ export class ReolinkCamera
   protected multiFocalDevice?: ReolinkNativeMultiFocalDevice;
   thisDevice: Settings;
   isBattery: boolean;
+  isUdpCamera: boolean; // UDP camera without battery (e.g., Elite Floodlight WiFi)
   isMultiFocal: boolean;
   isOnNvr: boolean;
   protocol: BaichuanTransport;
@@ -769,7 +772,12 @@ export class ReolinkCamera
   ) {
     const isBattery =
       options.type === "battery" || options.type === "multi-focal-battery";
-    const transport = isBattery || !!options.nvrDevice ? "udp" : "tcp";
+    // UDP cameras include: battery cameras, NVR children, and UDP-only cameras (e.g., Elite Floodlight WiFi)
+    const isUdpCamera =
+      options.type === "udp" || options.type === "multi-focal-udp";
+    const transport = isBattery || isUdpCamera ? "udp" : "tcp";
+    // const transport =
+    //   isBattery || isUdpCamera || !!options.nvrDevice ? "udp" : "tcp";
     super(nativeId, transport);
     this.plugin.camerasMap.set(this.id, this);
 
@@ -779,8 +787,11 @@ export class ReolinkCamera
     this.thisDevice = sdk.systemManager.getDeviceById<Settings>(this.id);
 
     this.isBattery = isBattery;
+    this.isUdpCamera = isUdpCamera; // UDP camera without battery (e.g., Elite Floodlight WiFi)
     this.isMultiFocal =
-      options.type === "multi-focal" || options.type === "multi-focal-battery";
+      options.type === "multi-focal" ||
+      options.type === "multi-focal-battery" ||
+      options.type === "multi-focal-udp";
     this.isOnNvr = !!this.nvrDevice || !!this.multiFocalDevice?.nvrDevice;
     this.protocol = transport;
 
@@ -1475,17 +1486,21 @@ export class ReolinkCamera
     const { ipAddress, username, password, uid, discoveryMethod } =
       this.storageSettings.values;
     const debugOptions = this.getBaichuanDebugOptions();
-    const normalizedUid = this.isBattery ? normalizeUid(uid) : undefined;
 
-    if (this.isBattery && !normalizedUid) {
-      throw new Error("UID is required for battery cameras (BCUDP)");
-    }
+    // UDP cameras (battery or UDP-only like Elite Floodlight WiFi) require UID
+    // const requiresUid = this.isBattery || this.isUdpCamera;
+    // const normalizedUid = requiresUid ? normalizeUid(uid) : undefined;
+    const normalizedUid = normalizeUid(uid);
+
+    // if (requiresUid && !normalizedUid) {
+    //   throw new Error("UID is required for UDP cameras (BCUDP)");
+    // }
 
     // Prevent accidental connections to localhost (Node will default host=127.0.0.1 when host is undefined).
     // This shows up as connect ECONNREFUSED 127.0.0.1:9000 and will never recover with socket resets.
-    if (!this.isBattery && !ipAddress) {
-      throw new Error("IP Address is required for TCP devices");
-    }
+    // if (!requiresUid && !ipAddress) {
+    //   throw new Error("IP Address is required for TCP devices");
+    // }
 
     return {
       host: ipAddress,
@@ -1494,8 +1509,9 @@ export class ReolinkCamera
       uid: normalizedUid,
       transport: this.protocol,
       debugOptions,
-      udpDiscoveryMethod:
-        discoveryMethod as BaichuanClientOptions["udpDiscoveryMethod"],
+      udpDiscoveryMethod: discoveryMethod,
+      // NOTE: idleDisconnect is NOT set here - the library handles it internally
+      // based on the battery status detected during connection
     };
   }
 
@@ -1528,6 +1544,10 @@ export class ReolinkCamera
 
   protected isDebugEnabled(): boolean {
     return this.storageSettings.values.debugLogs;
+  }
+
+  protected isBatteryDevice(): boolean {
+    return this.isBattery;
   }
 
   protected getDeviceName(): string {
@@ -3287,6 +3307,14 @@ export class ReolinkCamera
     const hideUid = !this.isBattery || this.isOnNvr || !!this.multiFocalDevice;
     this.storageSettings.settings.uid.hide = hideUid;
     this.storageSettings.settings.discoveryMethod.hide = hideUid;
+    // Show UID and discovery method for UDP cameras (battery or UDP-only like Elite Floodlight WiFi)
+    // Hide for NVR children or multifocal lenses (they use parent's connection)
+    // const requiresUidSettings =
+    //   (this.isBattery || this.isUdpCamera) &&
+    //   !this.isOnNvr &&
+    //   !this.multiFocalDevice;
+    // this.storageSettings.settings.uid.hide = !requiresUidSettings;
+    // this.storageSettings.settings.discoveryMethod.hide = !requiresUidSettings;
 
     if (this.isBattery && !this.storageSettings.values.mixinsSetup) {
       try {

@@ -209,6 +209,15 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   }
 
   /**
+   * Check if this is a battery-powered device.
+   * Override in subclasses to return true for battery cameras.
+   * This is used to enable idle disconnect to preserve battery life.
+   */
+  protected isBatteryDevice(): boolean {
+    return false; // Default: AC-powered
+  }
+
+  /**
    * Check if debug logging is enabled
    */
   protected abstract isDebugEnabled(): boolean;
@@ -323,6 +332,12 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         // Set NVR flag BEFORE any streaming to ensure correct socket pooling
         // NVR devices need separate sockets per channel
         api.setIsNvr(this.isNvrDevice());
+
+        // Enable idle disconnect for battery cameras to preserve battery life
+        // AC-powered cameras (including UDP cameras like Elite Floodlight WiFi) don't need it
+        if (this.isBatteryDevice()) {
+          api.setIdleDisconnect(true);
+        }
 
         // Verify socket is connected before returning
         if (!api.client.isSocketConnected()) {
