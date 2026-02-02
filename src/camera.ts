@@ -13,6 +13,7 @@ import type {
 import sdk, {
   BinarySensor,
   Camera,
+  ChargeState,
   Device,
   DeviceProvider,
   Intercom,
@@ -3575,19 +3576,30 @@ export class ReolinkCamera
 
     if (batteryInfo.batteryPercent !== undefined) {
       const oldLevel = this.batteryLevel;
+      const oldChargeState = this.chargeState;
+      // adapterStatus: "adapter" | "solarPanel" | "none" — sotto carica se adapter collegato (anche con chargeComplete)
+      const isSottoCarica =
+        batteryInfo.adapterStatus === "adapter" ||
+        batteryInfo.adapterStatus === "solarPanel";
+      const newChargeState =
+        batteryInfo.adapterStatus !== undefined
+          ? isSottoCarica
+            ? ChargeState.Charging
+            : ChargeState.NotCharging
+          : undefined;
+
       this.batteryLevel = batteryInfo.batteryPercent;
+      if (newChargeState !== undefined) {
+        this.chargeState = newChargeState;
+      }
 
       let shouldCheckRecordingAction = true;
 
       // Log only if battery level changed
       if (oldLevel !== batteryInfo.batteryPercent) {
-        if (batteryInfo.chargeStatus !== undefined) {
-          // chargeStatus: "0"=charging, "1"=discharging, "2"=full
-          const charging =
-            batteryInfo.chargeStatus === "0" ||
-            batteryInfo.chargeStatus === "2";
+        if (batteryInfo.adapterStatus !== undefined) {
           logger.log(
-            `Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}% (charging: ${charging})`,
+            `Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}% (sotto carica: ${isSottoCarica}, adapterStatus: ${batteryInfo.adapterStatus}, chargeStatus: ${batteryInfo.chargeStatus ?? "—"})`,
           );
         } else {
           logger.log(
@@ -3596,18 +3608,28 @@ export class ReolinkCamera
         }
       } else if (oldLevel === undefined) {
         // First time setting battery level
-        if (batteryInfo.chargeStatus !== undefined) {
-          const charging =
-            batteryInfo.chargeStatus === "0" ||
-            batteryInfo.chargeStatus === "2";
+        if (batteryInfo.adapterStatus !== undefined) {
           logger.log(
-            `Battery level set: ${batteryInfo.batteryPercent}% (charging: ${charging})`,
+            `Battery level set: ${batteryInfo.batteryPercent}% (sotto carica: ${isSottoCarica}, adapterStatus: ${batteryInfo.adapterStatus})`,
           );
         } else {
           logger.log(`Battery level set: ${batteryInfo.batteryPercent}%`);
         }
       } else {
         shouldCheckRecordingAction = false;
+      }
+
+      // Forward battery/charge state changes to Scrypted (plugin, HomeKit, etc.)
+      const levelChanged = oldLevel !== batteryInfo.batteryPercent;
+      const chargeStateChanged =
+        newChargeState !== undefined && oldChargeState !== newChargeState;
+      if (levelChanged || chargeStateChanged) {
+        if (levelChanged) {
+          void this.onDeviceEvent(ScryptedInterface.Battery, undefined);
+        }
+        if (chargeStateChanged && newChargeState !== undefined) {
+          void this.onDeviceEvent(ScryptedInterface.Charger, undefined);
+        }
       }
 
       if (shouldCheckRecordingAction) {

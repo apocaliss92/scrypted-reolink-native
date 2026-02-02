@@ -1,11 +1,10 @@
 import type {
-  BatteryInfo,
   DeviceCapabilities,
   DualLensChannelAnalysis,
   NativeVideoStreamVariant,
   ReolinkBaichuanApi,
   ReolinkSimpleEvent,
-  SleepStatus,
+  SleepStatus
 } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import sdk, {
   Device,
@@ -14,7 +13,6 @@ import sdk, {
   ScryptedDeviceType,
   Settings,
 } from "@scrypted/sdk";
-import type { BaichuanConnectionConfig } from "./baichuan-base";
 import { CameraType, ReolinkCamera } from "./camera";
 import ReolinkNativePlugin from "./main";
 import { ReolinkNativeNvrDevice } from "./nvr";

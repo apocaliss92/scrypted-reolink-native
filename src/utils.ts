@@ -89,7 +89,7 @@ export const getDeviceInterfaces = (props: {
     if (hasSiren || hasFloodlight || hasPir)
       interfaces.push(ScryptedInterface.DeviceProvider);
     if (hasBattery) {
-      interfaces.push(ScryptedInterface.Battery, ScryptedInterface.Sleep);
+      interfaces.push(ScryptedInterface.Battery, ScryptedInterface.Sleep, ScryptedInterface.Charger);
     }
     if (hasIntercom) {
       interfaces.push(ScryptedInterface.Intercom);
