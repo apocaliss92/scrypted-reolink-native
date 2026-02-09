@@ -668,7 +668,11 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   }
 
   /**
-   * Start event check to monitor if events are being received
+   * Start event check to monitor if events are being received.
+   * The library (ReolinkBaichuanApi) handles auto-recovery of lost subscriptions
+   * internally via its built-in event watchdog. This plugin-level check is a
+   * complementary fallback that performs a full unsub/resub cycle at the plugin
+   * level if no events arrive for an extended period.
    */
   private startEventCheck(api: ReolinkBaichuanApi): void {
     const logger = this.getBaichuanLogger();
@@ -676,13 +680,13 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
     // Stop any existing interval
     this.stopEventCheck();
 
-    // Check every minute if events are being received
+    // Check every 60s if events are being received
     this.eventCheckInterval = setInterval(async () => {
       if (!this.baichuanApi || this.baichuanApi !== api) {
         return; // Connection changed, stop this interval
       }
 
-      // Only check if event subscription is active
+      // Only check if event subscription is active at the plugin level
       if (!this.eventSubscriptionActive) {
         return;
       }
@@ -690,47 +694,28 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       try {
         const now = Date.now();
         const timeSinceLastEvent = now - this.lastEventTime;
-        const fiveMinutesMs = 5 * 60 * 1000;
+        const tenMinutesMs = 10 * 60 * 1000;
 
-        if (this.lastEventTime > 0 && timeSinceLastEvent > fiveMinutesMs) {
+        if (this.lastEventTime > 0 && timeSinceLastEvent > tenMinutesMs) {
           logger.log(
-            `No events received in the last ${Math.round(timeSinceLastEvent / 60_000)} minutes, restarting event listener`,
-          );
-          // Restart event subscription
-          logger.debug(
-            "Restarting event listener: calling unsubscribeFromEvents...",
+            `No events received in the last ${Math.round(timeSinceLastEvent / 60_000)} minutes, performing full plugin-level event restart`,
           );
           await this.unsubscribeFromEvents(true);
-          logger.debug(
-            "Restarting event listener: calling subscribeToEvents...",
-          );
           await this.subscribeToEvents(true);
-          logger.debug("Restarting event listener: done");
         } else if (this.lastEventTime === 0) {
-          // If lastEventTime is 0, it means we just subscribed but haven't received any events yet
-          // Wait a bit longer before considering it a problem
           const timeSinceSubscription = now - (this.connectionTime || now);
-          if (timeSinceSubscription > fiveMinutesMs) {
+          if (timeSinceSubscription > tenMinutesMs) {
             logger.log(
-              `No events received since subscription (${Math.round(timeSinceSubscription / 60_000)} minutes ago), restarting event listener`,
-            );
-            logger.debug(
-              "Restarting event listener (no events since sub): calling unsubscribeFromEvents...",
+              `No events received since subscription (${Math.round(timeSinceSubscription / 60_000)} minutes ago), performing full plugin-level event restart`,
             );
             await this.unsubscribeFromEvents(true);
-            logger.debug(
-              "Restarting event listener (no events since sub): calling subscribeToEvents...",
-            );
             await this.subscribeToEvents(true);
-            logger.debug(
-              "Restarting event listener (no events since sub): done",
-            );
           }
         }
       } catch (e) {
         logger.debug(`Error in event check: ${e?.message || String(e)}`);
       }
-    }, 5_000); // Check every minute
+    }, 60_000);
   }
 
   /**
@@ -813,7 +798,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       await api.onSimpleEvent(wrappedHandler);
       this.eventSubscriptionActive = true;
       this.lastEventTime = Date.now(); // Initialize on subscription
-      logger.debug("Subscribed to Baichuan events");
+      logger.debug("Subscribed to Baichuan events (library watchdog handles auto-recovery)");
     } catch (e) {
       logger.warn("Failed to subscribe to events", e?.message || String(e));
       this.eventSubscriptionActive = false;
