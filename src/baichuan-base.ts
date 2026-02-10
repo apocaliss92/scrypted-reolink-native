@@ -218,6 +218,16 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   }
 
   /**
+   * Check if this is a multi-focal/dual-lens device.
+   * Override in subclasses to return true for multi-focal cameras.
+   * Multi-focal cameras need all channels to share a single streaming socket
+   * because they reject concurrent streaming TCP connections (response_code 430).
+   */
+  protected isMultiFocalDevice(): boolean {
+    return false; // Default: single-lens camera
+  }
+
+  /**
    * Check if debug logging is enabled
    */
   protected abstract isDebugEnabled(): boolean;
@@ -332,6 +342,10 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         // Set NVR flag BEFORE any streaming to ensure correct socket pooling
         // NVR devices need separate sockets per channel
         api.setIsNvr(this.isNvrDevice());
+
+        // Set multi-focal flag BEFORE any streaming to ensure correct socket pooling
+        // Multi-focal cameras need all channels on the same streaming socket
+        api.setIsMultiFocal(this.isMultiFocalDevice());
 
         // Enable idle disconnect for battery cameras to preserve battery life
         // AC-powered cameras (including UDP cameras like Elite Floodlight WiFi) don't need it

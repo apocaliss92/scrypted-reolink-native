@@ -41,6 +41,10 @@ export class ReolinkNativeMultiFocalDevice
     this.plugin = plugin;
   }
 
+  protected isMultiFocalDevice(): boolean {
+    return true; // Multi-focal cameras need shared streaming socket
+  }
+
   protected async onBeforeCleanup(): Promise<void> {
     await this.unsubscribeFromAllEvents();
   }
