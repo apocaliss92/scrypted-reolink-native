@@ -687,6 +687,12 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
    * internally via its built-in event watchdog. This plugin-level check is a
    * complementary fallback that performs a full unsub/resub cycle at the plugin
    * level if no events arrive for an extended period.
+   *
+   * It also acts as a recovery mechanism: if the event subscription was lost
+   * during a reconnection storm (e.g. subscribeToEvents failed with ECONNREFUSED
+   * but the connection was later re-established by the streaming infrastructure),
+   * this check will detect that eventSubscriptionActive is false on a live
+   * connection and re-subscribe automatically.
    */
   private startEventCheck(api: ReolinkBaichuanApi): void {
     const logger = this.getBaichuanLogger();
@@ -700,8 +706,35 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         return; // Connection changed, stop this interval
       }
 
-      // Only check if event subscription is active at the plugin level
+      // If event subscription is not active but the connection is alive and
+      // event subscription is desired, attempt to re-subscribe.
+      // This handles the case where subscribeToEvents() failed during
+      // reconnection (e.g. ECONNREFUSED) but the connection was later
+      // re-established by the streaming infrastructure.
       if (!this.eventSubscriptionActive) {
+        const callbacks = this.getConnectionCallbacks();
+        const isEventDesired =
+          callbacks.getEventSubscriptionEnabled?.() ?? false;
+        const isConnected =
+          api.client.isSocketConnected() && api.client.loggedIn;
+
+        if (isEventDesired && isConnected) {
+          logger.log(
+            "Event subscription not active on live connection, attempting re-subscribe",
+          );
+          try {
+            await this.subscribeToEvents(true);
+            if (this.eventSubscriptionActive) {
+              logger.log(
+                "Successfully re-subscribed to events after lost subscription",
+              );
+            }
+          } catch (e) {
+            logger.debug(
+              `Failed to re-subscribe to events: ${e?.message || String(e)}`,
+            );
+          }
+        }
         return;
       }
 

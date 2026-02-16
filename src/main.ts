@@ -11,22 +11,24 @@ if (typeof globalThis.File === "undefined") {
   };
 }
 
+import type { AutoDetectMode } from "@apocaliss92/reolink-baichuan-js" with {
+  "resolution-mode": "import"
+};
 import sdk, {
   DeviceCreator,
   DeviceCreatorSettings,
   DeviceProvider,
   HttpRequest,
   HttpResponse,
-  MediaObject,
   ScryptedDeviceBase,
   ScryptedDeviceType,
   ScryptedInterface,
-  ScryptedMimeTypes,
   ScryptedNativeId,
-  Setting,
-  VideoClips,
+  Setting
 } from "@scrypted/sdk";
+import { randomBytes } from "crypto";
 import { BaseBaichuanClass } from "./baichuan-base";
+import { ReolinkCamera } from "./camera";
 import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
 import {
@@ -40,16 +42,10 @@ import {
   udpCameraSuffix,
   udpMultifocalSuffix,
 } from "./utils";
-import { randomBytes } from "crypto";
-import { ReolinkCamera } from "./camera";
-import type { AutoDetectMode } from "@apocaliss92/reolink-baichuan-js" with {
-  "resolution-mode": "import",
-};
 
 class ReolinkNativePlugin
   extends ScryptedDeviceBase
-  implements DeviceProvider, DeviceCreator
-{
+  implements DeviceProvider, DeviceCreator {
   devices = new Map<string, BaseBaichuanClass>();
   camerasMap = new Map<string, ReolinkCamera>();
   nvrDeviceId: string;

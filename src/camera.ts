@@ -1512,17 +1512,31 @@ export class ReolinkCamera
         // For battery cameras, don't auto-resubscribe after idle disconnects
         // (idle disconnects are normal for battery cameras to save power)
         if (!this.isBattery) {
-          setTimeout(async () => {
+          const logger = this.getBaichuanLogger();
+          const maxRetries = 3;
+          const baseDelayMs = 2000;
+
+          const attemptResubscribe = async (attempt: number) => {
             try {
               await this.subscribeToEvents();
             } catch (e) {
-              const logger = this.getBaichuanLogger();
-              logger.warn(
-                "Failed to resubscribe to events after reconnection",
-                e?.message || String(e),
-              );
+              if (attempt < maxRetries) {
+                const delay = baseDelayMs * Math.pow(2, attempt);
+                logger.warn(
+                  `Failed to resubscribe to events after reconnection (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay}ms`,
+                  e?.message || String(e),
+                );
+                setTimeout(() => attemptResubscribe(attempt + 1), delay);
+              } else {
+                logger.warn(
+                  `Failed to resubscribe to events after ${maxRetries} attempts, relying on eventCheck interval for recovery`,
+                  e?.message || String(e),
+                );
+              }
             }
-          }, 1000);
+          };
+
+          setTimeout(() => attemptResubscribe(0), baseDelayMs);
         }
       },
       onSimpleEvent: this.onSimpleEventBound,
