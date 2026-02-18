@@ -184,6 +184,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   private readonly reconnectBackoffMs: number = 2000; // 2 seconds minimum between reconnects
   private eventSubscriptionActive: boolean = false;
   private lastEventTime: number = 0;
+  private currentWrappedEventHandler?: (ev: ReolinkSimpleEvent) => void;
   private pingInterval?: NodeJS.Timeout;
   private autoRenewInterval?: NodeJS.Timeout;
   private eventCheckInterval?: NodeJS.Timeout;
@@ -712,29 +713,8 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       // reconnection (e.g. ECONNREFUSED) but the connection was later
       // re-established by the streaming infrastructure.
       if (!this.eventSubscriptionActive) {
-        const callbacks = this.getConnectionCallbacks();
-        const isEventDesired =
-          callbacks.getEventSubscriptionEnabled?.() ?? false;
-        const isConnected =
-          api.client.isSocketConnected() && api.client.loggedIn;
-
-        if (isEventDesired && isConnected) {
-          logger.log(
-            "Event subscription not active on live connection, attempting re-subscribe",
-          );
-          try {
-            await this.subscribeToEvents(true);
-            if (this.eventSubscriptionActive) {
-              logger.log(
-                "Successfully re-subscribed to events after lost subscription",
-              );
-            }
-          } catch (e) {
-            logger.debug(
-              `Failed to re-subscribe to events: ${e?.message || String(e)}`,
-            );
-          }
-        }
+        // The library's built-in event watchdog handles auto-recovery
+        // with exponential backoff. No need to retry here.
         return;
       }
 
@@ -835,14 +815,17 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
     // Subscribe to events with wrapper to track last event time
     try {
       const originalHandler = callbacks.onSimpleEvent;
-      const wrappedHandler = (ev: ReolinkSimpleEvent) => {
+      // Create and store the wrapped handler so it can be properly removed later
+      this.currentWrappedEventHandler = (ev: ReolinkSimpleEvent) => {
         // Update last event time
         this.lastEventTime = Date.now();
         // Call original handler
         originalHandler(ev);
       };
 
-      await api.onSimpleEvent(wrappedHandler);
+      // onSimpleEvent no longer throws on initial subscribe failure;
+      // the library watchdog handles auto-recovery internally.
+      await api.onSimpleEvent(this.currentWrappedEventHandler);
       this.eventSubscriptionActive = true;
       this.lastEventTime = Date.now(); // Initialize on subscription
       logger.debug("Subscribed to Baichuan events (library watchdog handles auto-recovery)");
@@ -862,12 +845,14 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
 
     // Only unsubscribe if we have an active subscription
     if (
-      this.eventSubscriptionActive &&
       this.baichuanApi &&
-      callbacks.onSimpleEvent
+      (this.eventSubscriptionActive || this.currentWrappedEventHandler)
     ) {
       try {
-        this.baichuanApi.offSimpleEvent(callbacks.onSimpleEvent);
+        // Use the stored wrapped handler reference so offSimpleEvent
+        // actually finds and removes the correct listener.
+        this.baichuanApi.offSimpleEvent(this.currentWrappedEventHandler);
+        this.currentWrappedEventHandler = undefined;
         logger.debug("Unsubscribed from Baichuan events");
       } catch (e) {
         logger.warn("Error unsubscribing from events", e?.message || String(e));
