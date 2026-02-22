@@ -1633,9 +1633,12 @@ export class ReolinkCamera
     // Unsubscribe from events if needed
     if (this.baichuanApi) {
       try {
-        this.baichuanApi.offSimpleEvent(this.onSimpleEventBound);
+        // Must await: offSimpleEvent is async and accesses the socket pool.
+        // Without await the rejection becomes unhandled when api.close()
+        // destroys the pool before the promise settles.
+        await this.baichuanApi.offSimpleEvent(this.onSimpleEventBound);
       } catch {
-        // ignore
+        // ignore - socket may already be destroyed
       }
     }
 

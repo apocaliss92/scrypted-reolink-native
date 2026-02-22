@@ -181,6 +181,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   private errorListener?: (err: unknown) => void;
   private closeListener?: () => void;
   private lastDisconnectTime: number = 0;
+  private cleanupInProgress: boolean = false;
   private readonly reconnectBackoffMs: number = 2000; // 2 seconds minimum between reconnects
   private eventSubscriptionActive: boolean = false;
   private lastEventTime: number = 0;
@@ -428,9 +429,9 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
     // Close listener
     this.closeListener = async () => {
       // Prevent multiple concurrent cleanup operations
-      if (!this.baichuanApi || this.baichuanApi !== api) {
-        // This close event is for a different/old client, ignore it
-        logger.debug("Close event for stale client, ignoring");
+      if (!this.baichuanApi || this.baichuanApi !== api || this.cleanupInProgress) {
+        // This close event is for a different/old client or cleanup is already running
+        logger.debug("Close event for stale client or cleanup already in progress, ignoring");
         return;
       }
 
@@ -455,11 +456,13 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       }
 
       const now = Date.now();
-      const timeSinceLastDisconnect = now - this.lastDisconnectTime;
+      const timeSinceLastDisconnect = this.lastDisconnectTime > 0
+        ? now - this.lastDisconnectTime
+        : undefined;
       this.lastDisconnectTime = now;
 
       logger.log(
-        `Socket closed, resetting client state for reconnection (last disconnect ${timeSinceLastDisconnect}ms ago)`,
+        `Socket closed, resetting client state for reconnection${timeSinceLastDisconnect != null ? ` (last disconnect ${timeSinceLastDisconnect}ms ago)` : " (first disconnect)"}`,
       );
 
       // Mark as disconnected immediately to prevent reuse
@@ -493,55 +496,60 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
    * Removes all listeners, closes connection, and resets state
    */
   async cleanupBaichuanApi(): Promise<void> {
-    if (!this.baichuanApi) {
+    if (!this.baichuanApi || this.cleanupInProgress) {
       return;
     }
 
-    const api = this.baichuanApi;
-
-    // Unsubscribe from events first
-    await this.unsubscribeFromEvents();
-
-    // Call before cleanup hook
-    await this.onBeforeCleanup();
-
-    // Remove all listeners
-    if (this.closeListener) {
-      try {
-        api.client.off("close", this.closeListener);
-      } catch {
-        // ignore
-      }
-      this.closeListener = undefined;
-    }
-
-    if (this.errorListener) {
-      try {
-        api.client.off("error", this.errorListener);
-      } catch {
-        // ignore
-      }
-      this.errorListener = undefined;
-    }
-
-    // Close connection best-effort.
-    // Don't rely on isSocketConnected(): if the local socket state is inconsistent,
-    // skipping close can leave a "ghost" session on the device.
+    this.cleanupInProgress = true;
     try {
-      await api.close();
-    } catch {
-      // ignore
+      const api = this.baichuanApi;
+
+      // Unsubscribe from events first
+      await this.unsubscribeFromEvents();
+
+      // Call before cleanup hook
+      await this.onBeforeCleanup();
+
+      // Remove all listeners
+      if (this.closeListener) {
+        try {
+          api.client.off("close", this.closeListener);
+        } catch {
+          // ignore
+        }
+        this.closeListener = undefined;
+      }
+
+      if (this.errorListener) {
+        try {
+          api.client.off("error", this.errorListener);
+        } catch {
+          // ignore
+        }
+        this.errorListener = undefined;
+      }
+
+      // Close connection best-effort.
+      // Don't rely on isSocketConnected(): if the local socket state is inconsistent,
+      // skipping close can leave a "ghost" session on the device.
+      try {
+        await api.close();
+      } catch {
+        // ignore
+      }
+
+      // Stop ping and auto-renewal intervals
+      this.stopConnectionMaintenance();
+
+      // Stop event check interval
+      this.stopEventCheck();
+
+      // Reset state
+      this.baichuanApi = undefined;
+      this.ensureClientPromise = undefined;
+    } finally {
+      this.cleanupInProgress = false;
     }
-
-    // Stop ping and auto-renewal intervals
-    this.stopConnectionMaintenance();
-
-    // Stop event check interval
-    this.stopEventCheck();
-
-    // Reset state
-    this.baichuanApi = undefined;
-    this.ensureClientPromise = undefined;
   }
 
   /**
@@ -851,7 +859,10 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       try {
         // Use the stored wrapped handler reference so offSimpleEvent
         // actually finds and removes the correct listener.
-        this.baichuanApi.offSimpleEvent(this.currentWrappedEventHandler);
+        // Must await: offSimpleEvent is async and accesses the socket pool
+        // internally. Without await, the rejection becomes unhandled when
+        // api.close() destroys the pool before the promise settles.
+        await this.baichuanApi.offSimpleEvent(this.currentWrappedEventHandler);
         this.currentWrappedEventHandler = undefined;
         logger.debug("Unsubscribed from Baichuan events");
       } catch (e) {
