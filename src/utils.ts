@@ -321,59 +321,6 @@ const getHeader = (headers: Record<string, any> | undefined, key: string) => {
   );
 };
 
-const videoclipDownloadCache = new Map<
-  string,
-  { ts: number; promise: Promise<Buffer> }
->();
-const VIDEOCLIP_DOWNLOAD_CACHE_TTL_MS = 2 * 60 * 1000;
-
-const looksLikeMp4 = (buf: Buffer) => {
-  if (!buf || buf.length < 12) return false;
-  // ISO BMFF: [size(4)][ftyp(4)]
-  return buf.subarray(4, 8).toString("ascii") === "ftyp";
-};
-
-const bufferReadable = async (props: {
-  readable: AsyncIterable<Buffer>;
-  maxBytes: number;
-}): Promise<Buffer> => {
-  const chunks: Buffer[] = [];
-  let total = 0;
-
-  for await (const chunk of props.readable) {
-    total += chunk.length;
-    if (total > props.maxBytes) {
-      throw new Error(
-        `MP4 buffer exceeded maxBytes=${props.maxBytes} (total=${total})`,
-      );
-    }
-    chunks.push(chunk);
-  }
-
-  return Buffer.concat(chunks);
-};
-
-const getCachedDownloadedVideoclip = async (props: {
-  cacheKey: string;
-  download: () => Promise<Buffer>;
-}): Promise<Buffer> => {
-  const now = Date.now();
-  const existing = videoclipDownloadCache.get(props.cacheKey);
-  if (existing && now - existing.ts < VIDEOCLIP_DOWNLOAD_CACHE_TTL_MS) {
-    return await existing.promise;
-  }
-
-  const promise = props.download();
-  videoclipDownloadCache.set(props.cacheKey, { ts: now, promise });
-  try {
-    return await promise;
-  } catch (e) {
-    // Do not keep failed promises around.
-    videoclipDownloadCache.delete(props.cacheKey);
-    throw e;
-  }
-};
-
 export const getVideoclipClientInfo = (request: HttpRequest) => {
   return {
     userAgent:
@@ -458,11 +405,20 @@ const shouldLogThrottled = (key: string, intervalMs: number): boolean => {
 };
 
 /**
- * Handle video clip webhook request
- * Uses progressive streaming for immediate playback.
- * For iOS clients, uses HTTP download which is more compatible.
- * Stream management (stopping previous streams, cooldown) is handled by the API layer
- * in ReolinkBaichuanApi.createRecordingReplayMp4Stream via activeReplayStreams per channel.
+ * Handle video clip webhook request.
+ *
+ * Playback modes (checked in order):
+ * 1. **HLS** – All iOS clients (Safari, AVPlayer, InstalledApp) or explicit `?hls=` query param.
+ *    Uses HlsSessionManager for adaptive HLS delivery with progressive segments (~3-5s to first frame).
+ *    iOS AVFoundation requires Content-Length + Range support for regular MP4, but generating the
+ *    full MP4 upfront takes too long (camera download + transcode = 25+ seconds, causing timeout).
+ *    HLS solves this by streaming segments progressively.
+ * 2. **Stream** – All other clients (desktop browsers, etc.).
+ *    Progressive fMP4 streaming with unknown total size. Fast startup.
+ *
+ * Stream management (stopping previous streams, cooldown) is handled by the API
+ * layer in ReolinkBaichuanApi.createRecordingReplayMp4Stream via activeReplayStreams
+ * per channel.
  */
 export async function handleVideoClipRequest(props: {
   device: ReolinkCamera;
@@ -497,37 +453,25 @@ export async function handleVideoClipRequest(props: {
     ios = mod.detectIosClient(clientInfo.userAgent);
   } catch {
     // If dynamic import fails, keep best-effort UA detection.
-    ios.needsHls = ios.isIos && ios.isIosInstalledApp;
+    // ALL iOS clients should use HLS for reliable recording playback.
+    ios.needsHls = ios.isIos;
   }
 
-  // iOS InstalledApp playback is most reliable via HLS.
-  // If `?hls=` is present, always serve HLS assets (playlist/segments).
+  // All iOS clients use HLS for video clip playback (Safari, AVPlayer, InstalledApp).
+  // HLS streams segments progressively (~3-5s to first frame) instead of buffering
+  // the entire MP4 upfront (25+ seconds, causing iOS timeout).
+  // If `?hls=` is present, always serve HLS assets (playlist/segments) regardless of client.
   const shouldUseHls = ios.needsHls || hlsPath !== undefined;
-
-  // Legacy iOS InstalledApp MP4 path: Range probes (e.g. bytes=0-1) expect
-  // a proper 206 with a total size in Content-Range.
-  const hasRange = !!clientInfo.range;
-  const preferDownloadForRange =
-    !shouldUseHls && ios.isIosInstalledApp && hasRange;
-  const useDownload = !shouldUseHls && ios.isIosInstalledApp && !hasRange;
 
   // These endpoints can be very chatty (HLS playlist polling + segment fetch).
   // Keep important transitions visible, but push repetitive per-request noise to debug.
-  const requestMode = shouldUseHls
-    ? "HLS"
-    : useDownload
-      ? "Download"
-      : preferDownloadForRange
-        ? "Download(Range)"
-        : "Stream";
+  const requestMode = shouldUseHls ? "HLS" : "Stream";
   const requestHlsPathForLog = shouldUseHls ? (hlsPath ?? "playlist.m3u8") : "";
   const isHlsSegmentReq =
     shouldUseHls && requestHlsPathForLog.toString().endsWith(".ts");
   const reqLogKey = `VideoClip:REQ:${props.deviceId}:${fileId}:${requestMode}:${requestHlsPathForLog}`;
-  const reqLine = `[VideoClip] REQUEST: fileId=${fileId.slice(-40)}, isOnNvr=${device.isOnNvr}, isIos=${ios.isIos}, isIosInstalledApp=${ios.isIosInstalledApp}, hasRange=${hasRange}, hls=${shouldUseHls}, hlsPath=${JSON.stringify(hlsPath)}, hlsSocket=${hlsSocketMode}, mode=${requestMode}`;
-  if (hasRange) {
-    logger.log(reqLine);
-  } else if (isHlsSegmentReq) {
+  const reqLine = `[VideoClip] REQUEST: fileId=${fileId.slice(-40)}, isOnNvr=${device.isOnNvr}, isIos=${ios.isIos}, isIosInstalledApp=${ios.isIosInstalledApp}, hls=${shouldUseHls}, hlsPath=${JSON.stringify(hlsPath)}, hlsSocket=${hlsSocketMode}, mode=${requestMode}`;
+  if (isHlsSegmentReq) {
     logger.debug?.(reqLine);
   } else if (shouldLogThrottled(reqLogKey, 2000)) {
     logger.log(reqLine);
@@ -606,168 +550,7 @@ export async function handleVideoClipRequest(props: {
       return;
     }
 
-    // Range support for iOS: serve a file-like response with known total size.
-    // This is closer to the behavior in scrypted-advanced-notifier's sendVideo.
-    if (preferDownloadForRange) {
-      const rangeHeader = String(clientInfo.range).trim();
-      const m = /^bytes=(\d+)-(\d*)$/i.exec(rangeHeader);
-      if (!m) {
-        response.send("Invalid Range", { code: 416 });
-        return;
-      }
-
-      const start = Number.parseInt(m[1], 10);
-      const endRaw = m[2];
-
-      // Obtain an MP4 buffer (cached) so we can answer arbitrary byte ranges.
-      // On some NVRs, downloadRecording() returns BcMedia/raw, not an MP4 file.
-      // In that case, generate MP4 bytes via createRecordingDownloadMp4Stream.
-      let fileBuf: Buffer;
-      try {
-        fileBuf = await getCachedDownloadedVideoclip({
-          cacheKey: `${device.id || "device"}:${channel}:${fileId}`,
-          download: async () => {
-            logger.log(
-              `[VideoClip] Range requested; preparing MP4 buffer for byte-range support: channel=${channel}, fileId=${fileId}`,
-            );
-
-            const rawOrMp4 = await api.downloadRecording({
-              channel,
-              fileName: fileId,
-            });
-
-            if (looksLikeMp4(rawOrMp4)) {
-              return rawOrMp4;
-            }
-
-            logger.warn?.(
-              `[VideoClip] downloadRecording did not look like MP4 (ftyp missing). Generating MP4 via createRecordingDownloadMp4Stream...`,
-            );
-
-            const { mp4, stop } = await api.createRecordingDownloadMp4Stream({
-              channel,
-              fileName: fileId,
-            });
-
-            try {
-              const mp4Buf = await bufferReadable({
-                readable: mp4 as any,
-                maxBytes: 250 * 1024 * 1024,
-              });
-
-              if (!looksLikeMp4(mp4Buf)) {
-                throw new Error(
-                  "createRecordingDownloadMp4Stream output did not look like MP4 (ftyp missing)",
-                );
-              }
-
-              return mp4Buf;
-            } finally {
-              await stop().catch(() => {});
-            }
-          },
-        });
-      } catch (e: any) {
-        logger.error(
-          `[VideoClip] Range download failed: ${e?.message || String(e)}`,
-        );
-        response.send(`Download failed: ${e?.message || "Unknown error"}`, {
-          code: 500,
-        });
-        return;
-      }
-
-      const fileSize = fileBuf.length;
-      const end = endRaw ? Number.parseInt(endRaw, 10) : fileSize - 1;
-      if (
-        !Number.isFinite(start) ||
-        !Number.isFinite(end) ||
-        start < 0 ||
-        end < start ||
-        start >= fileSize
-      ) {
-        response.send("Invalid Range", { code: 416 });
-        return;
-      }
-
-      const safeEnd = Math.min(end, fileSize - 1);
-      const chunkSize = safeEnd - start + 1;
-      const slice = fileBuf.subarray(start, safeEnd + 1);
-
-      response.sendStream(
-        (async function* () {
-          // Yield in chunks to avoid large single-buffer writes.
-          const CHUNK = 64 * 1024;
-          for (let offset = 0; offset < slice.length; offset += CHUNK) {
-            yield slice.subarray(
-              offset,
-              Math.min(offset + CHUNK, slice.length),
-            );
-          }
-        })(),
-        {
-          code: 206,
-          headers: {
-            "Content-Range": `bytes ${start}-${safeEnd}/${fileSize}`,
-            "Accept-Ranges": "bytes",
-            "Content-Length": chunkSize.toString(),
-            "Content-Type": "video/mp4",
-            "Content-Disposition": 'inline; filename="clip.mp4"',
-            "Cache-Control": "no-cache",
-          },
-        },
-      );
-      return;
-    }
-
-    if (useDownload) {
-      // Download mode: use native Baichuan download (works for both NVR and standalone)
-      logger.log(
-        `[VideoClip] Starting native download: channel=${channel}, fileId=${fileId}`,
-      );
-
-      try {
-        const mp4Buffer = await api.downloadRecording({
-          channel,
-          fileName: fileId,
-        });
-
-        logger.log(`[VideoClip] Downloaded: ${mp4Buffer.length} bytes`);
-
-        // Send the buffer as a complete response in chunks
-        const CHUNK_SIZE = 64 * 1024; // 64KB chunks
-        response.sendStream(
-          (async function* () {
-            let offset = 0;
-            while (offset < mp4Buffer.length) {
-              const end = Math.min(offset + CHUNK_SIZE, mp4Buffer.length);
-              yield mp4Buffer.subarray(offset, end);
-              offset = end;
-            }
-          })(),
-          {
-            code: 200,
-            headers: {
-              "Content-Type": "video/mp4",
-              "Content-Length": mp4Buffer.length.toString(),
-              "Cache-Control": "no-cache",
-            },
-          },
-        );
-        return;
-      } catch (downloadErr: any) {
-        logger.error(
-          `[VideoClip] Download failed: ${downloadErr?.message || String(downloadErr)}`,
-        );
-        response.send(
-          `Download failed: ${downloadErr?.message || "Unknown error"}`,
-          { code: 500 },
-        );
-        return;
-      }
-    }
-
-    // Stream mode: use Baichuan streaming replay
+    // Stream mode (non-iOS clients): use Baichuan streaming replay
     // Add error handler to prevent uncaughtException from client socket errors
     const onClientError = (err: Error) => {
       logger.warn?.(
