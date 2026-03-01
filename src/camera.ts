@@ -3507,38 +3507,22 @@ export class ReolinkCamera
   }
 
   async resetBaichuanClient(reason?: any): Promise<void> {
-    try {
-      // Close all active streams before resetting the client
-      // This ensures no streams remain active when the client is reset
-      if (this.streamManager) {
-        try {
-          const hasActiveStreams = this.streamManager.hasActiveStreams();
-          if (hasActiveStreams) {
-            const logger = this.getBaichuanLogger();
-            logger.log("Closing all active streams due to client reset");
-            await this.streamManager.closeAllStreams("client reset");
-          }
-        } catch (e) {
-          const logger = this.getBaichuanLogger();
-          logger.error(
-            "Error closing streams during client reset:",
-            e?.message || String(e),
-          );
-        }
-      }
+    // Delegate to cleanupBaichuanApi() which properly:
+    //  - unsubscribes from events (offSimpleEvent)
+    //  - calls onBeforeCleanup (closes streams, etc.)
+    //  - removes close/error listeners
+    //  - stops connection maintenance timers (ping, auto-renewal)
+    //  - stops event check interval
+    //  - uses cleanupInProgress guard to prevent races
+    // Previously this method called api.close() directly, which left
+    // listeners attached, timers running, and could race with the
+    // close handler's own cleanupBaichuanApi() call.
+    await this.cleanupBaichuanApi();
 
-      this.unsubscribedToEvents?.();
-      await this.baichuanApi?.close();
-    } catch (e) {
-      this.getBaichuanLogger().error(
-        "Error closing Baichuan client during reset",
-        e?.message || String(e),
-      );
-    } finally {
-      this.baichuanApi = undefined;
-      this.connectionTime = undefined;
-      this.ensureClientPromise = undefined;
-    }
+    // Ensure state is fully reset even if cleanup was a no-op
+    // (e.g. baichuanApi was already undefined)
+    this.connectionTime = undefined;
+    this.ensureClientPromise = undefined;
 
     if (reason) {
       const message = reason?.message || reason?.toString?.() || reason;

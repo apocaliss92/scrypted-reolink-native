@@ -277,26 +277,39 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       return await this.ensureClientPromise;
     }
 
-    // Reuse existing client if socket is still connected and logged in
-    // Check this AFTER checking the promise to avoid race conditions
+    // Reuse existing API if possible
     if (this.baichuanApi) {
-      const isConnected = this.baichuanApi.client.isSocketConnected();
-      const isLoggedIn = this.baichuanApi.client.loggedIn;
-
-      // Only reuse if both conditions are true
-      if (isConnected && isLoggedIn) {
+      // Already connected and ready → reuse immediately
+      if (this.baichuanApi.isReady) {
         logger.debug(
           `ensureBaichuanClient: reusing existing client (caller: ${caller})`,
         );
         return this.baichuanApi;
       }
 
-      // If socket is not connected or not logged in, cleanup the stale client
-      // This prevents leaking connections when the socket appears connected but isn't
-      logger.log(
-        `Stale client detected: connected=${isConnected}, loggedIn=${isLoggedIn}, cleaning up (caller: ${caller})`,
-      );
-      await this.cleanupBaichuanApi();
+      // API was explicitly closed → destroy and recreate from scratch
+      if (this.baichuanApi.isClosed) {
+        logger.log(
+          `API is closed, creating new instance (caller: ${caller})`,
+        );
+        await this.cleanupBaichuanApi();
+      } else {
+        // Socket disconnected but API still valid → let the library reconnect
+        // the general socket internally (preserves NVR/multifocal flags,
+        // streaming sockets, and all library-side state)
+        try {
+          logger.log(
+            `General socket lost, reconnecting via ensureConnected (caller: ${caller})`,
+          );
+          await this.baichuanApi.ensureConnected();
+          return this.baichuanApi;
+        } catch (e) {
+          logger.log(
+            `ensureConnected failed: ${e instanceof Error ? e.message : String(e)}, creating new instance`,
+          );
+          await this.cleanupBaichuanApi();
+        }
+      }
     }
 
     logger.log(`ensureBaichuanClient: creating NEW client (caller: ${caller})`);
@@ -543,11 +556,14 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
 
       // Stop event check interval
       this.stopEventCheck();
-
-      // Reset state
+    } finally {
+      // Reset state ALWAYS — even if an earlier step threw.
+      // This prevents the client from being permanently "stuck":
+      // if baichuanApi remains set with a destroyed socket pool,
+      // ensureBaichuanClient() will repeatedly crash on the `client` getter
+      // and never recover.
       this.baichuanApi = undefined;
       this.ensureClientPromise = undefined;
-    } finally {
       this.cleanupInProgress = false;
     }
   }
@@ -558,13 +574,9 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   private getAllActiveConnections(): ReolinkBaichuanApi[] {
     const connections: ReolinkBaichuanApi[] = [];
 
-    // Add main connection if exists and is valid
-    if (this.baichuanApi) {
-      const isConnected = this.baichuanApi.client.isSocketConnected();
-      const isLoggedIn = this.baichuanApi.client.loggedIn;
-      if (isConnected && isLoggedIn) {
-        connections.push(this.baichuanApi);
-      }
+    // Add main connection if it exists and is ready (safe, never throws)
+    if (this.baichuanApi?.isReady) {
+      connections.push(this.baichuanApi);
     }
 
     return connections;
