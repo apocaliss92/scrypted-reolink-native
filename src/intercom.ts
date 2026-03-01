@@ -205,9 +205,32 @@ export class ReolinkBaichuanIntercom {
 
       this.ffmpeg = ffmpeg;
 
+      // Startup timeout: if ffmpeg has not produced any PCM output within
+      // this window it is likely stuck on RTSP connection negotiation.
+      // Kill it early with a clear error rather than hanging silently.
+      const STARTUP_TIMEOUT_MS = 10_000;
+      let receivedFirstPcm = false;
+      const startupTimer = setTimeout(() => {
+        if (!receivedFirstPcm && this.ffmpeg === ffmpeg) {
+          logger.warn(
+            `Intercom ffmpeg startup timeout (${STARTUP_TIMEOUT_MS}ms): no PCM data received, killing process`,
+          );
+          try {
+            ffmpeg.kill("SIGKILL");
+          } catch {
+            // ignore
+          }
+        }
+      }, STARTUP_TIMEOUT_MS);
+
       ffmpeg.stdout.on("data", (chunk: Buffer) => {
         if (this.session !== session) return;
         if (!chunk?.length) return;
+        if (!receivedFirstPcm) {
+          receivedFirstPcm = true;
+          clearTimeout(startupTimer);
+          logger.log("Intercom ffmpeg: first PCM data received");
+        }
         this.enqueuePcm(session, chunk, bytesNeeded, blockSize);
       });
 
@@ -220,6 +243,7 @@ export class ReolinkBaichuanIntercom {
       });
 
       ffmpeg.on("exit", (code, signal) => {
+        clearTimeout(startupTimer);
         logger.warn(`Intercom ffmpeg exited code=${code} signal=${signal}`);
         this.stop().catch(() => {});
       });
@@ -380,8 +404,19 @@ export class ReolinkBaichuanIntercom {
 
     // FFmpegInput may already contain one or more "-i" entries.
     // For intercom decode, we only need a single input and only the first audio stream.
+    //
+    // IMPORTANT: We must also strip `-rtsp_transport tcp` (and similar transport
+    // overrides) inherited from the upstream FFmpegInput.  The RTSP URL points at a
+    // local relay server (e.g. from the WebRTC plugin) that typically only supports
+    // RTP/UDP.  Forcing TCP causes ffmpeg to hang on SETUP negotiation (the relay
+    // replies 461 Unsupported Transport) and eventually get SIGKILLed with no audio
+    // ever reaching the intercom pipeline.
     const sanitizedArgs: string[] = [];
     let chosenInput: string | undefined;
+
+    // Set of pre-input flags that take a value argument and should be stripped
+    // because they conflict with the local RTSP relay's transport capabilities.
+    const stripWithValue = new Set(["-rtsp_transport"]);
 
     for (let i = 0; i < inputArgs.length; i++) {
       const arg = inputArgs[i];
@@ -395,6 +430,12 @@ export class ReolinkBaichuanIntercom {
           i++;
           continue;
         }
+      }
+
+      // Strip transport-related flags that break the local RTSP relay.
+      if (stripWithValue.has(arg)) {
+        i++; // skip the value argument as well
+        continue;
       }
 
       sanitizedArgs.push(arg);

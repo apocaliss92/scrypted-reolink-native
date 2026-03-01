@@ -184,6 +184,14 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   private cleanupInProgress: boolean = false;
   private readonly reconnectBackoffMs: number = 2000; // 2 seconds minimum between reconnects
   private eventSubscriptionActive: boolean = false;
+  /**
+   * Tracks whether event subscription is *desired* by the plugin.
+   * Unlike `eventSubscriptionActive` (which reflects the current state of the
+   * subscription and is cleared during cleanup), this flag survives connection
+   * teardown so that `ensureBaichuanClient` can automatically re-subscribe
+   * when a new client is created after a camera reboot / reconnection.
+   */
+  private eventSubscriptionDesired: boolean = false;
   private lastEventTime: number = 0;
   private currentWrappedEventHandler?: (ev: ReolinkSimpleEvent) => void;
   private pingInterval?: NodeJS.Timeout;
@@ -387,6 +395,31 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         // Start event check for all connections
         this.startEventCheck(api);
 
+        // Re-subscribe to events if event subscription was previously active.
+        // This handles the case where a camera reboots: the old connection is
+        // cleaned up (clearing eventSubscriptionActive), and eventually a new
+        // client is created by the streaming infrastructure.  Without this,
+        // events would never be re-subscribed because the onClose retry window
+        // is too short for a camera reboot and the eventCheck interval bails
+        // out when eventSubscriptionActive is false.
+        if (this.eventSubscriptionDesired && !this.eventSubscriptionActive) {
+          const callbacks = this.getConnectionCallbacks();
+          const eventsEnabled = callbacks.getEventSubscriptionEnabled
+            ? callbacks.getEventSubscriptionEnabled()
+            : !!callbacks.onSimpleEvent;
+
+          if (eventsEnabled) {
+            // Fire-and-forget: don't block the caller (streaming, etc.) on
+            // event subscription.  If it fails, the eventCheck interval will
+            // retry.
+            this.subscribeToEvents(true).catch((e) => {
+              logger.warn(
+                `Auto re-subscribe to events after reconnection failed: ${e?.message || String(e)}, eventCheck will retry`,
+              );
+            });
+          }
+        }
+
         return api;
       } catch (e) {
         // Apply backoff for connection failures too, otherwise multiple callers can hammer connect().
@@ -585,7 +618,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   /**
    * Start ping and auto-renewal maintenance for TCP connections
    */
-  private startConnectionMaintenance(api: ReolinkBaichuanApi): void {
+  private _startConnectionMaintenance(api: ReolinkBaichuanApi): void {
     const logger = this.getBaichuanLogger();
 
     // Stop any existing intervals
@@ -727,14 +760,31 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         return; // Connection changed, stop this interval
       }
 
-      // If event subscription is not active but the connection is alive and
-      // event subscription is desired, attempt to re-subscribe.
-      // This handles the case where subscribeToEvents() failed during
-      // reconnection (e.g. ECONNREFUSED) but the connection was later
-      // re-established by the streaming infrastructure.
+      // If event subscription is not active, check whether we should
+      // attempt to re-subscribe.  This handles the case where the original
+      // subscription was lost during a reconnection storm (e.g. camera
+      // reboot) and the new client was created by the streaming
+      // infrastructure without re-subscribing to events.
       if (!this.eventSubscriptionActive) {
-        // The library's built-in event watchdog handles auto-recovery
-        // with exponential backoff. No need to retry here.
+        if (this.eventSubscriptionDesired && this.baichuanApi?.isReady) {
+          const callbacks = this.getConnectionCallbacks();
+          const eventsEnabled = callbacks.getEventSubscriptionEnabled
+            ? callbacks.getEventSubscriptionEnabled()
+            : !!callbacks.onSimpleEvent;
+
+          if (eventsEnabled) {
+            logger.log(
+              "Event subscription not active but desired and connection is ready, re-subscribing",
+            );
+            try {
+              await this.subscribeToEvents(true);
+            } catch (e) {
+              logger.warn(
+                `Event check: re-subscribe attempt failed: ${e?.message || String(e)}`,
+              );
+            }
+          }
+        }
         return;
       }
 
@@ -847,6 +897,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       // the library watchdog handles auto-recovery internally.
       await api.onSimpleEvent(this.currentWrappedEventHandler);
       this.eventSubscriptionActive = true;
+      this.eventSubscriptionDesired = true;
       this.lastEventTime = Date.now(); // Initialize on subscription
       logger.debug("Subscribed to Baichuan events (library watchdog handles auto-recovery)");
     } catch (e) {
@@ -856,12 +907,21 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   }
 
   /**
+   * Clear the "desired" flag so that future reconnections will NOT
+   * auto-resubscribe to events.  Call this when the user explicitly
+   * disables event subscription (as opposed to a connection-loss cleanup
+   * where we want to remember the intent).
+   */
+  protected clearEventSubscriptionDesired(): void {
+    this.eventSubscriptionDesired = false;
+  }
+
+  /**
    * Unsubscribe from Baichuan simple events
    * @param silent If true, don't log unsubscription messages
    */
-  async unsubscribeFromEvents(silent: boolean = false): Promise<void> {
+  async unsubscribeFromEvents(_silent: boolean = false): Promise<void> {
     const logger = this.getBaichuanLogger();
-    const callbacks = this.getConnectionCallbacks();
 
     // Only unsubscribe if we have an active subscription
     if (
@@ -889,7 +949,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
    * Create or get a dedicated Baichuan API session for streaming (used by StreamManager).
    * Always returns the main client - the library internally manages dedicated sockets.
    */
-  async createStreamClient(streamKey: string): Promise<ReolinkBaichuanApi> {
+  async createStreamClient(_streamKey: string): Promise<ReolinkBaichuanApi> {
     // Always return the main client - the library handles dedicated sockets internally
     return await this.ensureBaichuanClient();
   }
