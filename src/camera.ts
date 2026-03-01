@@ -2025,9 +2025,6 @@ export class ReolinkCamera
       if (!silent) {
         logger.log("Event subscription disabled, unsubscribing");
       }
-      // Explicitly mark events as not desired so that reconnection logic
-      // does NOT auto-resubscribe.
-      this.clearEventSubscriptionDesired();
       if (this.doorbellBinaryTimeout) {
         clearTimeout(this.doorbellBinaryTimeout);
         this.doorbellBinaryTimeout = undefined;
