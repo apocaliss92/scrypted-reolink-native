@@ -3538,25 +3538,34 @@ export class ReolinkCamera
       const logger = this.getBaichuanLogger();
 
       const settings = await this.thisDevice.getSettings();
-      const isRecording = !settings.find(
-        (setting) => setting.key === "recording:privacyMode",
-      )?.value;
+      const isPrivacyEnabled =
+        settings.find((s) => s.key === "prebuffer:privacyMode")?.value ||
+        settings.find((s) => s.key === "recording:privacyMode")?.value ||
+        settings.find((s) => s.key === "snapshot:privacyMode")?.value;
       const { lowThresholdBatteryRecording, highThresholdBatteryRecording } =
         this.storageSettings.values;
 
-      if (isRecording && newBatteryLevel < lowThresholdBatteryRecording) {
+      if (!isPrivacyEnabled && newBatteryLevel < lowThresholdBatteryRecording) {
         logger.log(
-          `Recording is enabled, but battery level is below low threshold (${newBatteryLevel}% < ${lowThresholdBatteryRecording}%), disabling recording`,
+          `Battery level is below low threshold (${newBatteryLevel}% < ${lowThresholdBatteryRecording}%), enabling privacy mode`,
         );
-        await this.thisDevice.putSetting("recording:privacyMode", true);
+        await Promise.all([
+          this.thisDevice.putSetting("prebuffer:privacyMode", true),
+          this.thisDevice.putSetting("recording:privacyMode", true),
+          this.thisDevice.putSetting("snapshot:privacyMode", true),
+        ]);
       } else if (
-        !isRecording &&
+        isPrivacyEnabled &&
         newBatteryLevel > highThresholdBatteryRecording
       ) {
         logger.log(
-          `Recording is disabled, but battery level is above high threshold (${newBatteryLevel}% > ${highThresholdBatteryRecording}%), enabling recording`,
+          `Battery level is above high threshold (${newBatteryLevel}% > ${highThresholdBatteryRecording}%), disabling privacy mode`,
         );
-        await this.thisDevice.putSetting("recording:privacyMode", false);
+        await Promise.all([
+          this.thisDevice.putSetting("prebuffer:privacyMode", false),
+          this.thisDevice.putSetting("recording:privacyMode", false),
+          this.thisDevice.putSetting("snapshot:privacyMode", false),
+        ]);
       }
     }
   }
