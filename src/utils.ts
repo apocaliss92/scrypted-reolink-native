@@ -78,7 +78,6 @@ export const getDeviceInterfaces = (props: {
       hasFloodlight,
       hasPir,
       hasBattery,
-      hasIntercom,
       isDoorbell,
     } = capabilities;
 
@@ -90,9 +89,6 @@ export const getDeviceInterfaces = (props: {
       interfaces.push(ScryptedInterface.DeviceProvider);
     if (hasBattery) {
       interfaces.push(ScryptedInterface.Battery, ScryptedInterface.Sleep, ScryptedInterface.Charger);
-    }
-    if (hasIntercom) {
-      interfaces.push(ScryptedInterface.Intercom);
     }
     if (isDoorbell) {
       interfaces.push(ScryptedInterface.BinarySensor);

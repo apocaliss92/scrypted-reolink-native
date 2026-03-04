@@ -16,7 +16,6 @@ import sdk, {
   ChargeState,
   Device,
   DeviceProvider,
-  Intercom,
   MediaObject,
   MediaStreamUrl,
   ObjectDetectionTypes,
@@ -65,7 +64,6 @@ import {
   getApiRelevantDebugLogs,
   getDebugLogChoices,
 } from "./debug-options";
-import { ReolinkBaichuanIntercom } from "./intercom";
 import ReolinkNativePlugin from "./main";
 import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
@@ -115,7 +113,6 @@ export class ReolinkCamera
     PanTiltZoom,
     VideoTextOverlays,
     BinarySensor,
-    Intercom,
     Reboot,
     VideoClips
 {
@@ -280,30 +277,6 @@ export class ReolinkCamera
       json: true,
       defaultValue: [],
     },
-    intercomBlocksPerPayload: {
-      group: "Intercom",
-      title: "Blocks Per Payload",
-      description:
-        "Lower reduces latency (more packets). Typical: 1-4. Requires restarting talk session to take effect.",
-      type: "number",
-      defaultValue: 1,
-    },
-    intercomMaxBacklogMs: {
-      group: "Intercom",
-      title: "Max Backlog (ms)",
-      description:
-        "Maximum PCM backlog before dropping old audio to cap latency. Higher improves stability on slow systems but increases latency. Typical: 80-250. Requires restarting talk session to take effect.",
-      type: "number",
-      defaultValue: 120,
-    },
-    intercomGain: {
-      group: "Intercom",
-      title: "Gain",
-      description:
-        "Output gain multiplier applied before encoding. 1.0 = normal, 2.0 ≈ +6dB, 0.5 ≈ -6dB. Requires restarting talk session to take effect.",
-      type: "number",
-      defaultValue: 1.0,
-    },
     // PTZ Presets
     presets: {
       group: "PTZ",
@@ -457,24 +430,6 @@ export class ReolinkCamera
         "How often to wake up the camera and update battery status and snapshot (default: 60 minutes).",
       type: "number",
       defaultValue: 60,
-      hide: true,
-    },
-    lowThresholdBatteryRecording: {
-      title: "Low Threshold Battery Recording (%)",
-      subgroup: "Recording",
-      description:
-        "Battery level threshold below which recording is disabled (default: 15%).",
-      type: "number",
-      defaultValue: 15,
-      hide: true,
-    },
-    highThresholdBatteryRecording: {
-      title: "High Threshold Battery Recording (%)",
-      subgroup: "Recording",
-      description:
-        "Battery level threshold above which recording is enabled (default: 35%).",
-      type: "number",
-      defaultValue: 35,
       hide: true,
     },
     diagnosticsOutputPath: {
@@ -696,7 +651,6 @@ export class ReolinkCamera
   classes: string[] = [];
   presets: PtzPreset[] = [];
   streamManager?: StreamManager;
-  intercom?: ReolinkBaichuanIntercom;
 
   motionSiren?: ReolinkCameraMotionSiren;
   siren?: ReolinkCameraSiren;
@@ -2570,23 +2524,6 @@ export class ReolinkCamera
     return [];
   }
 
-  // Intercom interface methods
-  async startIntercom(media: MediaObject): Promise<void> {
-    if (this.intercom) {
-      await this.intercom.start(media);
-    } else {
-      throw new Error("Intercom not initialized");
-    }
-  }
-
-  async stopIntercom(): Promise<void> {
-    if (this.intercom) {
-      return await this.intercom.stop();
-    } else {
-      throw new Error("Intercom not initialized");
-    }
-  }
-
   async updateDeviceInfo(): Promise<void> {
     const logger = this.getBaichuanLogger();
 
@@ -3301,10 +3238,6 @@ export class ReolinkCamera
 
     this.storageSettings.settings.batteryUpdateIntervalMinutes.hide =
       !this.isBattery;
-    this.storageSettings.settings.lowThresholdBatteryRecording.hide =
-      !this.isBattery;
-    this.storageSettings.settings.highThresholdBatteryRecording.hide =
-      !this.isBattery;
 
     // Show PIP settings only for multifocal devices
     this.storageSettings.settings.pipPosition.hide = !this.isMultiFocal;
@@ -3362,11 +3295,7 @@ export class ReolinkCamera
       );
     }
 
-    const { hasIntercom, hasPtz } = await this.getAbilities();
-
-    if (hasIntercom) {
-      this.intercom = new ReolinkBaichuanIntercom(this);
-    }
+    const { hasPtz } = await this.getAbilities();
 
     if (hasPtz && !this.multiFocalDevice) {
       const choices = (this.presets || []).map(
@@ -3532,44 +3461,6 @@ export class ReolinkCamera
     }
   }
 
-  async checkRecordingAction(newBatteryLevel: number) {
-    const nvrDeviceId = this.plugin.nvrDeviceId;
-    if (nvrDeviceId && this.mixins.includes(nvrDeviceId)) {
-      const logger = this.getBaichuanLogger();
-
-      const settings = await this.thisDevice.getSettings();
-      const isPrivacyEnabled =
-        settings.find((s) => s.key === "prebuffer:privacyMode")?.value ||
-        settings.find((s) => s.key === "recording:privacyMode")?.value ||
-        settings.find((s) => s.key === "snapshot:privacyMode")?.value;
-      const { lowThresholdBatteryRecording, highThresholdBatteryRecording } =
-        this.storageSettings.values;
-
-      if (!isPrivacyEnabled && newBatteryLevel < lowThresholdBatteryRecording) {
-        logger.log(
-          `Battery level is below low threshold (${newBatteryLevel}% < ${lowThresholdBatteryRecording}%), enabling privacy mode`,
-        );
-        await Promise.all([
-          this.thisDevice.putSetting("prebuffer:privacyMode", true),
-          this.thisDevice.putSetting("recording:privacyMode", true),
-          this.thisDevice.putSetting("snapshot:privacyMode", true),
-        ]);
-      } else if (
-        isPrivacyEnabled &&
-        newBatteryLevel > highThresholdBatteryRecording
-      ) {
-        logger.log(
-          `Battery level is above high threshold (${newBatteryLevel}% > ${highThresholdBatteryRecording}%), disabling privacy mode`,
-        );
-        await Promise.all([
-          this.thisDevice.putSetting("prebuffer:privacyMode", false),
-          this.thisDevice.putSetting("recording:privacyMode", false),
-          this.thisDevice.putSetting("snapshot:privacyMode", false),
-        ]);
-      }
-    }
-  }
-
   async updateBatteryInfo(batteryInfoParent?: BatteryInfo) {
     const api = await this.ensureClient();
     const channel = this.storageSettings.values.rtspChannel;
@@ -3603,8 +3494,6 @@ export class ReolinkCamera
         this.chargeState = newChargeState;
       }
 
-      let shouldCheckRecordingAction = true;
-
       // Log only if battery level changed
       if (oldLevel !== batteryInfo.batteryPercent) {
         if (batteryInfo.adapterStatus !== undefined) {
@@ -3625,8 +3514,6 @@ export class ReolinkCamera
         } else {
           logger.log(`Battery level set: ${batteryInfo.batteryPercent}%`);
         }
-      } else {
-        shouldCheckRecordingAction = false;
       }
 
       // Forward battery/charge state changes to Scrypted (plugin, HomeKit, etc.)
@@ -3640,10 +3527,6 @@ export class ReolinkCamera
         if (chargeStateChanged && newChargeState !== undefined) {
           void this.onDeviceEvent(ScryptedInterface.Charger, undefined);
         }
-      }
-
-      if (shouldCheckRecordingAction) {
-        await this.checkRecordingAction(batteryInfo.batteryPercent);
       }
     }
 

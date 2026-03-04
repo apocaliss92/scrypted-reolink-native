@@ -11,7 +11,7 @@ if (typeof globalThis.File === "undefined") {
   };
 }
 
-import type { AutoDetectMode } from "@apocaliss92/reolink-baichuan-js" with {
+import type { AutoDetectMode, ReolinkBaichuanApi } from "@apocaliss92/reolink-baichuan-js" with {
   "resolution-mode": "import"
 };
 import sdk, {
@@ -29,6 +29,11 @@ import sdk, {
 import { randomBytes } from "crypto";
 import { BaseBaichuanClass } from "./baichuan-base";
 import { ReolinkCamera } from "./camera";
+import { createBaichuanApi, normalizeUid, type BaichuanTransport } from "./connect";
+import {
+  ReolinkNativeIntercom,
+  INTERCOM_PROVIDER_NATIVE_ID,
+} from "./intercom-provider";
 import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
 import {
@@ -49,19 +54,92 @@ class ReolinkNativePlugin
   devices = new Map<string, BaseBaichuanClass>();
   camerasMap = new Map<string, ReolinkCamera>();
   nvrDeviceId: string;
+  private intercomProvider?: ReolinkNativeIntercom;
+
+  // Shared Baichuan API connections for external devices (non-Reolink Native cameras).
+  // Keyed by Scrypted device ID. Multiple mixins on the same device share one connection.
+  private externalClients = new Map<
+    string,
+    { api: ReolinkBaichuanApi; refCount: number }
+  >();
 
   constructor(nativeId: string) {
     super(nativeId);
 
     const nvrDevice = sdk.systemManager.getDeviceByName("Scrypted NVR");
     this.nvrDeviceId = nvrDevice?.id;
+
+    // Register the intercom MixinProvider as a sub-device
+    sdk.deviceManager.onDeviceDiscovered({
+      nativeId: INTERCOM_PROVIDER_NATIVE_ID,
+      name: "Reolink Native Intercom",
+      interfaces: [ScryptedInterface.MixinProvider, ScryptedInterface.Settings],
+      type: ScryptedDeviceType.API,
+      providerNativeId: this.nativeId,
+    });
+  }
+
+  async acquireExternalClient(
+    deviceId: string,
+    config: {
+      host: string;
+      username: string;
+      password: string;
+      uid?: string;
+      transport: BaichuanTransport;
+      logger?: Console;
+    },
+  ): Promise<ReolinkBaichuanApi> {
+    const existing = this.externalClients.get(deviceId);
+    if (existing?.api?.isReady) {
+      existing.refCount++;
+      return existing.api;
+    }
+    // Close stale client if any
+    if (existing?.api) {
+      try {
+        await existing.api.close();
+      } catch {}
+    }
+    const api = await createBaichuanApi({
+      inputs: {
+        host: config.host,
+        username: config.username,
+        password: config.password,
+        uid: normalizeUid(config.uid),
+        logger: config.logger,
+      },
+      transport: config.transport,
+    });
+    this.externalClients.set(deviceId, { api, refCount: 1 });
+    return api;
+  }
+
+  async releaseExternalClient(deviceId: string): Promise<void> {
+    const entry = this.externalClients.get(deviceId);
+    if (!entry) return;
+    entry.refCount--;
+    if (entry.refCount <= 0) {
+      this.externalClients.delete(deviceId);
+      try {
+        await entry.api.close();
+      } catch {}
+    }
   }
 
   getScryptedDeviceCreator(): string {
     return "Reolink Native camera";
   }
 
-  async getDevice(nativeId: ScryptedNativeId): Promise<BaseBaichuanClass> {
+  async getDevice(nativeId: ScryptedNativeId): Promise<any> {
+    if (nativeId === INTERCOM_PROVIDER_NATIVE_ID) {
+      if (!this.intercomProvider) {
+        this.intercomProvider = new ReolinkNativeIntercom(nativeId);
+        this.intercomProvider.plugin = this;
+      }
+      return this.intercomProvider;
+    }
+
     if (this.devices.has(nativeId)) {
       return this.devices.get(nativeId)!;
     }

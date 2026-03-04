@@ -7,7 +7,22 @@ import sdk, {
   ScryptedMimeTypes,
 } from "@scrypted/sdk";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { ReolinkCamera } from "./camera";
+
+/**
+ * Abstraction over the camera-specific dependencies needed by the intercom engine.
+ * Both ReolinkCamera (internal) and IntercomMixin (standalone) can implement this.
+ */
+export interface IntercomHost {
+  readonly blocksPerPayload: number;
+  readonly outputGain: number;
+  readonly maxBacklogMs: number;
+  readonly channel: number;
+  readonly isBatteryCamera: boolean;
+  readonly deviceId: string;
+  readonly logger: Console;
+  ensureApi(): Promise<ReolinkBaichuanApi>;
+  withRetry<T>(fn: () => Promise<T>): Promise<T>;
+}
 
 // Keep this low: Reolink blocks are ~64ms at 16kHz (1025 samples).
 // A small backlog avoids multi-second latency when the pipeline stalls.
@@ -33,28 +48,10 @@ export class ReolinkBaichuanIntercom {
 
   private lastBacklogClampLogAtMs = 0;
 
-  constructor(private camera: ReolinkCamera) {}
-
-  get blocksPerPayload(): number {
-    return Math.max(
-      1,
-      Math.min(
-        8,
-        this.camera.storageSettings.values.intercomBlocksPerPayload ?? 1,
-      ),
-    );
-  }
-
-  private get outputGain(): number {
-    const configured = Number(this.camera.storageSettings.values.intercomGain);
-    // Keep safe bounds: too high can clip and distort.
-    if (Number.isFinite(configured))
-      return Math.max(0.1, Math.min(10, configured));
-    return 1.0;
-  }
+  constructor(private host: IntercomHost) {}
 
   async start(media: MediaObject): Promise<void> {
-    const logger = this.camera.getBaichuanLogger();
+    const logger = this.host.logger;
 
     const ffmpegInput =
       await sdk.mediaManager.convertMediaObjectToJSON<FFmpegInput>(
@@ -63,12 +60,12 @@ export class ReolinkBaichuanIntercom {
       );
 
     await this.stop();
-    const channel = this.camera.storageSettings.values.rtspChannel;
+    const channel = this.host.channel;
 
     try {
       // Get the main API - library manages dedicated sockets internally
-      const api = await this.camera.withBaichuanRetry(async () => {
-        return await this.camera.ensureBaichuanClient();
+      const api = await this.host.withRetry(async () => {
+        return await this.host.ensureApi();
       });
 
       // Best-effort: log codec requirements exposed by the camera.
@@ -91,7 +88,7 @@ export class ReolinkBaichuanIntercom {
       }
 
       // For UDP/battery cameras, wake up the camera if it's sleeping before creating talk session
-      if (this.camera.options?.type === "battery") {
+      if (this.host.isBatteryCamera) {
         try {
           const sleepStatus = api.getSleepStatus({ channel });
           if (sleepStatus.state === "sleeping") {
@@ -110,11 +107,12 @@ export class ReolinkBaichuanIntercom {
 
       // Use createDedicatedTalkSession - library manages dedicated socket internally
       // with auto-teardown on idle or when stop() is called
-      const session = await this.camera.withBaichuanRetry(async () => {
+      const blocksPerPayload = this.host.blocksPerPayload;
+      const session = await this.host.withRetry(async () => {
         return await api.createDedicatedTalkSession(channel, {
-          blocksPerPayload: this.blocksPerPayload,
+          blocksPerPayload,
           idleTimeoutMs: 30000, // Auto-teardown if no audio for 30s
-          deviceId: this.camera.nativeId,
+          deviceId: this.host.deviceId,
           logger,
         });
       });
@@ -130,9 +128,7 @@ export class ReolinkBaichuanIntercom {
       // Configurable backlog to trade latency vs stability.
       // If the pipeline (ffmpeg decode + encode + send) can't keep up,
       // dropping old audio avoids accumulating multi-second latency.
-      const configuredBacklog = Number(
-        this.camera.storageSettings.values.intercomMaxBacklogMs,
-      );
+      const configuredBacklog = Number(this.host.maxBacklogMs);
       if (Number.isFinite(configuredBacklog)) {
         this.maxBacklogMs = Math.max(20, Math.min(5000, configuredBacklog));
       } else {
@@ -177,12 +173,12 @@ export class ReolinkBaichuanIntercom {
         bytesNeeded,
         maxBacklogMs: this.maxBacklogMs,
         maxBacklogBytes: this.maxBacklogBytes,
-        blocksPerPayload: this.blocksPerPayload,
+        blocksPerPayload,
       });
 
       // IMPORTANT: incoming audio from Scrypted/WebRTC is typically Opus.
       // We must decode to PCM before IMA ADPCM encoding, otherwise it will be noise.
-      const gain = this.outputGain;
+      const gain = this.host.outputGain;
       const ffmpegArgs = this.buildFfmpegPcmArgs(ffmpegInput, {
         sampleRate,
         channels: 1,
@@ -260,7 +256,7 @@ export class ReolinkBaichuanIntercom {
     if (this.stopping) return this.stopping;
 
     this.stopping = (async () => {
-      const logger = this.camera.getBaichuanLogger();
+      const logger = this.host.logger;
 
       const ffmpeg = this.ffmpeg;
       this.ffmpeg = undefined;
@@ -329,7 +325,7 @@ export class ReolinkBaichuanIntercom {
     bytesNeeded: number,
     blockSize: number,
   ): void {
-    const logger = this.camera.getBaichuanLogger();
+    const logger = this.host.logger;
 
     if (this.session !== session) return;
 
