@@ -458,18 +458,28 @@ export class ReolinkBaichuanIntercom {
         : [];
 
     return [
-      ...sanitizedArgs,
-      "-i",
-      url,
-      // Ensure we only decode the first input's audio stream.
-      "-map",
-      "0:a:0?",
+      "-hide_banner",
 
-      // Low-latency decode settings.
+      // Pre-input low-latency flags: these MUST be before -i to affect
+      // the input demuxer. Placing them after -i only affects output.
+      "-analyzeduration",
+      "0",
+      "-probesize",
+      "512",
       "-fflags",
       "nobuffer",
       "-flags",
       "low_delay",
+
+      ...sanitizedArgs,
+      "-i",
+      url,
+
+      // Ensure we only decode the first input's audio stream.
+      "-map",
+      "0:a:0?",
+
+      // Output low-latency settings.
       "-flush_packets",
       "1",
 
