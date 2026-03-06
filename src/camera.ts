@@ -47,6 +47,7 @@ import path from "path";
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import {
   ReolinkCameraAutotracking,
+  ReolinkCameraChime,
   ReolinkCameraFloodlight,
   ReolinkCameraMotionFloodlight,
   ReolinkCameraMotionSiren,
@@ -76,6 +77,7 @@ import {
 } from "./stream-utils";
 import {
   autotrackingSuffix,
+  chimeSuffix,
   floodlightSuffix,
   getDeviceInterfaces,
   getVideoClipWebhookUrls,
@@ -658,6 +660,7 @@ export class ReolinkCamera
   floodlight?: ReolinkCameraFloodlight;
   pirSensor?: ReolinkCameraPirSensor;
   autotracking?: ReolinkCameraAutotracking;
+  chime?: ReolinkCameraChime;
 
   private lastPicture: { mo: MediaObject; atMs: number } | undefined;
   private takePictureInFlight: Promise<MediaObject> | undefined;
@@ -706,6 +709,7 @@ export class ReolinkCamera
     floodlight?: number;
     pir?: number;
     autotracking?: number;
+    chime?: number;
   } = {};
 
   constructor(
@@ -1693,6 +1697,7 @@ export class ReolinkCamera
         hasPir: false,
         hasAutotracking: false,
         isDoorbell: false,
+        hasChime: false,
       };
     }
   }
@@ -2275,7 +2280,7 @@ export class ReolinkCamera
     const logger = this.getBaichuanLogger();
     logger.debug(`Reporting devices: ${JSON.stringify(abilities)}`);
 
-    const { hasSiren, hasFloodlight, hasPir, hasAutotracking } = abilities;
+    const { hasSiren, hasFloodlight, hasPir, hasAutotracking, hasChime } = abilities;
 
     // Define native IDs for all sub-devices
     const motionSirenNativeId = `${this.nativeId}${motionSirenSuffix}`;
@@ -2284,6 +2289,7 @@ export class ReolinkCamera
     const floodlightNativeId = `${this.nativeId}${floodlightSuffix}`;
     const pirNativeId = `${this.nativeId}${pirSuffix}`;
     const autotrackingNativeId = `${this.nativeId}${autotrackingSuffix}`;
+    const chimeNativeId = `${this.nativeId}${chimeSuffix}`;
 
     // Helper to safely remove a device only if it exists
     const safeRemoveDevice = (nativeId: string) => {
@@ -2412,6 +2418,24 @@ export class ReolinkCamera
       // Remove autotracking device if capability is no longer available
       safeRemoveDevice(autotrackingNativeId);
       this.autotracking = undefined;
+    }
+
+    // Create chime device (ring paired wireless chime)
+    if (hasChime) {
+      const device: Device = {
+        providerNativeId: this.nativeId,
+        name: `${this.name} Chime`,
+        nativeId: chimeNativeId,
+        info: {
+          ...(this.info || {}),
+        },
+        interfaces: [ScryptedInterface.OnOff, ScryptedInterface.Settings],
+        type: ScryptedDeviceType.Switch,
+      };
+      sdk.deviceManager.onDeviceDiscovered(device);
+    } else {
+      safeRemoveDevice(chimeNativeId);
+      this.chime = undefined;
     }
   }
 
@@ -2573,6 +2597,9 @@ export class ReolinkCamera
     } else if (nativeId.endsWith(autotrackingSuffix)) {
       this.autotracking ||= new ReolinkCameraAutotracking(this, nativeId);
       return this.autotracking;
+    } else if (nativeId.endsWith(chimeSuffix)) {
+      this.chime ||= new ReolinkCameraChime(this, nativeId);
+      return this.chime;
     }
   }
 
@@ -2597,6 +2624,8 @@ export class ReolinkCamera
       this.pirSensor = undefined;
     } else if (nativeId.endsWith(autotrackingSuffix)) {
       this.autotracking = undefined;
+    } else if (nativeId.endsWith(chimeSuffix)) {
+      this.chime = undefined;
     }
   }
 
@@ -2637,7 +2666,7 @@ export class ReolinkCamera
     const api = await this.ensureClient();
 
     const channel = this.storageSettings.values.rtspChannel;
-    const { hasSiren, hasFloodlight, hasPir, hasAutotracking } =
+    const { hasSiren, hasFloodlight, hasPir, hasAutotracking, hasChime } =
       await this.getAbilities();
 
     // Cooldown period: 15 seconds after a manual state change
@@ -2763,6 +2792,29 @@ export class ReolinkCamera
         } catch (e) {
           logger.warn(
             "Failed to align autotracking state",
+            e?.message || String(e),
+          );
+        }
+      }
+    }
+
+    // Align chime state
+    if (hasChime && this.chime) {
+      if (isInCooldown(this.auxDeviceCooldowns.chime)) {
+        logger.log(`[alignAuxDevicesState] Skipping chime (in cooldown)`);
+      } else {
+        try {
+          const chimeState = await api.getHardwiredChime(channel);
+          this.chime.on = chimeState.enabled;
+          if (chimeState.type) {
+            this.chime.storageSettings.values.chimeType = chimeState.type;
+          }
+          if (chimeState.time) {
+            this.chime.storageSettings.values.time = chimeState.time;
+          }
+        } catch (e) {
+          logger.warn(
+            "Failed to align chime state",
             e?.message || String(e),
           );
         }

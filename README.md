@@ -18,6 +18,20 @@ Videoclips are available as opt-in with auto-download possibilites to fasten the
 
 Multifocal cameras (such as Trackmix) will be provided with a combined stream in PIP-mode
 
+## Accessory devices
+
+For supported cameras, the plugin automatically creates sub-devices:
+
+| Accessory | Capability | Description |
+|---|---|---|
+| Motion-Siren | `hasSiren` | Triggers siren when motion is detected |
+| Siren | `hasSiren` | Direct siren on/off control |
+| Motion-Floodlight | `hasFloodlight` | Turns on floodlight on motion |
+| Floodlight | `hasFloodlight` | Direct floodlight on/off + brightness control |
+| PIR | `hasPir` | PIR sensor enable/disable with sensitivity settings |
+| Autotracking | `hasAutotracking` | Enable/disable PTZ smart-tracking |
+| Chime | `hasChime` | Ring the paired wireless chime on the doorbell (configurable chime ID and ringtone ID) |
+
 ☕️ If this extension works well for you, consider buying me a coffee. Thanks!
 [Buy me a coffee!](https://buymeacoffee.com/apocaliss92)
 

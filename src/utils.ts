@@ -48,6 +48,7 @@ export const motionSirenSuffix = `-motion-siren`;
 export const motionFloodlightSuffix = `-motion-floodlight`;
 export const pirSuffix = `-pir`;
 export const autotrackingSuffix = `-autotracking`;
+export const chimeSuffix = `-chime`;
 
 export const getDeviceInterfaces = (props: {
   capabilities: DeviceCapabilities;
