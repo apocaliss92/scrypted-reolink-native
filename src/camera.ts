@@ -1697,7 +1697,7 @@ export class ReolinkCamera
         hasPir: false,
         hasAutotracking: false,
         isDoorbell: false,
-        hasChime: false,
+        hasWirelessChime: false,
       };
     }
   }
@@ -2280,7 +2280,7 @@ export class ReolinkCamera
     const logger = this.getBaichuanLogger();
     logger.debug(`Reporting devices: ${JSON.stringify(abilities)}`);
 
-    const { hasSiren, hasFloodlight, hasPir, hasAutotracking, hasChime } = abilities;
+    const { hasSiren, hasFloodlight, hasPir, hasAutotracking, hasWirelessChime } = abilities;
 
     // Define native IDs for all sub-devices
     const motionSirenNativeId = `${this.nativeId}${motionSirenSuffix}`;
@@ -2421,7 +2421,7 @@ export class ReolinkCamera
     }
 
     // Create chime device (ring paired wireless chime)
-    if (hasChime) {
+    if (hasWirelessChime) {
       const device: Device = {
         providerNativeId: this.nativeId,
         name: `${this.name} Chime`,
@@ -2666,7 +2666,7 @@ export class ReolinkCamera
     const api = await this.ensureClient();
 
     const channel = this.storageSettings.values.rtspChannel;
-    const { hasSiren, hasFloodlight, hasPir, hasAutotracking, hasChime } =
+    const { hasSiren, hasFloodlight, hasPir, hasAutotracking, hasWirelessChime } =
       await this.getAbilities();
 
     // Cooldown period: 15 seconds after a manual state change
@@ -2798,19 +2798,18 @@ export class ReolinkCamera
       }
     }
 
-    // Align chime state
-    if (hasChime && this.chime) {
+    // Align chime state (wireless only)
+    if (hasWirelessChime && this.chime) {
       if (isInCooldown(this.auxDeviceCooldowns.chime)) {
         logger.log(`[alignAuxDevicesState] Skipping chime (in cooldown)`);
       } else {
         try {
-          const chimeState = await api.getHardwiredChime(channel);
-          this.chime.on = chimeState.enabled;
-          if (chimeState.type) {
-            this.chime.storageSettings.values.chimeType = chimeState.type;
-          }
-          if (chimeState.time) {
-            this.chime.storageSettings.values.time = chimeState.time;
+          const wirelessChimes = await api.getDingDongList(channel);
+          if (wirelessChimes.length > 0) {
+            const chimeId = wirelessChimes[0].id;
+            this.chime.storageSettings.values.wirelessChimeId = chimeId;
+            const silentState = await api.getDingDongSilent(chimeId, channel);
+            this.chime.on = silentState.active;
           }
         } catch (e) {
           logger.warn(

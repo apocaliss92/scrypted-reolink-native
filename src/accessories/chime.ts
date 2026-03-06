@@ -9,9 +9,9 @@ import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import type { ReolinkCamera } from "../camera";
 
 /**
- * Chime: enable/disable the hardwired chime on the doorbell.
- * turnOn() enables the chime; turnOff() disables (mutes) it.
- * Additional parameters (chime type, timing) are configurable via Settings.
+ * Chime: mute/unmute a paired wireless Reolink Chime receiver.
+ * turnOn() unmutes (time=0); turnOff() silences for muteDurationSec seconds.
+ * The chime ID is auto-synced from getDingDongList during alignAuxDevicesState.
  */
 export class ReolinkCameraChime
   extends ScryptedDeviceBase
@@ -22,19 +22,19 @@ export class ReolinkCameraChime
   }
 
   storageSettings = new StorageSettings(this, {
-    chimeType: {
-      title: "Chime Type",
-      description:
-        'Chime type string reported by the device (e.g. "dingdong", "single", "dual"). Leave empty to use the current device value.',
-      type: "string",
-      defaultValue: "",
-    },
-    time: {
-      title: "Chime Duration",
-      description:
-        "Chime timing/duration value (device-specific). Leave 0 to use the current device value.",
+    wirelessChimeId: {
+      title: "Wireless Chime ID",
+      description: "ID of the paired wireless Reolink Chime (auto-detected from device).",
       type: "number",
-      defaultValue: 0,
+      defaultValue: -1,
+      readonly: true,
+    },
+    muteDurationSec: {
+      title: "Mute Duration (seconds)",
+      description:
+        "How long to mute the wireless chime when turned off (default: 3600 = 1 hour).",
+      type: "number",
+      defaultValue: 3600,
     },
   });
 
@@ -51,51 +51,29 @@ export class ReolinkCameraChime
 
   async putSetting(key: string, value: SettingValue): Promise<void> {
     await this.storageSettings.putSetting(key, value);
-    await this.applySettings();
   }
 
-  private async applySettings(): Promise<void> {
-    const channel = this.camera.storageSettings.values.rtspChannel;
-    const chimeType = this.storageSettings.values.chimeType || undefined;
-    const time = this.storageSettings.values.time || undefined;
-    try {
-      await this.camera.withBaichuanRetry(async () => {
-        const api = await this.camera.ensureClient();
-        await api.setHardwiredChime(
-          { enabled: !!this.on, type: chimeType, time },
-          channel,
-        );
-      });
-    } catch (e: any) {
-      this.logger.error(
-        `Chime: applySettings failed (device=${this.nativeId})`,
-        e?.message || String(e),
-      );
-      throw e;
-    }
+  private get wirelessChimeId(): number {
+    return this.storageSettings.values.wirelessChimeId ?? -1;
   }
 
   async turnOn(): Promise<void> {
     const channel = this.camera.storageSettings.values.rtspChannel;
-    this.logger.log(`Chime: enable (device=${this.nativeId})`);
+    const chimeId = this.wirelessChimeId;
+    this.logger.log(`Chime: unmute (device=${this.nativeId}, chimeId=${chimeId})`);
     this.on = true;
     this.camera.auxDeviceCooldowns.chime = Date.now();
     try {
-      const chimeType = this.storageSettings.values.chimeType || undefined;
-      const time = this.storageSettings.values.time || undefined;
       await this.camera.withBaichuanRetry(async () => {
         const api = await this.camera.ensureClient();
-        const state = await api.setHardwiredChime(
-          { enabled: true, type: chimeType, time },
-          channel,
-        );
-        this.on = state.enabled;
+        const state = await api.setDingDongSilent(chimeId, 0, channel);
+        this.on = state.active;
       });
-      this.logger.log(`Chime: enable ok (device=${this.nativeId})`);
+      this.logger.log(`Chime: unmute ok (device=${this.nativeId})`);
     } catch (e: any) {
       this.on = false;
       this.logger.error(
-        `Chime: enable failed (device=${this.nativeId})`,
+        `Chime: unmute failed (device=${this.nativeId})`,
         e?.message || String(e),
       );
       throw e;
@@ -104,25 +82,22 @@ export class ReolinkCameraChime
 
   async turnOff(): Promise<void> {
     const channel = this.camera.storageSettings.values.rtspChannel;
-    this.logger.log(`Chime: disable (device=${this.nativeId})`);
+    const chimeId = this.wirelessChimeId;
+    const muteSec = this.storageSettings.values.muteDurationSec ?? 3600;
+    this.logger.log(`Chime: mute for ${muteSec}s (device=${this.nativeId}, chimeId=${chimeId})`);
     this.on = false;
     this.camera.auxDeviceCooldowns.chime = Date.now();
     try {
-      const chimeType = this.storageSettings.values.chimeType || undefined;
-      const time = this.storageSettings.values.time || undefined;
       await this.camera.withBaichuanRetry(async () => {
         const api = await this.camera.ensureClient();
-        const state = await api.setHardwiredChime(
-          { enabled: false, type: chimeType, time },
-          channel,
-        );
-        this.on = state.enabled;
+        const state = await api.setDingDongSilent(chimeId, muteSec, channel);
+        this.on = state.active;
       });
-      this.logger.log(`Chime: disable ok (device=${this.nativeId})`);
+      this.logger.log(`Chime: mute ok (device=${this.nativeId})`);
     } catch (e: any) {
       this.on = true;
       this.logger.error(
-        `Chime: disable failed (device=${this.nativeId})`,
+        `Chime: mute failed (device=${this.nativeId})`,
         e?.message || String(e),
       );
       throw e;
