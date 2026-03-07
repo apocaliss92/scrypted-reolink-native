@@ -57,6 +57,31 @@ export class ReolinkCameraChime
     return this.storageSettings.values.wirelessChimeId ?? -1;
   }
 
+  /**
+   * Refresh chime ID from device when -1.
+   * Python lib: GetDingDongList uses deviceId; GetDingDongCfg uses ringId (skips if < 0).
+   * Returns true if we have a valid chimeId; false if still not discovered.
+   */
+  private async ensureChimeId(): Promise<boolean> {
+    if (this.wirelessChimeId >= 0) return true;
+    const channel = this.camera.storageSettings.values.rtspChannel;
+    const api = await this.camera.ensureClient();
+    const list = await api.getDingDongList(channel);
+    if (list.length > 0 && list[0].id >= 0) {
+      this.storageSettings.values.wirelessChimeId = list[0].id;
+      this.logger.log(`Chime: discovered chimeId=${list[0].id} from GetDingDongList`);
+      return true;
+    }
+    const configs = await api.getDingDongCfg(channel);
+    const cfg = configs.find(c => c.id >= 0);
+    if (cfg) {
+      this.storageSettings.values.wirelessChimeId = cfg.id;
+      this.logger.log(`Chime: discovered chimeId=${cfg.id} from GetDingDongCfg`);
+      return true;
+    }
+    return false;
+  }
+
   private async getChimeCfg(): Promise<ChimeCfg | undefined> {
     const channel = this.camera.storageSettings.values.rtspChannel;
     const chimeId = this.wirelessChimeId;
@@ -70,6 +95,7 @@ export class ReolinkCameraChime
    * Determine if the chime is active by checking if any event type is enabled.
    */
   async syncStateFromDevice(): Promise<boolean | undefined> {
+    await this.ensureChimeId();
     const cfg = await this.getChimeCfg();
     if (!cfg) return undefined;
     const eventTypes = Object.values(cfg.type);
@@ -78,12 +104,18 @@ export class ReolinkCameraChime
   }
 
   async turnOn(): Promise<void> {
-    const channel = this.camera.storageSettings.values.rtspChannel;
-    const chimeId = this.wirelessChimeId;
-    this.logger.log(`Chime: enable all events (device=${this.nativeId}, chimeId=${chimeId})`);
     this.camera.auxDeviceCooldowns.chime = Date.now();
     try {
       await this.camera.withBaichuanRetry(async () => {
+        const discovered = await this.ensureChimeId();
+        if (!discovered) {
+          throw new Error(
+            "Wireless chime not discovered. Ensure a Reolink Chime is paired with the doorbell and try again.",
+          );
+        }
+        const channel = this.camera.storageSettings.values.rtspChannel;
+        const chimeId = this.wirelessChimeId;
+        this.logger.log(`Chime: enable all events (device=${this.nativeId}, chimeId=${chimeId})`);
         const cfg = await this.getChimeCfg();
         if (!cfg) throw new Error(`Chime config not found for chimeId=${chimeId}`);
         const api = await this.camera.ensureClient();
@@ -106,12 +138,18 @@ export class ReolinkCameraChime
   }
 
   async turnOff(): Promise<void> {
-    const channel = this.camera.storageSettings.values.rtspChannel;
-    const chimeId = this.wirelessChimeId;
-    this.logger.log(`Chime: disable all events (device=${this.nativeId}, chimeId=${chimeId})`);
     this.camera.auxDeviceCooldowns.chime = Date.now();
     try {
       await this.camera.withBaichuanRetry(async () => {
+        const discovered = await this.ensureChimeId();
+        if (!discovered) {
+          throw new Error(
+            "Wireless chime not discovered. Ensure a Reolink Chime is paired with the doorbell and try again.",
+          );
+        }
+        const channel = this.camera.storageSettings.values.rtspChannel;
+        const chimeId = this.wirelessChimeId;
+        this.logger.log(`Chime: disable all events (device=${this.nativeId}, chimeId=${chimeId})`);
         const cfg = await this.getChimeCfg();
         if (!cfg) throw new Error(`Chime config not found for chimeId=${chimeId}`);
         const api = await this.camera.ensureClient();
