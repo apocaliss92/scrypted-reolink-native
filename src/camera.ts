@@ -2813,6 +2813,7 @@ export class ReolinkCamera
             const chimeId = wirelessChimes[0].id;
             this.chime.storageSettings.values.wirelessChimeId = chimeId;
             const silentState = await api.getDingDongSilent(chimeId, channel);
+            logger.debug(`[alignAuxDevicesState] Chime silent state: ${JSON.stringify(silentState)}`);
             this.chime.on = silentState.active;
           }
         } catch (e) {

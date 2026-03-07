@@ -61,17 +61,15 @@ export class ReolinkCameraChime
     const channel = this.camera.storageSettings.values.rtspChannel;
     const chimeId = this.wirelessChimeId;
     this.logger.log(`Chime: unmute (device=${this.nativeId}, chimeId=${chimeId})`);
-    this.on = true;
     this.camera.auxDeviceCooldowns.chime = Date.now();
     try {
       await this.camera.withBaichuanRetry(async () => {
         const api = await this.camera.ensureClient();
-        const state = await api.setDingDongSilent(chimeId, 0, channel);
-        this.on = state.active;
+        await api.setDingDongSilent(chimeId, 0, channel);
       });
+      this.on = true;
       this.logger.log(`Chime: unmute ok (device=${this.nativeId})`);
     } catch (e: any) {
-      this.on = false;
       this.logger.error(
         `Chime: unmute failed (device=${this.nativeId})`,
         e?.message || String(e),
@@ -85,17 +83,15 @@ export class ReolinkCameraChime
     const chimeId = this.wirelessChimeId;
     const muteSec = this.storageSettings.values.muteDurationSec ?? 3600;
     this.logger.log(`Chime: mute for ${muteSec}s (device=${this.nativeId}, chimeId=${chimeId})`);
-    this.on = false;
     this.camera.auxDeviceCooldowns.chime = Date.now();
     try {
       await this.camera.withBaichuanRetry(async () => {
         const api = await this.camera.ensureClient();
-        const state = await api.setDingDongSilent(chimeId, muteSec, channel);
-        this.on = state.active;
+        await api.setDingDongSilent(chimeId, muteSec, channel);
       });
+      this.on = false;
       this.logger.log(`Chime: mute ok (device=${this.nativeId})`);
     } catch (e: any) {
-      this.on = true;
       this.logger.error(
         `Chime: mute failed (device=${this.nativeId})`,
         e?.message || String(e),
