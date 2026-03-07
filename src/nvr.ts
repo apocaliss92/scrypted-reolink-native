@@ -205,7 +205,11 @@ export class ReolinkNativeNvrDevice
   getBaichuanDebugOptions(): any | undefined {
     const socketDebugLogs =
       this.storageSettings.values.socketApiDebugLogs || [];
-    return convertDebugLogsToApiOptions(socketDebugLogs);
+    const apiOptions = convertDebugLogsToApiOptions(socketDebugLogs);
+    if (this.storageSettings.values.debugLogs) {
+      return { ...apiOptions, general: true };
+    }
+    return apiOptions;
   }
 
   protected getConnectionCallbacks(): BaichuanConnectionCallbacks {

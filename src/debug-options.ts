@@ -4,8 +4,6 @@ import type { DebugOptions } from "@apocaliss92/reolink-baichuan-js" with { "res
  * User-friendly debug log options enum
  */
 export enum DebugLogOption {
-    /** General debug logs */
-    General = 'general',
     /** RTSP proxy/server debug logs */
     DebugRtsp = 'debugRtsp',
     /** Low-level tracing for recording-related commands */
@@ -23,7 +21,6 @@ export enum DebugLogOption {
  */
 export function mapDebugLogToApiOption(option: DebugLogOption): keyof DebugOptions | null {
     const mapping: Record<DebugLogOption, keyof DebugOptions | null> = {
-        [DebugLogOption.General]: 'general',
         [DebugLogOption.DebugRtsp]: 'debugRtsp',
         [DebugLogOption.TraceRecordings]: 'traceRecordings',
         [DebugLogOption.TraceNativeStream]: 'traceNativeStream',
@@ -72,7 +69,6 @@ export function getApiRelevantDebugLogs(debugLogs: string[]): string[] {
  * User-friendly display names for debug log options
  */
 export const DebugLogDisplayNames: Record<DebugLogOption, string> = {
-    [DebugLogOption.General]: 'General',
     [DebugLogOption.DebugRtsp]: 'RTSP',
     [DebugLogOption.TraceRecordings]: 'Trace recordings',
     [DebugLogOption.TraceNativeStream]: 'Trace native stream',
