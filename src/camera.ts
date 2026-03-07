@@ -1698,10 +1698,11 @@ export class ReolinkCamera
         if (this.cachedCapabilities) return this.cachedCapabilities;
 
         const client = await this.ensureClient();
-        const { capabilities } = await client.getDeviceCapabilities(
+        const { capabilities, debug } = await client.getDeviceCapabilities(
           this.storageSettings.values.rtspChannel ?? 0,
         );
         this.cachedCapabilities = capabilities;
+        logger.debug("Device capabilities retrieved", debug);
         return capabilities;
       }
     } catch (e) {
@@ -2308,7 +2309,13 @@ export class ReolinkCamera
     const logger = this.getBaichuanLogger();
     logger.debug(`Reporting devices: ${JSON.stringify(abilities)}`);
 
-    const { hasSiren, hasFloodlight, hasPir, hasAutotracking, hasWirelessChime } = abilities;
+    const {
+      hasSiren,
+      hasFloodlight,
+      hasPir,
+      hasAutotracking,
+      hasWirelessChime,
+    } = abilities;
 
     // Define native IDs for all sub-devices
     const motionSirenNativeId = `${this.nativeId}${motionSirenSuffix}`;
@@ -2694,8 +2701,13 @@ export class ReolinkCamera
     const api = await this.ensureClient();
 
     const channel = this.storageSettings.values.rtspChannel;
-    const { hasSiren, hasFloodlight, hasPir, hasAutotracking, hasWirelessChime } =
-      await this.getAbilities();
+    const {
+      hasSiren,
+      hasFloodlight,
+      hasPir,
+      hasAutotracking,
+      hasWirelessChime,
+    } = await this.getAbilities();
 
     // Cooldown period: 15 seconds after a manual state change
     // Camera can take 10+ seconds to reflect state changes in its API response
@@ -2842,10 +2854,7 @@ export class ReolinkCamera
             }
           }
         } catch (e) {
-          logger.warn(
-            "Failed to align chime state",
-            e?.message || String(e),
-          );
+          logger.warn("Failed to align chime state", e?.message || String(e));
         }
       }
     }
