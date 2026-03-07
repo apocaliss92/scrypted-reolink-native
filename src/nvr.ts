@@ -51,6 +51,26 @@ export class ReolinkNativeNvrDevice
       title: "Debug Events",
       type: "boolean",
       immediate: true,
+      onPut: async (ov, value) => {
+        if (ov === value) return;
+        const logger = this.getBaichuanLogger();
+        if (this.debugLogsResetTimeout) {
+          clearTimeout(this.debugLogsResetTimeout);
+          this.debugLogsResetTimeout = undefined;
+        }
+        this.debugLogsResetTimeout = setTimeout(async () => {
+          this.debugLogsResetTimeout = undefined;
+          try {
+            await this.cleanupBaichuanApi();
+            await this.ensureBaichuanClient();
+          } catch (e) {
+            logger.warn(
+              "Failed to reset client after debug logs change",
+              e?.message || String(e),
+            );
+          }
+        }, 2000);
+      },
     },
     // eventSource: {
     //     title: 'Event Source',

@@ -126,6 +126,30 @@ export class ReolinkCamera
       title: "Debug logs",
       type: "boolean",
       immediate: true,
+      onPut: async (ov, value) => {
+        if (ov === value) return;
+        const logger = this.getBaichuanLogger();
+        if (this.resetBaichuanClient) {
+          if (this.debugLogsResetTimeout) {
+            clearTimeout(this.debugLogsResetTimeout);
+            this.debugLogsResetTimeout = undefined;
+          }
+          this.debugLogsResetTimeout = setTimeout(async () => {
+            this.debugLogsResetTimeout = undefined;
+            try {
+              await this.resetBaichuanClient("debugLogs changed");
+              this.baichuanApi = undefined;
+              this.ensureClientPromise = undefined;
+              await this.ensureClient();
+            } catch (e) {
+              logger.warn(
+                "Failed to reset client after debug logs change",
+                e?.message || String(e),
+              );
+            }
+          }, 2000);
+        }
+      },
     },
     // Basic connection settings
     ipAddress: {
