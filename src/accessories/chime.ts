@@ -6,17 +6,18 @@ import {
   SettingValue,
 } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
-import type { ChimeCfg } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import type { ReolinkCamera } from "../camera";
+
+const DEFAULT_SILENT_DURATION_MINUTES = 30;
 
 /**
  * Chime: enable/disable a paired wireless Reolink Chime receiver.
  *
- * Uses SetDingDongCfg (cmd 487) to enable/disable all event types on the chime,
- * matching the approach used by Home Assistant / reolink_aio.
+ * Uses SetDingDongSilent (cmd 610) to silence/unsilence the chime for a
+ * configurable duration in minutes.
  *
- * turnOn() enables all event types (chime rings on events).
- * turnOff() disables all event types (chime stays silent).
+ * turnOn()  → setDingDongSilent(chimeId, 0) — un-silence the chime.
+ * turnOff() → setDingDongSilent(chimeId, seconds) — silence the chime for the configured duration.
  *
  * The chime ID is auto-synced from getDingDongList during alignAuxDevicesState.
  */
@@ -35,6 +36,14 @@ export class ReolinkCameraChime
       type: "number",
       defaultValue: -1,
       readonly: true,
+    },
+    silentDurationMinutes: {
+      title: "Silent Duration (minutes)",
+      description:
+        "How long the chime stays silent when turned off, in minutes. " +
+        "After this time the chime automatically becomes active again.",
+      type: "number",
+      defaultValue: DEFAULT_SILENT_DURATION_MINUTES,
     },
   });
 
@@ -55,6 +64,12 @@ export class ReolinkCameraChime
 
   get wirelessChimeId(): number {
     return this.storageSettings.values.wirelessChimeId ?? -1;
+  }
+
+  /** Silent duration in seconds derived from the user-facing minutes setting. */
+  private get silentDurationSeconds(): number {
+    const minutes = this.storageSettings.values.silentDurationMinutes ?? DEFAULT_SILENT_DURATION_MINUTES;
+    return Math.max(1, Math.round(minutes)) * 60;
   }
 
   /**
@@ -82,25 +97,18 @@ export class ReolinkCameraChime
     return false;
   }
 
-  private async getChimeCfg(): Promise<ChimeCfg | undefined> {
-    const channel = this.camera.storageSettings.values.rtspChannel;
-    const chimeId = this.wirelessChimeId;
-    if (chimeId < 0) return undefined;
-    const api = await this.camera.ensureClient();
-    const configs = await api.getDingDongCfg(channel);
-    return configs.find(c => c.id === chimeId);
-  }
-
   /**
-   * Determine if the chime is active by checking if any event type is enabled.
+   * Determine if the chime is active by querying the silent-mode state (cmd 609).
+   * active === true means the chime is NOT silenced (on).
    */
   async syncStateFromDevice(): Promise<boolean | undefined> {
     await this.ensureChimeId();
-    const cfg = await this.getChimeCfg();
-    if (!cfg) return undefined;
-    const eventTypes = Object.values(cfg.type);
-    if (eventTypes.length === 0) return undefined;
-    return eventTypes.some(e => e.valid === 1);
+    const chimeId = this.wirelessChimeId;
+    if (chimeId < 0) return undefined;
+    const channel = this.camera.storageSettings.values.rtspChannel;
+    const api = await this.camera.ensureClient();
+    const state = await api.getDingDongSilent(chimeId, channel);
+    return state.active;
   }
 
   async turnOn(): Promise<void> {
@@ -115,22 +123,15 @@ export class ReolinkCameraChime
         }
         const channel = this.camera.storageSettings.values.rtspChannel;
         const chimeId = this.wirelessChimeId;
-        this.logger.log(`Chime: enable all events (device=${this.nativeId}, chimeId=${chimeId})`);
-        const cfg = await this.getChimeCfg();
-        if (!cfg) throw new Error(`Chime config not found for chimeId=${chimeId}`);
+        this.logger.log(`Chime: un-silence (device=${this.nativeId}, chimeId=${chimeId})`);
         const api = await this.camera.ensureClient();
-        for (const [eventType, alarmCfg] of Object.entries(cfg.type)) {
-          if (alarmCfg.valid !== 1) {
-            const musicId = alarmCfg.musicId || 1;
-            await api.setDingDongCfg(chimeId, eventType, 1, musicId, channel);
-          }
-        }
+        await api.setDingDongSilent(chimeId, 0, channel);
       });
       this.on = true;
-      this.logger.log(`Chime: enable ok (device=${this.nativeId})`);
+      this.logger.log(`Chime: un-silence ok (device=${this.nativeId})`);
     } catch (e: any) {
       this.logger.error(
-        `Chime: enable failed (device=${this.nativeId})`,
+        `Chime: un-silence failed (device=${this.nativeId})`,
         e?.message || String(e),
       );
       throw e;
@@ -149,21 +150,18 @@ export class ReolinkCameraChime
         }
         const channel = this.camera.storageSettings.values.rtspChannel;
         const chimeId = this.wirelessChimeId;
-        this.logger.log(`Chime: disable all events (device=${this.nativeId}, chimeId=${chimeId})`);
-        const cfg = await this.getChimeCfg();
-        if (!cfg) throw new Error(`Chime config not found for chimeId=${chimeId}`);
+        const seconds = this.silentDurationSeconds;
+        this.logger.log(
+          `Chime: silence for ${seconds}s (device=${this.nativeId}, chimeId=${chimeId})`,
+        );
         const api = await this.camera.ensureClient();
-        for (const [eventType, alarmCfg] of Object.entries(cfg.type)) {
-          if (alarmCfg.valid !== 0) {
-            await api.setDingDongCfg(chimeId, eventType, 0, alarmCfg.musicId, channel);
-          }
-        }
+        await api.setDingDongSilent(chimeId, seconds, channel);
       });
       this.on = false;
-      this.logger.log(`Chime: disable ok (device=${this.nativeId})`);
+      this.logger.log(`Chime: silence ok (device=${this.nativeId})`);
     } catch (e: any) {
       this.logger.error(
-        `Chime: disable failed (device=${this.nativeId})`,
+        `Chime: silence failed (device=${this.nativeId})`,
         e?.message || String(e),
       );
       throw e;

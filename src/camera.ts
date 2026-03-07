@@ -2838,7 +2838,7 @@ export class ReolinkCamera
       }
     }
 
-    // Align wireless chime state via getDingDongCfg (cmd 486)
+    // Align wireless chime state via getDingDongSilent (cmd 609)
     if (hasWirelessChime && this.chime) {
       if (isInCooldown(this.auxDeviceCooldowns.chime)) {
         logger.log(`[alignAuxDevicesState] Skipping chime (in cooldown)`);
