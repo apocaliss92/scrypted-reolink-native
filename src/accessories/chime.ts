@@ -6,11 +6,18 @@ import {
   SettingValue,
 } from "@scrypted/sdk";
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
+import type { ChimeCfg } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
 import type { ReolinkCamera } from "../camera";
 
 /**
- * Chime: mute/unmute a paired wireless Reolink Chime receiver.
- * turnOn() unmutes (time=0); turnOff() silences for muteDurationSec seconds.
+ * Chime: enable/disable a paired wireless Reolink Chime receiver.
+ *
+ * Uses SetDingDongCfg (cmd 487) to enable/disable all event types on the chime,
+ * matching the approach used by Home Assistant / reolink_aio.
+ *
+ * turnOn() enables all event types (chime rings on events).
+ * turnOff() disables all event types (chime stays silent).
+ *
  * The chime ID is auto-synced from getDingDongList during alignAuxDevicesState.
  */
 export class ReolinkCameraChime
@@ -29,13 +36,6 @@ export class ReolinkCameraChime
       defaultValue: -1,
       readonly: true,
     },
-    muteDurationSec: {
-      title: "Mute Duration (seconds)",
-      description:
-        "How long to mute the wireless chime when turned off (default: 3600 = 1 hour).",
-      type: "number",
-      defaultValue: 3600,
-    },
   });
 
   constructor(
@@ -53,25 +53,52 @@ export class ReolinkCameraChime
     await this.storageSettings.putSetting(key, value);
   }
 
-  private get wirelessChimeId(): number {
+  get wirelessChimeId(): number {
     return this.storageSettings.values.wirelessChimeId ?? -1;
+  }
+
+  private async getChimeCfg(): Promise<ChimeCfg | undefined> {
+    const channel = this.camera.storageSettings.values.rtspChannel;
+    const chimeId = this.wirelessChimeId;
+    if (chimeId < 0) return undefined;
+    const api = await this.camera.ensureClient();
+    const configs = await api.getDingDongCfg(channel);
+    return configs.find(c => c.id === chimeId);
+  }
+
+  /**
+   * Determine if the chime is active by checking if any event type is enabled.
+   */
+  async syncStateFromDevice(): Promise<boolean | undefined> {
+    const cfg = await this.getChimeCfg();
+    if (!cfg) return undefined;
+    const eventTypes = Object.values(cfg.type);
+    if (eventTypes.length === 0) return undefined;
+    return eventTypes.some(e => e.valid === 1);
   }
 
   async turnOn(): Promise<void> {
     const channel = this.camera.storageSettings.values.rtspChannel;
     const chimeId = this.wirelessChimeId;
-    this.logger.log(`Chime: unmute (device=${this.nativeId}, chimeId=${chimeId})`);
+    this.logger.log(`Chime: enable all events (device=${this.nativeId}, chimeId=${chimeId})`);
     this.camera.auxDeviceCooldowns.chime = Date.now();
     try {
       await this.camera.withBaichuanRetry(async () => {
+        const cfg = await this.getChimeCfg();
+        if (!cfg) throw new Error(`Chime config not found for chimeId=${chimeId}`);
         const api = await this.camera.ensureClient();
-        await api.setDingDongSilent(chimeId, 0, channel);
+        for (const [eventType, alarmCfg] of Object.entries(cfg.type)) {
+          if (alarmCfg.valid !== 1) {
+            const musicId = alarmCfg.musicId || 1;
+            await api.setDingDongCfg(chimeId, eventType, 1, musicId, channel);
+          }
+        }
       });
       this.on = true;
-      this.logger.log(`Chime: unmute ok (device=${this.nativeId})`);
+      this.logger.log(`Chime: enable ok (device=${this.nativeId})`);
     } catch (e: any) {
       this.logger.error(
-        `Chime: unmute failed (device=${this.nativeId})`,
+        `Chime: enable failed (device=${this.nativeId})`,
         e?.message || String(e),
       );
       throw e;
@@ -81,19 +108,24 @@ export class ReolinkCameraChime
   async turnOff(): Promise<void> {
     const channel = this.camera.storageSettings.values.rtspChannel;
     const chimeId = this.wirelessChimeId;
-    const muteSec = this.storageSettings.values.muteDurationSec ?? 3600;
-    this.logger.log(`Chime: mute for ${muteSec}s (device=${this.nativeId}, chimeId=${chimeId})`);
+    this.logger.log(`Chime: disable all events (device=${this.nativeId}, chimeId=${chimeId})`);
     this.camera.auxDeviceCooldowns.chime = Date.now();
     try {
       await this.camera.withBaichuanRetry(async () => {
+        const cfg = await this.getChimeCfg();
+        if (!cfg) throw new Error(`Chime config not found for chimeId=${chimeId}`);
         const api = await this.camera.ensureClient();
-        await api.setDingDongSilent(chimeId, muteSec, channel);
+        for (const [eventType, alarmCfg] of Object.entries(cfg.type)) {
+          if (alarmCfg.valid !== 0) {
+            await api.setDingDongCfg(chimeId, eventType, 0, alarmCfg.musicId, channel);
+          }
+        }
       });
       this.on = false;
-      this.logger.log(`Chime: mute ok (device=${this.nativeId})`);
+      this.logger.log(`Chime: disable ok (device=${this.nativeId})`);
     } catch (e: any) {
       this.logger.error(
-        `Chime: mute failed (device=${this.nativeId})`,
+        `Chime: disable failed (device=${this.nativeId})`,
         e?.message || String(e),
       );
       throw e;

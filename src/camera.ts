@@ -2802,7 +2802,7 @@ export class ReolinkCamera
       }
     }
 
-    // Align chime state (wireless only)
+    // Align wireless chime state via getDingDongCfg (cmd 486)
     if (hasWirelessChime && this.chime) {
       if (isInCooldown(this.auxDeviceCooldowns.chime)) {
         logger.log(`[alignAuxDevicesState] Skipping chime (in cooldown)`);
@@ -2812,9 +2812,10 @@ export class ReolinkCamera
           if (wirelessChimes.length > 0) {
             const chimeId = wirelessChimes[0].id;
             this.chime.storageSettings.values.wirelessChimeId = chimeId;
-            const silentState = await api.getDingDongSilent(chimeId, channel);
-            logger.debug(`[alignAuxDevicesState] Chime silent state: ${JSON.stringify(silentState)}`);
-            this.chime.on = silentState.active;
+            const isActive = await this.chime.syncStateFromDevice();
+            if (isActive !== undefined) {
+              this.chime.on = isActive;
+            }
           }
         } catch (e) {
           logger.warn(
