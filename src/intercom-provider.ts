@@ -67,7 +67,15 @@ export class ReolinkNativeIntercom
     if (!match) return;
 
     // Only auto-enable for cameras provided by our own plugin
-    if (!this.plugin?.camerasMap?.has(device.id)) return;
+    const camera = this.plugin?.camerasMap?.get(device.id);
+    if (!camera) return;
+
+    // Only auto-enable if the camera actually supports intercom.
+    // If capabilities aren't loaded yet, skip — we'll be called again
+    // when the device descriptor updates after capability detection.
+    const caps = camera.cachedCapabilities;
+    if (!caps) return;
+    if (!caps.hasIntercom) return;
 
     this.console.log(`Auto-enabling intercom mixin for ${device.name}`);
     const mixins = (device.mixins || []).slice();
