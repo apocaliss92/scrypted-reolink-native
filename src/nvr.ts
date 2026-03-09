@@ -538,7 +538,7 @@ export class ReolinkNativeNvrDevice
 
         const allNativeIds = sdk.deviceManager
           .getNativeIds()
-          .filter((nid) => !!nid);
+          .filter((nid) => !!nid && nid !== this.nativeId);
 
         const matchingNativeId = allNativeIds.find(
           (nid) =>
