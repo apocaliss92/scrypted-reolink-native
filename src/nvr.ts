@@ -458,13 +458,14 @@ export class ReolinkNativeNvrDevice
     // const { ipAddress } = this.storageSettings.values;
 
     const api = await this.ensureBaichuanClient();
-    const { devices, channels } = await api.getNvrChannelsSummary({
-      source: "cgi",
-    });
+    // source:"cgi" uses HTTP GetChannelstatus which returns the channel list immediately,
+    // without depending on the async cmd_id 145 Baichuan push. This avoids the race
+    // condition where getNvrChannelsSummary returns empty right after login.
+    const { devices, channels } = await api.getNvrChannelsSummary({ source: "cgi" });
 
     if (!channels.length) {
       logger.debug(
-        `No channels found, ${JSON.stringify({ channels, devices })}`,
+        `No channels found, retrying in 1s. ${JSON.stringify({ channels, devices })}`,
       );
       await new Promise((resolve) => setTimeout(resolve, 1000));
       await this.syncEntitiesFromRemote();
