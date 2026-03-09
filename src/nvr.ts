@@ -345,7 +345,10 @@ export class ReolinkNativeNvrDevice
   async init() {
     await this.ensureBaichuanClient();
     await this.subscribeToEvents();
-    await this.discoverDevices(true);
+    const discovered = await this.discoverDevices(true);
+    if (discovered.length > 0) {
+      await this.onDeviceEvent(ScryptedInterface.DeviceDiscovery, discovered);
+    }
 
     await this.updateDeviceInfo();
   }
@@ -537,21 +540,26 @@ export class ReolinkNativeNvrDevice
           .getNativeIds()
           .filter((nid) => !!nid);
 
-        if (
-          allNativeIds.some(
-            (nid) =>
-              nid.includes(uid) ||
-              nid.includes(`channel-${channel}`) ||
-              // nid.includes(mac) ||
-              // nid.includes(ip) ||
-              nid.includes(name) ||
-              nid === nativeId,
-          )
-        ) {
+        const matchingNativeId = allNativeIds.find(
+          (nid) =>
+            nid.includes(uid) ||
+            nid.includes(`channel-${channel}`) ||
+            // nid.includes(mac) ||
+            // nid.includes(ip) ||
+            nid.includes(name) ||
+            nid === nativeId,
+        );
+        if (matchingNativeId) {
+          logger.debug(
+            `[syncEntities] Skipping channel ${channel} (${name}): already registered as nativeId="${matchingNativeId}" (computed="${nativeId}", uid="${uid}")`,
+          );
           continue;
         }
 
         if (this.discoveredDevices.has(nativeId)) {
+          logger.debug(
+            `[syncEntities] Skipping channel ${channel} (${name}): already in discoveredDevices cache (nativeId="${nativeId}")`,
+          );
           continue;
         }
 
