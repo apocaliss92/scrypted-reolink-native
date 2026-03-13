@@ -1897,7 +1897,11 @@ export class ReolinkCamera
 
   // Event subscription methods
   unsubscribedToEvents(): void {
-    this.unsubscribeFromEvents().catch(() => {});
+    // NOTE: Do NOT call unsubscribeFromEvents() here fire-and-forget.
+    // super.subscribeToEvents() already awaits unsubscribeFromEvents() properly.
+    // A fire-and-forget unsubscribe races with concurrent subscribe calls:
+    // the async removal can delete a handler that was just registered by another
+    // caller, silently killing event delivery with no watchdog recovery.
 
     if (this.motionDetected) {
       this.motionDetected = false;

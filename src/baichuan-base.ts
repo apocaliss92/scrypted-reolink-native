@@ -171,6 +171,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   protected baichuanApi: ReolinkBaichuanApi | undefined;
   protected ensureClientPromise: Promise<ReolinkBaichuanApi> | undefined;
   protected connectionTime: number | undefined;
+  protected released: boolean = false;
   transport: BaichuanTransport;
 
   constructor(nativeId: string, transport: BaichuanTransport) {
@@ -186,6 +187,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   private eventSubscriptionActive: boolean = false;
   private lastEventTime: number = 0;
   private currentWrappedEventHandler?: (ev: ReolinkSimpleEvent) => void;
+  private subscribeToEventsPromise?: Promise<void>;
   private pingInterval?: NodeJS.Timeout;
   private autoRenewInterval?: NodeJS.Timeout;
   private eventCheckInterval?: NodeJS.Timeout;
@@ -790,6 +792,18 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       return;
     }
 
+    // Serialize concurrent subscribe calls: if one is already in-flight, wait
+    // for it to finish instead of racing through the unsubscribe/subscribe flow.
+    if (this.subscribeToEventsPromise) {
+      logger.debug("subscribeToEvents: another call in-flight, awaiting");
+      try {
+        await this.subscribeToEventsPromise;
+      } catch {
+        // ignore — the caller that owns the promise handles errors
+      }
+      return;
+    }
+
     // If already subscribed and connection is valid, return
     if (this.eventSubscriptionActive && this.baichuanApi) {
       if (
@@ -803,6 +817,19 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       this.eventSubscriptionActive = false;
     }
 
+    this.subscribeToEventsPromise = this.subscribeToEventsInternal(silent, logger, callbacks);
+    try {
+      await this.subscribeToEventsPromise;
+    } finally {
+      this.subscribeToEventsPromise = undefined;
+    }
+  }
+
+  private async subscribeToEventsInternal(
+    silent: boolean,
+    logger: BaichuanLogger,
+    callbacks: BaichuanConnectionCallbacks,
+  ): Promise<void> {
     // Unsubscribe first if handler exists (idempotent)
     await this.unsubscribeFromEvents(silent);
 
