@@ -171,7 +171,6 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   protected baichuanApi: ReolinkBaichuanApi | undefined;
   protected ensureClientPromise: Promise<ReolinkBaichuanApi> | undefined;
   protected connectionTime: number | undefined;
-  protected released: boolean = false;
   transport: BaichuanTransport;
 
   constructor(nativeId: string, transport: BaichuanTransport) {
