@@ -11,20 +11,24 @@ if (typeof globalThis.File === "undefined") {
   };
 }
 
-import type { AutoDetectMode, ReolinkBaichuanApi } from "@apocaliss92/reolink-baichuan-js" with {
+import type { AutoDetectMode, ReolinkBaichuanApi, DiscoveredDevice as LibDiscoveredDevice, AutodiscoveryClient } from "@apocaliss92/reolink-baichuan-js" with {
   "resolution-mode": "import"
 };
 import sdk, {
+  AdoptDevice,
   DeviceCreator,
   DeviceCreatorSettings,
+  DeviceDiscovery,
   DeviceProvider,
+  DiscoveredDevice,
   HttpRequest,
   HttpResponse,
   ScryptedDeviceBase,
   ScryptedDeviceType,
   ScryptedInterface,
   ScryptedNativeId,
-  Setting
+  Setting,
+  Settings
 } from "@scrypted/sdk";
 import { randomBytes } from "crypto";
 import { BaseBaichuanClass } from "./baichuan-base";
@@ -50,11 +54,14 @@ import {
 
 class ReolinkNativePlugin
   extends ScryptedDeviceBase
-  implements DeviceProvider, DeviceCreator {
+  implements DeviceProvider, DeviceCreator, DeviceDiscovery, Settings {
   devices = new Map<string, BaseBaichuanClass>();
   camerasMap = new Map<string, ReolinkCamera>();
   nvrDeviceId: string;
   private intercomProvider?: ReolinkNativeIntercom;
+  private networkDiscoveredDevices = new Map<string, { discovered: DiscoveredDevice; libDevice: LibDiscoveredDevice }>();
+  private discoverDevicesPromise: Promise<DiscoveredDevice[]> | undefined;
+  private autodiscoveryClient: AutodiscoveryClient | undefined;
 
   // Shared Baichuan API connections for external devices (non-Reolink Native cameras).
   // Keyed by Scrypted device ID. Multiple mixins on the same device share one connection.
@@ -77,6 +84,57 @@ class ReolinkNativePlugin
       type: ScryptedDeviceType.API,
       providerNativeId: this.nativeId,
     });
+
+    // Start background autodiscovery
+    this.startBackgroundDiscovery();
+  }
+
+  private async startBackgroundDiscovery() {
+    const { AutodiscoveryClient: AutodiscoveryClientClass } = await import("@apocaliss92/reolink-baichuan-js");
+
+    // Stop previous client if settings changed
+    this.autodiscoveryClient?.stop();
+
+    const methods: string[] = JSON.parse(this.storage.getItem("discoveryMethods") || '["arp","onvif"]');
+    const subnetsRaw = this.storage.getItem("discoverySubnets") || "";
+    const subnets = subnetsRaw.split(",").map((s: string) => s.trim()).filter(Boolean);
+
+    this.autodiscoveryClient = new AutodiscoveryClientClass({
+      enableHttpScanning: methods.includes("http"),
+      enableUdpDiscovery: methods.includes("udp"),
+      enableTcpPortScan: methods.includes("tcp"),
+      enableArpLookup: methods.includes("arp"),
+      enableDhcpListener: methods.includes("dhcp"),
+      enableOnvifDiscovery: methods.includes("onvif"),
+      logger: this.console,
+      httpProbeTimeoutMs: 3000,
+      udpBroadcastTimeoutMs: 5000,
+      tcpProbeTimeoutMs: 1500,
+      dhcpListenerTimeoutMs: 10000,
+      scanIntervalMs: 120_000, // 2 minutes
+      autoStart: true,
+      ...(subnets.length > 0 ? { networkCidr: subnets[0] } : {}),
+      onDeviceDiscovered: (libDevice) => {
+        this.handleBackgroundDiscovery(libDevice);
+      },
+    });
+  }
+
+  private handleBackgroundDiscovery(libDevice: LibDiscoveredDevice) {
+    const existingIps = this.getExistingDeviceIps();
+    if (existingIps.has(libDevice.host)) return;
+
+    const nativeId = `discovered-${libDevice.host}`;
+    if (this.networkDiscoveredDevices.has(nativeId)) return;
+
+    this.addToDiscoveryList(libDevice);
+    this.console.log(`[Discovery] Background: new device ${libDevice.host} (${libDevice.name || libDevice.model || "unknown"})`);
+
+    // Notify Scrypted of updated discovery list
+    this.onDeviceEvent(
+      ScryptedInterface.DeviceDiscovery,
+      [...this.networkDiscoveredDevices.values()].map((d) => d.discovered),
+    );
   }
 
   async acquireExternalClient(
@@ -359,6 +417,168 @@ class ReolinkNativePlugin
         await device.release();
       }
       this.devices.delete(nativeId);
+    }
+  }
+
+  /**
+   * Collect IP addresses of all existing devices managed by this plugin.
+   */
+  private getExistingDeviceIps(): Set<string> {
+    const ips = new Set<string>();
+    for (const [, device] of this.devices) {
+        const ip = (device as any).storageSettings?.values?.ipAddress;
+        if (ip) ips.add(ip);
+    }
+    // Also check storage for devices not yet instantiated
+    const nativeIds = sdk.deviceManager.getNativeIds().filter((nid) => !!nid);
+    for (const nid of nativeIds) {
+      try {
+        const storage = sdk.deviceManager.getDeviceStorage(nid);
+        const ip = storage?.getItem("ipAddress");
+        if (ip) ips.add(ip);
+      } catch {
+        // ignore
+      }
+    }
+    return ips;
+  }
+
+  async discoverDevices(scan?: boolean): Promise<DiscoveredDevice[]> {
+    if (scan) {
+      if (this.discoverDevicesPromise) {
+        return await this.discoverDevicesPromise;
+      }
+      this.discoverDevicesPromise = (async () => {
+        try {
+          // Trigger immediate scan on the background client
+          if (this.autodiscoveryClient) {
+            await this.autodiscoveryClient.scanNow();
+          }
+
+          // Rebuild the discovery list from the client's cumulative results
+          this.rebuildDiscoveryList();
+
+          return [...this.networkDiscoveredDevices.values()].map((d) => d.discovered);
+        } catch (e: any) {
+          this.console.error(`[Discovery] Scan failed: ${e?.message || String(e)}`);
+          return [];
+        } finally {
+          this.discoverDevicesPromise = undefined;
+        }
+      })();
+      return await this.discoverDevicesPromise;
+    }
+
+    // No scan: return cached results
+    return [...this.networkDiscoveredDevices.values()].map((d) => d.discovered);
+  }
+
+  private rebuildDiscoveryList() {
+    const existingIps = this.getExistingDeviceIps();
+    const allDevices = this.autodiscoveryClient?.getDiscoveredDevices() ?? [];
+    this.networkDiscoveredDevices.clear();
+
+    for (const libDevice of allDevices) {
+      const alreadyAdded = existingIps.has(libDevice.host);
+      this.console.log(`[Discovery] Found ${libDevice.host} (${libDevice.name || libDevice.model || "unknown"})${alreadyAdded ? " — already added, skipping" : ""}`);
+      if (alreadyAdded) continue;
+      this.addToDiscoveryList(libDevice);
+    }
+
+    this.console.log(`[Discovery] ${this.networkDiscoveredDevices.size} new device(s), ${existingIps.size} already added`);
+  }
+
+  private addToDiscoveryList(libDevice: LibDiscoveredDevice) {
+    const nativeId = `discovered-${libDevice.host}`;
+    const name = libDevice.name || libDevice.model || `Reolink ${libDevice.host}`;
+    const descParts: string[] = [libDevice.host];
+    if (libDevice.model) descParts.push(libDevice.model);
+    if (libDevice.uid) descParts.push(`UID: ${libDevice.uid}`);
+
+    const discovered: DiscoveredDevice = {
+      nativeId,
+      name,
+      description: descParts.join(" — "),
+      type: ScryptedDeviceType.Camera,
+      settings: [
+        { key: "username", title: "Username", value: "admin" },
+        { key: "password", title: "Password", type: "password" },
+      ],
+    };
+
+    if (libDevice.firmwareVersion || libDevice.model) {
+      discovered.info = {
+        manufacturer: "Reolink",
+        ...(libDevice.model ? { model: libDevice.model } : {}),
+        ...(libDevice.firmwareVersion ? { firmware: libDevice.firmwareVersion } : {}),
+      };
+    }
+
+    this.networkDiscoveredDevices.set(nativeId, { discovered, libDevice });
+  }
+
+  async adoptDevice(adopt: AdoptDevice): Promise<string> {
+    const entry = this.networkDiscoveredDevices.get(adopt.nativeId);
+    if (!entry) throw new Error("Device not found in discovery cache");
+
+    const { libDevice } = entry;
+    const username = adopt.settings?.username?.toString() || "admin";
+    const password = adopt.settings?.password?.toString();
+    if (!password) throw new Error("Password is required");
+
+    // Delegate to createDevice which handles auto-detection, capabilities, etc.
+    const nativeId = await this.createDevice({
+      ip: libDevice.host,
+      username,
+      password,
+      uid: libDevice.uid || "",
+      deviceType: "Auto",
+    });
+
+    // Remove from discovered cache
+    this.networkDiscoveredDevices.delete(adopt.nativeId);
+
+    // Notify Scrypted of updated discovery list
+    await this.onDeviceEvent(
+      ScryptedInterface.DeviceDiscovery,
+      [...this.networkDiscoveredDevices.values()].map((d) => d.discovered),
+    );
+
+    return nativeId;
+  }
+
+  async getSettings(): Promise<Setting[]> {
+    return [
+      {
+        key: "discoveryMethods",
+        title: "Discovery Methods",
+        description: "ARP: reads ARP table for Reolink MAC prefixes (fast, like Home Assistant). ONVIF: WS-Discovery multicast (most Reolink cameras). DHCP: passive listener on port 67 (requires root).",
+        type: "string",
+        choices: ["arp", "onvif", "dhcp"],
+        multiple: true,
+        value: JSON.parse(this.storage.getItem("discoveryMethods") || '["arp","onvif"]'),
+      },
+      {
+        key: "discoverySubnets",
+        title: "Discovery Subnets",
+        description: "Comma-separated list of subnets to scan in CIDR notation (e.g. 192.168.1.0/24, 10.0.0.0/24). Leave empty to auto-detect the local network. Used for HTTP and TCP scanning; ARP/UDP/DHCP methods don't need this.",
+        type: "string",
+        placeholder: "192.168.1.0/24, 10.0.0.0/24",
+        value: this.storage.getItem("discoverySubnets") || "",
+      },
+    ];
+  }
+
+  async putSetting(key: string, value: string | number | boolean | string[]): Promise<void> {
+    if (Array.isArray(value)) {
+      this.storage.setItem(key, JSON.stringify(value));
+    } else {
+      this.storage.setItem(key, String(value));
+    }
+
+    // Restart background discovery when discovery settings change
+    if (key === "discoveryMethods" || key === "discoverySubnets") {
+      this.startBackgroundDiscovery();
     }
   }
 
