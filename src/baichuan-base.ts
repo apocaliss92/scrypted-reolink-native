@@ -728,10 +728,20 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         return; // Connection changed, stop this interval
       }
 
-      // If event subscription is not active, skip — the library's
-      // built-in event watchdog handles auto-recovery with exponential
-      // backoff (including after reconnection / camera reboot).
+      // If event subscription is not active but the connection is live,
+      // attempt to re-subscribe. This handles the case where the camera
+      // rebooted and the onClose retries exhausted before it came back up,
+      // leaving a live socket with no active event subscription.
       if (!this.eventSubscriptionActive) {
+        if (this.baichuanApi?.client.isSocketConnected()) {
+          try {
+            await this.subscribeToEvents();
+          } catch (e) {
+            logger.debug(
+              `Event check: auto-subscribe attempt failed: ${e?.message || String(e)}`,
+            );
+          }
+        }
         return;
       }
 
