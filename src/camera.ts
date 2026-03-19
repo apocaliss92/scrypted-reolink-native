@@ -601,6 +601,19 @@ export class ReolinkCamera
         await this.runDiagnostics();
       },
     },
+    dumpModelFixtures: {
+      subgroup: "Diagnostics",
+      title: "Dump Model Fixtures",
+      description:
+        "Capture all API responses for this device and save as fixture files. " +
+        "Useful for regression testing and debugging capability detection.",
+      type: "button",
+      hide: true,
+      immediate: true,
+      onPut: async () => {
+        await this.dumpModelFixtures();
+      },
+    },
     // Multifocal composite stream PIP settings
     pipPosition: {
       title: "PIP Position",
@@ -1607,6 +1620,42 @@ export class ReolinkCamera
       logger.log(`Streams directory: ${result.streamsDir}`);
     } catch (e) {
       logger.error("Failed to run diagnostics", e?.message || String(e));
+      throw e;
+    }
+  }
+
+  async dumpModelFixtures(): Promise<void> {
+    const logger = this.getBaichuanLogger();
+    const channel = this.storageSettings.values.rtspChannel || 0;
+    const basePath =
+      this.storageSettings.values.diagnosticsOutputPath ||
+      path.join(process.env.SCRYPTED_PLUGIN_VOLUME, "diagnostics", this.name);
+    const outDir = path.join(basePath, "model-fixtures", `ch${channel}`);
+
+    logger.log(`Dumping model fixtures: channel=${channel}, outDir=${outDir}`);
+
+    try {
+      const api = await this.ensureClient();
+      const { captureModelFixtures: capture } =
+        await import("@apocaliss92/reolink-baichuan-js");
+      const result = await capture({
+        api,
+        channel,
+        outDir,
+        log: (...args: unknown[]) => logger.log(String(args.join(" "))),
+      });
+
+      logger.log(
+        `Model fixtures captured: ${result.summary.ok}/${result.summary.total} ok, ${result.summary.failed} failed`,
+      );
+      if (result.summary.errors.length) {
+        logger.warn(
+          `Failed calls:\n${result.summary.errors.map((e) => `  - ${e}`).join("\n")}`,
+        );
+      }
+      logger.log(`Output: ${outDir}`);
+    } catch (e) {
+      logger.error("Failed to dump model fixtures", e?.message || String(e));
       throw e;
     }
   }
