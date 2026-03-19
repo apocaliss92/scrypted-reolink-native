@@ -608,7 +608,6 @@ export class ReolinkCamera
         "Capture all API responses for this device and save as fixture files. " +
         "Useful for regression testing and debugging capability detection.",
       type: "button",
-      hide: true,
       immediate: true,
       onPut: async () => {
         await this.dumpModelFixtures();
@@ -2360,7 +2359,7 @@ export class ReolinkCamera
   async reportDevices(): Promise<void> {
     const abilities = await this.getAbilities();
     const logger = this.getBaichuanLogger();
-    logger.debug(`Reporting devices: ${JSON.stringify(abilities)}`);
+    logger.log(`Reporting devices: ${JSON.stringify(abilities)}`);
 
     const {
       hasSiren,
@@ -3272,7 +3271,7 @@ export class ReolinkCamera
         await sdk.deviceManager.onDeviceDiscovered(device);
 
         logger.log(`Device interfaces updated`);
-        logger.debug(
+        logger.log(
           JSON.stringify({
             interfaces,
             isLensDevice: !!this.multiFocalDevice,
@@ -3290,7 +3289,7 @@ export class ReolinkCamera
       }
 
       logger.log(`Refreshed device capabilities`);
-      logger.debug(
+      logger.log(
         `Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets, objects })}`,
       );
     } catch (e) {
