@@ -2787,19 +2787,10 @@ export class ReolinkCamera
       }
     }
 
-    // Align siren state (direct control)
-    if (hasSiren && this.siren) {
-      if (isInCooldown(this.auxDeviceCooldowns.siren)) {
-        logger.log(`[alignAuxDevicesState] Skipping siren (in cooldown)`);
-      } else {
-        try {
-          const sirenState = await api.getSiren(channel);
-          this.siren.on = sirenState.enabled;
-        } catch (e) {
-          logger.warn("Failed to align siren state", e?.message || String(e));
-        }
-      }
-    }
+    // Siren direct control: state is managed manually by turnOn/turnOff.
+    // The camera reports siren as "off" immediately after triggering (fire-and-forget),
+    // so polling would always reset the switch to OFF. We skip alignment entirely
+    // and let the user control the switch: ON triggers the siren, OFF stops it.
 
     // Align motion-floodlight state
     if (hasFloodlight && this.motionFloodlight) {

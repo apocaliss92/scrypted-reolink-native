@@ -26,8 +26,6 @@ export class ReolinkCameraSiren extends ScryptedDeviceBase implements OnOff {
       await this.camera.withBaichuanRetry(async () => {
         const api = await this.camera.ensureClient();
         await api.setSiren(channel, false);
-        const sirenState = await api.getSiren(channel);
-        this.on = sirenState.enabled;
       });
       this.logger.log(`Siren toggle: turnOff ok (device=${this.nativeId})`);
     } catch (e: any) {
@@ -48,11 +46,10 @@ export class ReolinkCameraSiren extends ScryptedDeviceBase implements OnOff {
       await this.camera.withBaichuanRetry(async () => {
         const api = await this.camera.ensureClient();
         await api.setSiren(channel, true);
-        const sirenState = await api.getSiren(channel);
-        this.on = sirenState.enabled;
       });
       this.logger.log(`Siren toggle: turnOn ok (device=${this.nativeId})`);
     } catch (e: any) {
+      this.on = false;
       this.logger.error(
         `Siren toggle: turnOn failed (device=${this.nativeId})`,
         e?.message || String(e),
