@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Prepublish: rebuild linked library, reinstall, bump plugin version, publish.
+# Prepublish: rebuild linked library, reinstall, bump plugin version.
 #
 # Usage: ./prepublish-patch.sh [major|minor|patch]
 #   Defaults to "patch" if no argument given.
@@ -9,11 +9,12 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/../reolink-baichuan-js"
 BUMP="${1:-patch}"
 
 # ── Step 1: Build the library ───────────────────────────────────
 echo "Building reolink-baichuan-js..."
-cd "${SCRIPT_DIR}/reolink-baichuan-js"
+cd "${LIB_DIR}"
 npm run build
 echo "Library built."
 
