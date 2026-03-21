@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Prepublish: rebuild linked library and reinstall.
+# Prepublish: build linked library, reinstall, bump plugin patch version.
 # Runs automatically before npm publish via prepublishOnly.
 #
 
@@ -20,3 +20,9 @@ echo "Installing dependencies..."
 cd "${SCRIPT_DIR}"
 npm install
 echo "Dependencies installed."
+
+# ── Step 3: Bump plugin patch version ───────────────────────────
+echo "Bumping plugin patch version..."
+npm version patch --no-git-tag-version
+NEW_VERSION=$(node -p "require('./package.json').version")
+echo "Plugin version: ${NEW_VERSION}"
