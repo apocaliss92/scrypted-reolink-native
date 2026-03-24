@@ -1989,6 +1989,14 @@ export class ReolinkCamera
           });
           return;
 
+        case "battery":
+          if (ev.battery) {
+            this.updateBatteryInfo(ev.battery as any).catch((e) => {
+              logger.debug("Error updating battery from push", e?.message || String(e));
+            });
+          }
+          return;
+
         case "offline":
         case "online":
           this.updateOnlineState(ev.type === "online").catch((e) => {
@@ -3279,7 +3287,6 @@ export class ReolinkCamera
         );
       }
 
-      logger.log(`Refreshed device capabilities`);
       logger.log(
         `Refreshed device capabilities: ${JSON.stringify({ capabilities, abilities, support, presets, objects })}`,
       );
@@ -3530,6 +3537,7 @@ export class ReolinkCamera
         }
 
         if (wasSleeping) {
+          this.updateBatteryInfo().catch(() => {});
           this.alignAuxDevicesState().catch(() => {});
           if (this.forceNewSnapshot) {
             this.takePicture().catch(() => {});
@@ -3611,42 +3619,26 @@ export class ReolinkCamera
     if (batteryInfo.batteryPercent !== undefined) {
       const oldLevel = this.batteryLevel;
       const oldChargeState = this.chargeState;
-      // adapterStatus: "adapter" | "solarPanel" | "none" — sotto carica se adapter collegato (anche con chargeComplete)
-      const isSottoCarica =
+      // adapterStatus: "adapter" | "solarPanel" = charging, "none" = not charging
+      const isCharging =
         batteryInfo.adapterStatus === "adapter" ||
         batteryInfo.adapterStatus === "solarPanel";
-      const newChargeState =
-        batteryInfo.adapterStatus !== undefined
-          ? isSottoCarica
-            ? ChargeState.Charging
-            : ChargeState.NotCharging
-          : undefined;
+      const newChargeState = isCharging
+        ? ChargeState.Charging
+        : ChargeState.NotCharging;
 
       this.batteryLevel = batteryInfo.batteryPercent;
-      if (newChargeState !== undefined) {
-        this.chargeState = newChargeState;
-      }
+      this.chargeState = newChargeState;
 
       // Log only if battery level changed
       if (oldLevel !== batteryInfo.batteryPercent) {
-        if (batteryInfo.adapterStatus !== undefined) {
-          logger.log(
-            `Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}% (sotto carica: ${isSottoCarica}, adapterStatus: ${batteryInfo.adapterStatus}, chargeStatus: ${batteryInfo.chargeStatus ?? "—"})`,
-          );
-        } else {
-          logger.log(
-            `Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}%`,
-          );
-        }
+        logger.log(
+          `Battery level changed: ${oldLevel}% → ${batteryInfo.batteryPercent}% (charging: ${isCharging}, adapter: ${batteryInfo.adapterStatus ?? "unknown"}, status: ${batteryInfo.chargeStatus ?? "unknown"})`,
+        );
       } else if (oldLevel === undefined) {
-        // First time setting battery level
-        if (batteryInfo.adapterStatus !== undefined) {
-          logger.log(
-            `Battery level set: ${batteryInfo.batteryPercent}% (sotto carica: ${isSottoCarica}, adapterStatus: ${batteryInfo.adapterStatus})`,
-          );
-        } else {
-          logger.log(`Battery level set: ${batteryInfo.batteryPercent}%`);
-        }
+        logger.log(
+          `Battery level set: ${batteryInfo.batteryPercent}% (charging: ${isCharging}, adapter: ${batteryInfo.adapterStatus ?? "unknown"})`,
+        );
       }
 
       // Forward battery/charge state changes to Scrypted (plugin, HomeKit, etc.)
@@ -3694,48 +3686,15 @@ export class ReolinkCamera
           return;
         }
 
-        // Check current sleep status
-        let sleepStatus = api.getSleepStatus({ channel });
+        // Check current sleep status — only update if already awake
+        const sleepStatus = api.getSleepStatus({ channel });
 
-        // If camera is sleeping, wake it up
         if (sleepStatus.state === "sleeping") {
-          logger.log("Camera is sleeping, waking up for periodic update...");
-          try {
-            await api.wakeUp(channel, { waitAfterWakeMs: 2000 });
-            logger.log("Wake command sent, waiting for camera to wake up...");
-          } catch (wakeError) {
-            logger.error(
-              "Failed to wake up camera:",
-              wakeError?.message || String(wakeError),
-            );
-            return;
-          }
-
-          // Poll until camera is awake (with timeout)
-          const wakeTimeoutMs = 30000; // 30 seconds max
-          const startWakePoll = Date.now();
-          let awake = false;
-
-          while (Date.now() - startWakePoll < wakeTimeoutMs) {
-            await new Promise((resolve) => setTimeout(resolve, 1000)); // Check every second
-            sleepStatus = api.getSleepStatus({ channel });
-            if (sleepStatus.state === "awake") {
-              awake = true;
-              logger.log("Camera is now awake");
-              this.sleeping = false;
-              break;
-            }
-          }
-
-          if (!awake) {
-            logger.error(
-              "Camera did not wake up within timeout, skipping update",
-            );
-            return;
-          }
-        } else if (sleepStatus.state === "awake") {
-          this.sleeping = false;
+          logger.debug("Camera is sleeping, skipping periodic battery update");
+          return;
         }
+
+        this.sleeping = false;
 
         // Now that camera is awake, update all states
         // 1. Update battery info
