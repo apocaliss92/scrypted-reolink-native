@@ -1,4 +1,4 @@
-import type { DebugOptions } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { DebugOptions } from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
 
 /**
  * User-friendly debug log options enum

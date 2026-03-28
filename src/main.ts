@@ -11,7 +11,7 @@ if (typeof globalThis.File === "undefined") {
   };
 }
 
-import type { AutoDetectMode, ReolinkBaichuanApi, DiscoveredDevice as LibDiscoveredDevice, AutodiscoveryClient } from "@apocaliss92/reolink-baichuan-js" with {
+import type { AutoDetectMode, ReolinkBaichuanApi, DiscoveredDevice as LibDiscoveredDevice, AutodiscoveryClient } from "@apocaliss92/nodelink-js" with {
   "resolution-mode": "import"
 };
 import sdk, {
@@ -90,7 +90,7 @@ class ReolinkNativePlugin
   }
 
   private async startBackgroundDiscovery() {
-    const { AutodiscoveryClient: AutodiscoveryClientClass } = await import("@apocaliss92/reolink-baichuan-js");
+    const { AutodiscoveryClient: AutodiscoveryClientClass } = await import("@apocaliss92/nodelink-js");
 
     // Stop previous client if settings changed
     this.autodiscoveryClient?.stop();
@@ -230,7 +230,7 @@ class ReolinkNativePlugin
       `[AutoDetect] Starting device type detection for ${ipAddress}...${forceType ? ` (forcing type: ${forceType})` : ""}`,
     );
     const { autoDetectDeviceType } =
-      await import("@apocaliss92/reolink-baichuan-js");
+      await import("@apocaliss92/nodelink-js");
     // 'Auto', 'NVR', 'Battery Camera', 'Regular Camera
     const mode: AutoDetectMode =
       forceType === "Auto"

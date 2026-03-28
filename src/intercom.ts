@@ -1,4 +1,4 @@
-import type { ReolinkBaichuanApi } from "@apocaliss92/reolink-baichuan-js" with {
+import type { ReolinkBaichuanApi } from "@apocaliss92/nodelink-js" with {
   "resolution-mode": "import",
 };
 import sdk, {

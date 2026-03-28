@@ -4,7 +4,7 @@ import type {
   ReolinkBaichuanApi,
   Rfc4571TcpServer,
   StreamProfile,
-} from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+} from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
 
 import sdk, {
   type MediaObject,
@@ -409,7 +409,7 @@ export class StreamManager {
         : await this.opts.createStreamClient(nonCompositeApiKey);
 
       const { createRfc4571TcpServer } =
-        await import("@apocaliss92/reolink-baichuan-js");
+        await import("@apocaliss92/nodelink-js");
 
       const { username, password } = this.opts.credentials;
 

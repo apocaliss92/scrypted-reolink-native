@@ -3,7 +3,7 @@ import type {
   RecordingFile,
   ReolinkDeviceInfo,
   ReolinkSupportedStream,
-} from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+} from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
 import sdk, {
   DeviceBase,
   HttpRequest,
@@ -383,7 +383,7 @@ let baichuanRuntimePromise:
 
 const getBaichuanRuntime = async () => {
   if (!baichuanRuntimePromise) {
-    baichuanRuntimePromise = import("@apocaliss92/reolink-baichuan-js") as any;
+    baichuanRuntimePromise = import("@apocaliss92/nodelink-js") as any;
   }
   return baichuanRuntimePromise;
 };

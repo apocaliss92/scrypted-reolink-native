@@ -2,7 +2,7 @@ import type {
   BaichuanClientOptions,
   ReolinkBaichuanApi,
   ReolinkSimpleEvent,
-} from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+} from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
 import { ScryptedDeviceBase } from "@scrypted/sdk";
 import { createBaichuanApi, type BaichuanTransport } from "./connect";
 import { StreamManager } from "./stream-utils";

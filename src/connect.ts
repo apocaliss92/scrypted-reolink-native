@@ -2,7 +2,7 @@ import type {
   BaichuanTransport as BaichuanTransportParent,
   BaichuanClientOptions,
   ReolinkBaichuanApi,
-} from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+} from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
 
 export type BaichuanTransport = BaichuanTransportParent;
 
@@ -28,7 +28,7 @@ export async function createBaichuanApi(props: {
   const { inputs, transport } = props;
   const { logger } = inputs;
   const { ReolinkBaichuanApi } =
-    await import("@apocaliss92/reolink-baichuan-js");
+    await import("@apocaliss92/nodelink-js");
 
   const base: BaichuanClientOptions = {
     host: inputs.host,

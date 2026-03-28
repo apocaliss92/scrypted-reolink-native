@@ -9,7 +9,7 @@ import type {
   ReolinkSupportedStream,
   SleepStatus,
   StreamSamplingSelection,
-} from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+} from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
 import sdk, {
   BinarySensor,
   Camera,
@@ -1097,7 +1097,7 @@ export class ReolinkCamera
           // Native mode: use Baichuan CoverPreview API (cmd_id=298) - fast thumbnail extraction
           // Dynamic import to avoid CommonJS/ESM issues
           const { parseRecordingFileName } =
-            await import("@apocaliss92/reolink-baichuan-js");
+            await import("@apocaliss92/nodelink-js");
 
           // Parse filename to extract start time for CoverPreview
           const parsed = parseRecordingFileName(thumbnailId);
@@ -1636,7 +1636,7 @@ export class ReolinkCamera
     try {
       const api = await this.ensureClient();
       const { captureModelFixtures: capture } =
-        await import("@apocaliss92/reolink-baichuan-js");
+        await import("@apocaliss92/nodelink-js");
       const result = await capture({
         api,
         channel,

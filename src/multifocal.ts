@@ -5,7 +5,7 @@ import type {
   ReolinkBaichuanApi,
   ReolinkSimpleEvent,
   SleepStatus
-} from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+} from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
 import sdk, {
   Device,
   DeviceProvider,

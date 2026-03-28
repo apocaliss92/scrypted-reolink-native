@@ -1,4 +1,4 @@
-import type { PtzPreset } from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+import type { PtzPreset } from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
 import type { ReolinkCamera } from "./camera";
 
 export type PtzCapabilitiesShape = {

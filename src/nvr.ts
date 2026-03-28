@@ -2,7 +2,7 @@ import type {
   ReolinkBaichuanApi,
   ReolinkBaichuanDeviceSummary,
   ReolinkSimpleEvent,
-} from "@apocaliss92/reolink-baichuan-js" with { "resolution-mode": "import" };
+} from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
 import sdk, {
   AdoptDevice,
   Device,
@@ -626,7 +626,7 @@ export class ReolinkNativeNvrDevice
     const { uid } = entry.deviceData;
 
     const { ReolinkBaichuanApi } =
-      await import("@apocaliss92/reolink-baichuan-js");
+      await import("@apocaliss92/nodelink-js");
     const transport = "tcp";
     const baichuanApi = new ReolinkBaichuanApi({
       host: this.storageSettings.values.ipAddress,
