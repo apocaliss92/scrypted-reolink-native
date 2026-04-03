@@ -3195,14 +3195,29 @@ export class ReolinkCamera
 
     logger.log(`Creating RFC4571 stream: streamKey='${streamKey}'`);
 
-    return await this.withBaichuanRetry(async () => {
-      return await createRfc4571MediaObjectFromStreamManager({
-        streamManager: this.streamManager!,
-        streamKey,
-        selected,
-        sourceId: this.id,
+    try {
+      return await this.withBaichuanRetry(async () => {
+        return await createRfc4571MediaObjectFromStreamManager({
+          streamManager: this.streamManager!,
+          streamKey,
+          selected,
+          sourceId: this.id,
+        });
       });
-    });
+    } catch (e) {
+      // If the device rejected a stream profile (e.g. ext returning 400),
+      // invalidate cached stream options so the profile is excluded on the
+      // next prebuffer restart cycle.
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("response_code 400")) {
+        this.cachedVideoStreamOptions = undefined;
+        logger.warn(
+          `Stream profile rejected by device (streamKey=${streamKey}). ` +
+            `Cached stream options invalidated — the profile will be excluded on next refresh.`,
+        );
+      }
+      throw e;
+    }
   }
 
   async ensureClient(): Promise<ReolinkBaichuanApi> {
