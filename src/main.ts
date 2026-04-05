@@ -293,7 +293,7 @@ class ReolinkNativePlugin
         logger: this.console,
       });
 
-      await sdk.deviceManager.onDeviceDiscovered({
+      const deviceId = await sdk.deviceManager.onDeviceDiscovered({
         nativeId,
         name,
         interfaces,
@@ -313,7 +313,7 @@ class ReolinkNativePlugin
       device.storageSettings.values.uid = uid;
       device.cachedCapabilities = capabilities;
 
-      return nativeId;
+      return deviceId;
     }
 
     // Handle NVR case
@@ -322,7 +322,7 @@ class ReolinkNativePlugin
 
       settings.newCamera ||= name;
 
-      await sdk.deviceManager.onDeviceDiscovered({
+      const deviceId = await sdk.deviceManager.onDeviceDiscovered({
         nativeId,
         name,
         interfaces: [
@@ -343,7 +343,7 @@ class ReolinkNativePlugin
       device.storageSettings.values.username = username;
       device.storageSettings.values.password = password;
 
-      return nativeId;
+      return deviceId;
     }
 
     // Create nativeId based on device type and transport
@@ -373,7 +373,7 @@ class ReolinkNativePlugin
         logger: this.console,
       });
 
-      await sdk.deviceManager.onDeviceDiscovered({
+      const deviceId = await sdk.deviceManager.onDeviceDiscovered({
         nativeId,
         name,
         interfaces,
@@ -396,7 +396,7 @@ class ReolinkNativePlugin
 
       device.cachedCapabilities = capabilities;
 
-      return nativeId;
+      return deviceId;
     } catch (e) {
       this.console.error(
         "Error adding Reolink device",
