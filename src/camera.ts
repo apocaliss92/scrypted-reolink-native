@@ -154,7 +154,7 @@ export class ReolinkCamera
     // Basic connection settings
     ipAddress: {
       title: "IP Address",
-      hide: true,
+      hide: false,
       type: "string",
       onPut: async () => {
         await this.credentialsChanged();
@@ -162,7 +162,7 @@ export class ReolinkCamera
     },
     username: {
       type: "string",
-      hide: true,
+      hide: false,
       title: "Username",
       onPut: async () => {
         await this.credentialsChanged();
@@ -170,7 +170,7 @@ export class ReolinkCamera
     },
     password: {
       type: "password",
-      hide: true,
+      hide: false,
       title: "Password",
       onPut: async () => {
         await this.credentialsChanged();
