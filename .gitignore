@@ -4,3 +4,4 @@ node_modules/
 dist/
 pcap/*
 .npmrc
+.claude/

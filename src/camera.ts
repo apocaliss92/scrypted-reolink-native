@@ -2795,10 +2795,38 @@ export class ReolinkCamera
       }
     }
 
-    // Siren direct control: state is managed manually by turnOn/turnOff.
-    // The camera reports siren as "off" immediately after triggering (fire-and-forget),
-    // so polling would always reset the switch to OFF. We skip alignment entirely
-    // and let the user control the switch: ON triggers the siren, OFF stops it.
+    // Align siren direct-control state.
+    // The siren has a built-in playback duration enforced by the camera firmware,
+    // so once the audio finishes the device flips back to OFF on its own. Rely
+    // on the cmd 547 (SirenStatusList) push to catch that transition; fall back
+    // to an active getSirenStatus() request when no push has arrived yet so the
+    // switch matches the device state after a plugin restart.
+    if (hasSiren && this.siren) {
+      if (isInCooldown(this.auxDeviceCooldowns.siren)) {
+        logger.log(`[alignAuxDevicesState] Skipping siren (in cooldown)`);
+      } else {
+        try {
+          const cached = api.getCachedSirenStatus(channel);
+          if (cached) {
+            this.siren.on =
+              cached.value.status || cached.value.playing === true;
+          } else {
+            const status = await api.getSirenStatus({ timeoutMs: 2000 });
+            const list = status?.body?.SirenStatusList;
+            const playing =
+              typeof list?.playing === "number" ? list.playing === 1 : false;
+            const enabled =
+              typeof list?.status === "number" ? list.status === 1 : false;
+            this.siren.on = enabled || playing;
+          }
+        } catch (e) {
+          logger.warn(
+            "Failed to align siren state",
+            e?.message || String(e),
+          );
+        }
+      }
+    }
 
     // Align motion-floodlight state
     if (hasFloodlight && this.motionFloodlight) {
@@ -2822,14 +2850,28 @@ export class ReolinkCamera
       }
     }
 
-    // Align floodlight state (direct control)
+    // Align floodlight state (direct control).
+    // The camera's cmd 289 returns FloodlightTask (the scheduled task config) and
+    // does NOT reflect the current manual ON/OFF — `<enable>` there is the task
+    // enable, which is 0 for any camera without a configured schedule. The only
+    // reliable source for the actual current state is the cmd 291 push
+    // (FloodlightStatusList) that the firmware emits on every transition,
+    // including the auto-off after the FloodlightManual duration expires.
+    //
+    // Brightness is still safe to read from cmd 289 because <brightness_cur> is
+    // the persisted brightness setting and matches what the camera will apply
+    // on next turnOn.
     if (hasFloodlight && this.floodlight) {
       if (isInCooldown(this.auxDeviceCooldowns.floodlight)) {
         logger.log(`[alignAuxDevicesState] Skipping floodlight (in cooldown)`);
       } else {
         try {
+          const cached = api.getCachedFloodlightStatus(channel);
+          if (cached) {
+            this.floodlight.on = cached.value.status;
+          }
+          // Brightness is still meaningful from the task config.
           const ledState = await api.getWhiteLedState(channel);
-          this.floodlight.on = ledState.enabled;
           if (ledState.brightness !== undefined) {
             this.floodlight.brightness = ledState.brightness;
           }
