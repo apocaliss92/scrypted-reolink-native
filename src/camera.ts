@@ -1,6 +1,7 @@
 import type {
   BatteryInfo,
   DeviceCapabilities,
+  EmailPushEvent,
   NativeVideoStreamVariant,
   PtzCommand,
   PtzPreset,
@@ -1614,6 +1615,14 @@ export class ReolinkCamera
       // (singleton under the provider) maps `cam-<nativeId>@<domain>`
       // RCPT addresses back to this `nativeId`.
       emailPushCameraId: () => this.nativeId ?? "",
+      // When the e-mail carries the snapshot Reolink sends with
+      // `attachmentType=picture`, hand it to the camera's `lastPicture`
+      // cache. Downstream consumers (Snapshot mixin → MQTT image
+      // entity, Advanced Notifier, HA discovery) call `takePicture()`
+      // on the back of the motion event; for battery cams that returns
+      // the cached value, so dropping the fresh snapshot in here makes
+      // the trigger frame surface in MQTT/HA without waking the camera.
+      onEmailPushEvent: (event) => this.handleEmailPushSnapshot(event),
     };
   }
 
@@ -2731,6 +2740,38 @@ export class ReolinkCamera
       const msg = e instanceof Error ? e.message : String(e);
       this.storageSettings.values.emailPushCachedStatus = `Failed to read camera config: ${msg}`;
       logger.warn(`E-mail Push: refresh failed: ${msg}`);
+    }
+  }
+
+  /**
+   * Called from `baichuan-base.subscribeToEvents` when a per-camera
+   * email-push event lands on the bus. We don't use the e-mail's image
+   * attachment — Reolink firmwares vary on quality/encoding and we'd
+   * be reimplementing the snapshot pipeline. Instead we leverage the
+   * fact that the camera is *guaranteed awake* right now (it just
+   * pushed an e-mail) and call the live Baichuan snapshot API: it
+   * returns a fresh frame in milliseconds without forcing an extra
+   * wake-up cycle. The result is stashed in `lastPicture` so the
+   * Snapshot mixin → MQTT image entity (and any other consumer that
+   * calls `takePicture()` on the back of the motion event) serves the
+   * trigger frame instead of the previous cached one.
+   */
+  private async handleEmailPushSnapshot(
+    event: EmailPushEvent,
+  ): Promise<void> {
+    const logger = this.getBaichuanLogger();
+    try {
+      const client = await this.ensureClient();
+      const mo = await this.takePictureInternal(client);
+      this.lastPicture = { mo, atMs: event.receivedAtMs };
+      this.forceNewSnapshot = false;
+      logger.log(
+        `E-mail Push snapshot fetched live (type=${event.inferredType}) — next takePicture will serve it`,
+      );
+    } catch (e) {
+      logger.warn(
+        `E-mail Push: live snapshot fetch failed: ${e?.message || String(e)}`,
+      );
     }
   }
 

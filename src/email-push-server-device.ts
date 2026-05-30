@@ -214,7 +214,13 @@ export class EmailPushServerDevice
       managerHost,
       managerPort: cfg.port,
       domain: cfg.domain,
-      recipientLocalPart: nativeId,
+      // The lib's `resolveCameraIdFromRecipient` matches `^cam-(.+)$`
+      // and feeds the captured group to `cameraResolver`. We MUST send
+      // the recipient with the `cam-` prefix so the camera-side
+      // MAIL FROM produces `cam-<nativeId>@<domain>`; without it every
+      // delivery is rejected with `550 Unknown recipient` and motion
+      // events never reach Scrypted.
+      recipientLocalPart: `cam-${nativeId}`,
       sendNickname: cam.name ?? nativeId,
       ...(cfg.requireAuth
         ? {
@@ -536,7 +542,9 @@ export class EmailPushServerDevice
           managerHost,
           managerPort: cfg.port,
           domain: cfg.domain,
-          recipientLocalPart: nativeId,
+          // See `getManagerSetupParamsForCamera` for why the `cam-`
+          // prefix is mandatory.
+          recipientLocalPart: `cam-${nativeId}`,
           sendNickname: cam.name ?? nativeId,
           attachmentType: "picture",
           triggerTypes: ["MD", "people", "vehicle"],

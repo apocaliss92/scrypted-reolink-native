@@ -1,5 +1,6 @@
 import type {
   BaichuanClientOptions,
+  EmailPushEvent,
   ReolinkBaichuanApi,
   ReolinkSimpleEvent,
 } from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
@@ -32,6 +33,16 @@ export interface BaichuanConnectionCallbacks {
    * leave undefined on NVR children where email-push isn't meaningful.
    */
   emailPushCameraId?: () => string;
+  /**
+   * Optional. When the email-push event carries an image attachment
+   * (typical for `attachmentType=picture` on motion), the camera
+   * receives the full event so it can republish the snapshot —
+   * usually by updating its `lastPicture` cache so subsequent
+   * `takePicture()` calls return the fresh thumbnail without waking
+   * the camera. Invoked AFTER the simple-event dispatch so any motion
+   * listener has already fired.
+   */
+  onEmailPushEvent?: (event: EmailPushEvent) => void;
 }
 
 /**
@@ -908,6 +919,9 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
           this.currentEmailPushOff = api.subscribeEmailPushEvents({
             cameraId: callbacks.emailPushCameraId(),
             channel: 0,
+            ...(callbacks.onEmailPushEvent
+              ? { onEvent: callbacks.onEmailPushEvent }
+              : {}),
           });
           logger.debug("Bridged email-push bus to onSimpleEvent");
         } catch (e) {
