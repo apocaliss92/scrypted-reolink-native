@@ -22,6 +22,16 @@ export interface BaichuanConnectionCallbacks {
   onClose?: () => void | Promise<void>;
   onSimpleEvent?: (ev: ReolinkSimpleEvent) => void;
   getEventSubscriptionEnabled?: () => boolean;
+  /**
+   * When provided, the base class binds the camera's api to the global
+   * email-push bus filtered on `cameraId === emailPushCameraId()`. The
+   * lib's `subscribeEmailPushEvents` converts each matching event into
+   * a `ReolinkSimpleEvent` and dispatches it through `onSimpleEvent`,
+   * so the camera's existing motion / AI handler lights up for SMTP-
+   * delivered events with no extra wiring. Standalone cameras only —
+   * leave undefined on NVR children where email-push isn't meaningful.
+   */
+  emailPushCameraId?: () => string;
 }
 
 /**
@@ -186,6 +196,7 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   private eventSubscriptionActive: boolean = false;
   private lastEventTime: number = 0;
   private currentWrappedEventHandler?: (ev: ReolinkSimpleEvent) => void;
+  private currentEmailPushOff?: () => void;
   private subscribeToEventsPromise?: Promise<void>;
   private pingInterval?: NodeJS.Timeout;
   private autoRenewInterval?: NodeJS.Timeout;
@@ -866,7 +877,10 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
 
     // Subscribe to events with wrapper to track last event time
     try {
-      const originalHandler = callbacks.onSimpleEvent;
+      // The outer `subscribeToEvents` already guards on `!callbacks.onSimpleEvent`
+      // and returns before reaching this point. The narrowed local keeps
+      // strict-null TS happy without changing the runtime contract.
+      const originalHandler = callbacks.onSimpleEvent!;
       // Create and store the wrapped handler so it can be properly removed later
       this.currentWrappedEventHandler = (ev: ReolinkSimpleEvent) => {
         // Update last event time
@@ -878,6 +892,32 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       // onSimpleEvent no longer throws on initial subscribe failure;
       // the library watchdog handles auto-recovery internally.
       await api.onSimpleEvent(this.currentWrappedEventHandler);
+
+      // Bridge the global email-push bus into this api's onSimpleEvent
+      // stream so the same wrapped handler above (and any other
+      // listener) sees SMTP-delivered motion exactly like a native push.
+      // Idempotent: if a previous off-handle is still around, release it.
+      if (callbacks.emailPushCameraId) {
+        if (this.currentEmailPushOff) {
+          try {
+            this.currentEmailPushOff();
+          } catch {}
+          this.currentEmailPushOff = undefined;
+        }
+        try {
+          this.currentEmailPushOff = api.subscribeEmailPushEvents({
+            cameraId: callbacks.emailPushCameraId(),
+            channel: 0,
+          });
+          logger.debug("Bridged email-push bus to onSimpleEvent");
+        } catch (e) {
+          logger.warn(
+            "Failed to bridge email-push events",
+            e?.message || String(e),
+          );
+        }
+      }
+
       this.eventSubscriptionActive = true;
       this.lastEventTime = Date.now(); // Initialize on subscription
       logger.debug("Subscribed to Baichuan events (library watchdog handles auto-recovery)");
@@ -907,6 +947,12 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         // api.close() destroys the pool before the promise settles.
         await this.baichuanApi.offSimpleEvent(this.currentWrappedEventHandler);
         this.currentWrappedEventHandler = undefined;
+        if (this.currentEmailPushOff) {
+          try {
+            this.currentEmailPushOff();
+          } catch {}
+          this.currentEmailPushOff = undefined;
+        }
         logger.debug("Unsubscribed from Baichuan events");
       } catch (e) {
         logger.warn("Error unsubscribing from events", e?.message || String(e));

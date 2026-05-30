@@ -65,6 +65,7 @@ import {
   getApiRelevantDebugLogs,
   getDebugLogChoices,
 } from "./debug-options";
+import { EMAIL_PUSH_SERVER_NATIVE_ID } from "./email-push-server-device";
 import ReolinkNativePlugin from "./main";
 import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
@@ -680,6 +681,77 @@ export class ReolinkCamera
       hide: true,
       onPut: async () => {
         this.scheduleStreamManagerRestart("compositeDisableTranscode changed");
+      },
+    },
+    // ─── E-mail Push ─────────────────────────────────────────────
+    // Per-camera knobs that pair with the singleton
+    // `Reolink E-mail Push Server` device. Hidden by default and
+    // un-hidden in `init()` only for standalone cameras (NVR-attached
+    // children share the NVR's mail path and would silently fail).
+    emailPushCachedStatus: {
+      group: "E-mail Push",
+      title: "Camera-side SMTP target",
+      description:
+        "Last read of the camera's own SMTP config (smtpServer / recipient). Click Refresh to update — reading wakes battery cameras, so we don't auto-refresh.",
+      type: "string",
+      readonly: true,
+      defaultValue: "(not loaded yet — click Refresh status below)",
+      hide: true,
+    },
+    emailPushTriggers: {
+      group: "E-mail Push",
+      title: "Trigger events",
+      description:
+        "Event types whose schedule will be flipped to 24/7 ON when Auto-configure is applied. MD = generic motion.",
+      type: "string",
+      multiple: true,
+      combobox: true,
+      defaultValue: ["MD", "people", "vehicle"],
+      choices: ["MD", "people", "vehicle"],
+      hide: true,
+    },
+    emailPushAttachment: {
+      group: "E-mail Push",
+      title: "Attachment",
+      description:
+        "What the camera attaches when it sends an alert. `picture` is recommended — it lets the manager publish the snapshot to MQTT image entities.",
+      type: "string",
+      defaultValue: "picture",
+      choices: ["picture", "video", "none"],
+      immediate: true,
+      hide: true,
+    },
+    emailPushAutoConfigure: {
+      group: "E-mail Push",
+      title: "Auto-configure from Email Push Server",
+      description:
+        "Reads host/port/auth/domain from the singleton server device and pushes the matching SMTP + schedule to this camera. Open the Reolink E-mail Push Server device once first so it bootstraps.",
+      type: "button",
+      hide: true,
+      onPut: async () => {
+        await this.autoConfigureEmailPushFromServer();
+      },
+    },
+    emailPushTest: {
+      group: "E-mail Push",
+      title: "Send test e-mail",
+      description:
+        "Asks the camera to perform a live SMTP send against its currently saved target. Can take up to 60s; returns success/failure.",
+      type: "button",
+      hide: true,
+      onPut: async () => {
+        await this.runEmailPushTest();
+      },
+    },
+    emailPushRefreshStatus: {
+      group: "E-mail Push",
+      title: "Refresh status",
+      description:
+        "Reads the current camera-side SMTP config and updates the status row above. Wakes battery cameras.",
+      type: "button",
+      hide: true,
+      onPut: async () => {
+        await this.refreshEmailPushStatus();
       },
     },
   });
@@ -1536,6 +1608,12 @@ export class ReolinkCamera
       onSimpleEvent: this.onSimpleEventBound,
       getEventSubscriptionEnabled: () =>
         this.isEventDispatchEnabled?.() ?? false,
+      // Bind this api to the global email-push bus so battery cameras
+      // delivering motion via SMTP land on the same `onSimpleEvent`
+      // stream as the native push. The Email Push Server device
+      // (singleton under the provider) maps `cam-<nativeId>@<domain>`
+      // RCPT addresses back to this `nativeId`.
+      emailPushCameraId: () => this.nativeId ?? "",
     };
   }
 
@@ -1992,7 +2070,10 @@ export class ReolinkCamera
         case "battery":
           if (ev.battery) {
             this.updateBatteryInfo(ev.battery as any).catch((e) => {
-              logger.debug("Error updating battery from push", e?.message || String(e));
+              logger.debug(
+                "Error updating battery from push",
+                e?.message || String(e),
+              );
             });
           }
           return;
@@ -2544,6 +2625,115 @@ export class ReolinkCamera
     await this.storageSettings.putSetting(key, value);
   }
 
+  /**
+   * Push the singleton E-mail Push Server's manager-side SMTP config
+   * down to this camera. Mirrors the per-camera select on the server
+   * device but lives next to all other per-camera knobs so users can
+   * stay on the camera page. NVR-attached / multifocal children skip
+   * this — the StorageSettings `hide` flag is set accordingly in init.
+   */
+  async autoConfigureEmailPushFromServer(): Promise<void> {
+    const logger = this.getBaichuanLogger();
+    // Materialise the singleton — Scrypted only constructs it after
+    // the first `getDevice` call, which may not have happened yet.
+    await this.plugin.getDevice(EMAIL_PUSH_SERVER_NATIVE_ID);
+    const server = this.plugin.emailPushServer;
+    if (!server) {
+      throw new Error(
+        "Email Push Server not available. Open the 'Reolink E-mail Push Server' device once to initialise it.",
+      );
+    }
+    const params = server.getManagerSetupParamsForCamera({
+      id: this.id,
+      nativeId: this.nativeId!,
+    });
+    if (!params) {
+      throw new Error(
+        "Email Push Server has no usable LAN address yet, or this camera is NVR-attached.",
+      );
+    }
+    const triggers = this.storageSettings.values.emailPushTriggers ?? [
+      "MD",
+      "people",
+      "vehicle",
+    ];
+    const attachment =
+      (this.storageSettings.values.emailPushAttachment as
+        | "picture"
+        | "video"
+        | "none") ?? "picture";
+
+    logger.log(
+      `E-mail Push: configuring against ${params.managerHost}:${params.managerPort} (recipient=${params.recipientLocalPart}@${params.domain})`,
+    );
+    const api = await this.ensureClient();
+    await api.setupEmailPushToManager(
+      {
+        ...params,
+        attachmentType: attachment,
+        triggerTypes: triggers,
+        runTest: false,
+      },
+      this.storageSettings.values.rtspChannel ?? 0,
+    );
+    logger.log("E-mail Push: setup applied ✓");
+    // Pull the camera's confirmation back into the status row.
+    await this.refreshEmailPushStatus().catch((e) => {
+      logger.warn(
+        `E-mail Push: status refresh after auto-configure failed: ${e?.message || e}`,
+      );
+    });
+  }
+
+  /**
+   * Ask the camera to perform a live SMTP send against its current
+   * (saved) target. Uses the lib's default 60s timeout — Reolink
+   * firmwares can take a while when the manager is slow or DNS resolves
+   * after a delay. Result is logged + reflected in the status row.
+   */
+  async runEmailPushTest(): Promise<void> {
+    const logger = this.getBaichuanLogger();
+    const api = await this.ensureClient();
+    logger.log("E-mail Push: sending test e-mail…");
+    const ok = await api.testEmail();
+    if (ok) {
+      logger.log("E-mail Push: test succeeded ✓");
+    } else {
+      logger.warn(
+        "E-mail Push: test failed (camera reported 482 — check server reachable from camera + credentials).",
+      );
+    }
+    const ts = new Date().toISOString();
+    this.storageSettings.values.emailPushCachedStatus = ok
+      ? `Test OK at ${ts}`
+      : `Test FAILED at ${ts} (482 — server unreachable or auth wrong)`;
+  }
+
+  /**
+   * Read the camera's current SMTP config (cmdId=42) and render a
+   * compact summary into the readonly status row. Wakes battery
+   * cameras, so we never trigger this automatically — the user has to
+   * click the button.
+   */
+  async refreshEmailPushStatus(): Promise<void> {
+    const logger = this.getBaichuanLogger();
+    try {
+      const api = await this.ensureClient();
+      const cfg = await api.getEmail();
+      const ts = new Date().toISOString();
+      const target = `${cfg.smtpServer || "(unset)"}:${cfg.smtpPort ?? "?"}`;
+      const recipient = cfg.address1 || "(no recipient)";
+      this.storageSettings.values.emailPushCachedStatus = `Target: ${target} · Recipient: ${recipient} · refreshed ${ts}`;
+      logger.log(
+        `E-mail Push: status refreshed (target=${target} recipient=${recipient})`,
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.storageSettings.values.emailPushCachedStatus = `Failed to read camera config: ${msg}`;
+      logger.warn(`E-mail Push: refresh failed: ${msg}`);
+    }
+  }
+
   async takePictureInternal(client: ReolinkBaichuanApi) {
     const { rtspChannel, variantType } = this.storageSettings.values;
     const logger = this.getBaichuanLogger();
@@ -2820,10 +3010,7 @@ export class ReolinkCamera
             this.siren.on = enabled || playing;
           }
         } catch (e) {
-          logger.warn(
-            "Failed to align siren state",
-            e?.message || String(e),
-          );
+          logger.warn("Failed to align siren state", e?.message || String(e));
         }
       }
     }
@@ -3444,6 +3631,19 @@ export class ReolinkCamera
     const hideUid = !this.isBattery || this.isOnNvr || !!this.multiFocalDevice;
     this.storageSettings.settings.uid.hide = hideUid;
     this.storageSettings.settings.discoveryMethod.hide = hideUid;
+
+    // E-mail Push group: only standalone cameras get the per-camera
+    // SMTP knobs. NVR children share the recorder's mail path and
+    // multifocal lens-children share the parent's connection — neither
+    // can independently target the singleton Email Push Server, so we
+    // keep the group hidden to avoid misleading the user.
+    const hideEmailPush = this.isOnNvr || !!this.multiFocalDevice;
+    this.storageSettings.settings.emailPushCachedStatus.hide = hideEmailPush;
+    this.storageSettings.settings.emailPushTriggers.hide = hideEmailPush;
+    this.storageSettings.settings.emailPushAttachment.hide = hideEmailPush;
+    this.storageSettings.settings.emailPushAutoConfigure.hide = hideEmailPush;
+    this.storageSettings.settings.emailPushTest.hide = hideEmailPush;
+    this.storageSettings.settings.emailPushRefreshStatus.hide = hideEmailPush;
     // Show UID and discovery method for UDP cameras (battery or UDP-only like Elite Floodlight WiFi)
     // Hide for NVR children or multifocal lenses (they use parent's connection)
     // const requiresUidSettings =
