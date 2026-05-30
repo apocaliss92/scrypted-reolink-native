@@ -808,6 +808,11 @@ export class ReolinkCamera
   private batteryUpdateTimer: NodeJS.Timeout | undefined;
   private periodicStarted = false;
   private statusPollTimer: NodeJS.Timeout | undefined;
+  // Off-handle for the global email-push bus subscription. Tied to
+  // the camera lifecycle (init → release), NOT to the Baichuan api
+  // lifetime — battery cams drop the api when they sleep, so an
+  // api-scoped subscription would be dead by the next motion email.
+  private emailPushBusOff?: () => void;
 
   // Cooldown timestamps to prevent alignAuxDevicesState from overwriting recently set states
   // Camera can take 10+ seconds to reflect state changes in its API response
@@ -1609,20 +1614,12 @@ export class ReolinkCamera
       onSimpleEvent: this.onSimpleEventBound,
       getEventSubscriptionEnabled: () =>
         this.isEventDispatchEnabled?.() ?? false,
-      // Bind this api to the global email-push bus so battery cameras
-      // delivering motion via SMTP land on the same `onSimpleEvent`
-      // stream as the native push. The Email Push Server device
-      // (singleton under the provider) maps `cam-<nativeId>@<domain>`
-      // RCPT addresses back to this `nativeId`.
-      emailPushCameraId: () => this.nativeId ?? "",
-      // When the e-mail carries the snapshot Reolink sends with
-      // `attachmentType=picture`, hand it to the camera's `lastPicture`
-      // cache. Downstream consumers (Snapshot mixin → MQTT image
-      // entity, Advanced Notifier, HA discovery) call `takePicture()`
-      // on the back of the motion event; for battery cams that returns
-      // the cached value, so dropping the fresh snapshot in here makes
-      // the trigger frame surface in MQTT/HA without waking the camera.
-      onEmailPushEvent: (event) => this.handleEmailPushSnapshot(event),
+      // Email-push events are wired in `init()` directly against the
+      // lib's global bus — NOT through the api here, because for
+      // battery cams the Baichuan api lifetime is much shorter than
+      // the camera lifetime (api closes when the cam sleeps), so an
+      // api-level subscription would be dead by the time the next
+      // motion email arrives. See `subscribeToEmailPushBus()`.
     };
   }
 
@@ -2744,17 +2741,92 @@ export class ReolinkCamera
   }
 
   /**
-   * Called from `baichuan-base.subscribeToEvents` when a per-camera
-   * email-push event lands on the bus. We don't use the e-mail's image
-   * attachment — Reolink firmwares vary on quality/encoding and we'd
-   * be reimplementing the snapshot pipeline. Instead we leverage the
-   * fact that the camera is *guaranteed awake* right now (it just
-   * pushed an e-mail) and call the live Baichuan snapshot API: it
-   * returns a fresh frame in milliseconds without forcing an extra
-   * wake-up cycle. The result is stashed in `lastPicture` so the
-   * Snapshot mixin → MQTT image entity (and any other consumer that
-   * calls `takePicture()` on the back of the motion event) serves the
-   * trigger frame instead of the previous cached one.
+   * Subscribe to the lib's global email-push bus and translate each
+   * matching event into a synthetic motion `ReolinkSimpleEvent` fed
+   * to this camera's existing `onSimpleEvent` handler — so the same
+   * code path that flips `motionDetected` for native Baichuan push
+   * fires for SMTP-delivered alerts too. Lives on the camera (not on
+   * the api) so the subscription survives api closes for battery
+   * cams. Idempotent: returns early if already subscribed.
+   */
+  private async subscribeToEmailPushBus(): Promise<void> {
+    if (this.emailPushBusOff) return;
+    if (this.isOnNvr || this.multiFocalDevice) return;
+    const ownNativeId = this.nativeId ?? "";
+    if (!ownNativeId) return;
+    const logger = this.getBaichuanLogger();
+    try {
+      const { onEmailPushEvent, mapEmailPushInferredType } = await import(
+        "@apocaliss92/nodelink-js"
+      );
+      this.emailPushBusOff = onEmailPushEvent((event) => {
+        if (event.cameraId !== ownNativeId) return;
+        logger.log(
+          `E-mail Push event received (type=${event.inferredType}) → dispatching motion`,
+        );
+        try {
+          this.onSimpleEvent({
+            type: mapEmailPushInferredType(event.inferredType),
+            channel: this.storageSettings.values.rtspChannel ?? 0,
+            timestamp: event.receivedAtMs,
+          });
+          // Mirror the api-side fan-out: when the camera signalled an
+          // AI sub-type (people / vehicle / …), also raise a generic
+          // motion event so motion-only consumers light up.
+          if (
+            event.inferredType !== "motion" &&
+            event.inferredType !== "doorbell" &&
+            event.inferredType !== "other"
+          ) {
+            this.onSimpleEvent({
+              type: "motion",
+              channel: this.storageSettings.values.rtspChannel ?? 0,
+              timestamp: event.receivedAtMs,
+            });
+          }
+        } catch (e) {
+          logger.warn(
+            `E-mail Push: onSimpleEvent dispatch threw: ${e?.message || String(e)}`,
+          );
+        }
+        // Fire-and-forget snapshot fetch; runs in parallel with the
+        // motion dispatch so consumers reading `takePicture` right
+        // after motion get the fresh frame.
+        void this.handleEmailPushSnapshot(event).catch((e) => {
+          logger.warn(
+            `E-mail Push: snapshot fetch threw: ${e?.message || String(e)}`,
+          );
+        });
+      });
+      logger.log("E-mail Push: subscribed to global bus");
+    } catch (e) {
+      logger.warn(
+        `E-mail Push: bus subscribe failed: ${e?.message || String(e)}`,
+      );
+    }
+  }
+
+  private unsubscribeFromEmailPushBus(): void {
+    if (this.emailPushBusOff) {
+      try {
+        this.emailPushBusOff();
+      } catch {}
+      this.emailPushBusOff = undefined;
+    }
+  }
+
+  /**
+   * Called from `subscribeToEmailPushBus` for every matching event.
+   * We don't use the e-mail's image attachment — Reolink firmwares
+   * vary on quality/encoding and we'd be reimplementing the snapshot
+   * pipeline. Instead we leverage the fact that the camera is
+   * *guaranteed awake* right now (it just pushed an e-mail) and call
+   * the live Baichuan snapshot API: it returns a fresh frame in
+   * milliseconds without forcing an extra wake-up cycle. The result
+   * is stashed in `lastPicture` so the Snapshot mixin → MQTT image
+   * entity (and any other consumer that calls `takePicture()` on the
+   * back of the motion event) serves the trigger frame instead of
+   * the previous cached one.
    */
   private async handleEmailPushSnapshot(
     event: EmailPushEvent,
@@ -2933,6 +3005,7 @@ export class ReolinkCamera
     this.statusPollTimer && clearInterval(this.statusPollTimer);
     this.sleepCheckTimer && clearInterval(this.sleepCheckTimer);
     this.batteryUpdateTimer && clearInterval(this.batteryUpdateTimer);
+    this.unsubscribeFromEmailPushBus();
     this.resetBaichuanClient();
     this.plugin.camerasMap.delete(this.id);
   }
@@ -3601,6 +3674,12 @@ export class ReolinkCamera
     }
 
     this.startPeriodicTasks();
+
+    // Subscribe BEFORE ensureClient so battery cams whose api fails to
+    // connect on first try still pick up incoming SMTP motion events.
+    // The subscription is idempotent — safe across re-inits.
+    await this.subscribeToEmailPushBus();
+
     await this.ensureClient();
 
     try {

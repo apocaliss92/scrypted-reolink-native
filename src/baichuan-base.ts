@@ -1,6 +1,5 @@
 import type {
   BaichuanClientOptions,
-  EmailPushEvent,
   ReolinkBaichuanApi,
   ReolinkSimpleEvent,
 } from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
@@ -23,26 +22,6 @@ export interface BaichuanConnectionCallbacks {
   onClose?: () => void | Promise<void>;
   onSimpleEvent?: (ev: ReolinkSimpleEvent) => void;
   getEventSubscriptionEnabled?: () => boolean;
-  /**
-   * When provided, the base class binds the camera's api to the global
-   * email-push bus filtered on `cameraId === emailPushCameraId()`. The
-   * lib's `subscribeEmailPushEvents` converts each matching event into
-   * a `ReolinkSimpleEvent` and dispatches it through `onSimpleEvent`,
-   * so the camera's existing motion / AI handler lights up for SMTP-
-   * delivered events with no extra wiring. Standalone cameras only —
-   * leave undefined on NVR children where email-push isn't meaningful.
-   */
-  emailPushCameraId?: () => string;
-  /**
-   * Optional. When the email-push event carries an image attachment
-   * (typical for `attachmentType=picture` on motion), the camera
-   * receives the full event so it can republish the snapshot —
-   * usually by updating its `lastPicture` cache so subsequent
-   * `takePicture()` calls return the fresh thumbnail without waking
-   * the camera. Invoked AFTER the simple-event dispatch so any motion
-   * listener has already fired.
-   */
-  onEmailPushEvent?: (event: EmailPushEvent) => void;
 }
 
 /**
@@ -207,7 +186,6 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   private eventSubscriptionActive: boolean = false;
   private lastEventTime: number = 0;
   private currentWrappedEventHandler?: (ev: ReolinkSimpleEvent) => void;
-  private currentEmailPushOff?: () => void;
   private subscribeToEventsPromise?: Promise<void>;
   private pingInterval?: NodeJS.Timeout;
   private autoRenewInterval?: NodeJS.Timeout;
@@ -904,33 +882,11 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       // the library watchdog handles auto-recovery internally.
       await api.onSimpleEvent(this.currentWrappedEventHandler);
 
-      // Bridge the global email-push bus into this api's onSimpleEvent
-      // stream so the same wrapped handler above (and any other
-      // listener) sees SMTP-delivered motion exactly like a native push.
-      // Idempotent: if a previous off-handle is still around, release it.
-      if (callbacks.emailPushCameraId) {
-        if (this.currentEmailPushOff) {
-          try {
-            this.currentEmailPushOff();
-          } catch {}
-          this.currentEmailPushOff = undefined;
-        }
-        try {
-          this.currentEmailPushOff = api.subscribeEmailPushEvents({
-            cameraId: callbacks.emailPushCameraId(),
-            channel: 0,
-            ...(callbacks.onEmailPushEvent
-              ? { onEvent: callbacks.onEmailPushEvent }
-              : {}),
-          });
-          logger.debug("Bridged email-push bus to onSimpleEvent");
-        } catch (e) {
-          logger.warn(
-            "Failed to bridge email-push events",
-            e?.message || String(e),
-          );
-        }
-      }
+      // NOTE: the email-push bus subscription used to live here, but
+      // it's now owned by `ReolinkCamera.subscribeToEmailPushBus()`
+      // because the bus is global and must outlive the Baichuan api —
+      // battery cams routinely drop the api between motions, which
+      // would silently drop SMTP events with an api-scoped bridge.
 
       this.eventSubscriptionActive = true;
       this.lastEventTime = Date.now(); // Initialize on subscription
@@ -961,12 +917,6 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         // api.close() destroys the pool before the promise settles.
         await this.baichuanApi.offSimpleEvent(this.currentWrappedEventHandler);
         this.currentWrappedEventHandler = undefined;
-        if (this.currentEmailPushOff) {
-          try {
-            this.currentEmailPushOff();
-          } catch {}
-          this.currentEmailPushOff = undefined;
-        }
         logger.debug("Unsubscribed from Baichuan events");
       } catch (e) {
         logger.warn("Error unsubscribing from events", e?.message || String(e));
