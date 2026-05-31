@@ -807,6 +807,13 @@ export class ReolinkCamera
   private batteryUpdateTimer: NodeJS.Timeout | undefined;
   private periodicStarted = false;
   private statusPollTimer: NodeJS.Timeout | undefined;
+  // Off-handle for the global email-push bus subscription. Tied to
+  // the camera (Scrypted device) lifecycle, NOT to the Baichuan api
+  // — the plugin destroys the api on every idle_disconnect (battery
+  // cams every ~30s), and an api-scoped bridge would be dead in
+  // that window. The camera-scoped subscription stays alive across
+  // every reconnect cycle so SMTP motion always finds a listener.
+  private emailPushBusOff?: () => void;
 
   // Cooldown timestamps to prevent alignAuxDevicesState from overwriting recently set states
   // Camera can take 10+ seconds to reflect state changes in its API response
@@ -1557,13 +1564,14 @@ export class ReolinkCamera
     //   throw new Error("IP Address is required for TCP devices");
     // }
 
-    // Enable the lib-level email-push auto-bridge on the api so SMTP
-    // motion lands on `api.onSimpleEvent` together with native push.
-    // Skipped for NVR children / multifocal lens children — they
-    // share the parent's connection and the parent (camera/NVR) owns
-    // the mail path; running the bridge twice would dispatch the
-    // event to both ends and risk double-counting.
-    const eligibleForEmailPush = !this.isOnNvr && !this.multiFocalDevice;
+    // The lib's `emailPushCameraId` auto-bridge would die every time
+    // the plugin calls `cleanupBaichuanApi` (every idle_disconnect on
+    // battery cams — every ~30s of idle). In that window SMTP motion
+    // events emitted on the global bus have no listener and are lost.
+    // Instead, the camera subscribes to the bus directly in `init()`
+    // via `subscribeToEmailPushBus()` — that subscription is tied to
+    // the camera (Scrypted device) lifecycle, not to the api object,
+    // so it survives every api recreate / idle disconnect / wake.
 
     return {
       host: ipAddress,
@@ -1575,9 +1583,6 @@ export class ReolinkCamera
       udpDiscoveryMethod: discoveryMethod,
       // NOTE: idleDisconnect is NOT set here - the library handles it internally
       // based on the battery status detected during connection
-      ...(eligibleForEmailPush && this.nativeId
-        ? { emailPushCameraId: this.nativeId }
-        : {}),
     };
   }
 
@@ -2757,6 +2762,74 @@ export class ReolinkCamera
   }
 
   /**
+   * Subscribe to the lib's global email-push bus and translate every
+   * matching SMTP delivery into a synthetic `ReolinkSimpleEvent` fed
+   * to this camera's `onSimpleEvent` — same code path used by native
+   * Baichuan push so `motionDetected` flips uniformly.
+   *
+   * Subscription lifetime is tied to the camera (init → release), NOT
+   * to the Baichuan api: the plugin destroys the api on every
+   * idle_disconnect (battery cams sleep every ~30s of idle), and a
+   * lib-level api auto-bridge would be dead in that window. The
+   * camera-level subscription stays alive across every reconnect so
+   * SMTP motion always finds a listener and lands on `onSimpleEvent`.
+   */
+  private async subscribeToEmailPushBus(): Promise<void> {
+    if (this.emailPushBusOff) return;
+    if (this.isOnNvr || this.multiFocalDevice) return;
+    const ownNativeId = this.nativeId ?? "";
+    if (!ownNativeId) return;
+    const logger = this.getBaichuanLogger();
+    try {
+      const { onEmailPushEvent, mapEmailPushInferredType } = await import(
+        "@apocaliss92/nodelink-js"
+      );
+      this.emailPushBusOff = onEmailPushEvent((event) => {
+        if (event.cameraId !== ownNativeId) return;
+        const channel = this.storageSettings.values.rtspChannel ?? 0;
+        const mapped = mapEmailPushInferredType(event.inferredType);
+        logger.log(
+          `E-mail Push event received (type=${event.inferredType}) → dispatching ${mapped}`,
+        );
+        try {
+          this.onSimpleEvent({
+            type: mapped,
+            channel,
+            timestamp: event.receivedAtMs,
+          });
+          // Fan out a generic motion for AI sub-types so motion-only
+          // consumers still flip — mirrors lib's per-api behaviour.
+          if (mapped !== "motion" && mapped !== "doorbell") {
+            this.onSimpleEvent({
+              type: "motion",
+              channel,
+              timestamp: event.receivedAtMs,
+            });
+          }
+        } catch (e) {
+          logger.warn(
+            `E-mail Push: onSimpleEvent dispatch threw: ${e?.message || String(e)}`,
+          );
+        }
+      });
+      logger.log("E-mail Push: subscribed to global bus");
+    } catch (e) {
+      logger.warn(
+        `E-mail Push: bus subscribe failed: ${e?.message || String(e)}`,
+      );
+    }
+  }
+
+  private unsubscribeFromEmailPushBus(): void {
+    if (this.emailPushBusOff) {
+      try {
+        this.emailPushBusOff();
+      } catch {}
+      this.emailPushBusOff = undefined;
+    }
+  }
+
+  /**
    * Refresh the `lastPicture` cache by fetching a live snapshot via
    * the Baichuan API. Used on motion events for battery cameras: the
    * cam is guaranteed awake at that moment (just sent native push or
@@ -2949,8 +3022,7 @@ export class ReolinkCamera
     this.statusPollTimer && clearInterval(this.statusPollTimer);
     this.sleepCheckTimer && clearInterval(this.sleepCheckTimer);
     this.batteryUpdateTimer && clearInterval(this.batteryUpdateTimer);
-    // The lib's email-push auto-bridge is released by `api.close()`
-    // inside `resetBaichuanClient` — no separate teardown needed.
+    this.unsubscribeFromEmailPushBus();
     this.resetBaichuanClient();
     this.plugin.camerasMap.delete(this.id);
   }
@@ -3620,11 +3692,11 @@ export class ReolinkCamera
 
     this.startPeriodicTasks();
 
-    // NOTE: the email-push bus subscription used to live here, but
-    // the lib's api factory now auto-bridges SMTP motion into
-    // `api.onSimpleEvent` when `emailPushCameraId` is passed (see
-    // `getConnectionConfig()`), so there's nothing to wire up at the
-    // camera level — the next `ensureClient()` activates the bridge.
+    // Subscribe to the lib's email-push bus BEFORE ensureClient so
+    // SMTP motion is never lost during the api's connection window.
+    // Lifetime is tied to the camera (released in `release()`) so it
+    // survives every `cleanupBaichuanApi` cycle on battery cams.
+    await this.subscribeToEmailPushBus();
 
     await this.ensureClient();
 
