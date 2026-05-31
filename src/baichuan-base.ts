@@ -15,6 +15,13 @@ export interface BaichuanConnectionConfig {
   transport: BaichuanTransport;
   debugOptions?: any;
   udpDiscoveryMethod?: BaichuanClientOptions["udpDiscoveryMethod"];
+  /**
+   * When set, the api auto-bridges the global email-push bus into
+   * its own `simpleEventListeners` so SMTP motion lands on the same
+   * `onSimpleEvent` stream as native Baichuan push. Standalone
+   * (non-NVR-child, non-multifocal-lens) cameras only.
+   */
+  emailPushCameraId?: string;
 }
 
 export interface BaichuanConnectionCallbacks {
@@ -349,6 +356,9 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
             logger,
             debugOptions: config.debugOptions,
             udpDiscoveryMethod: config.udpDiscoveryMethod,
+            ...(config.emailPushCameraId
+              ? { emailPushCameraId: config.emailPushCameraId }
+              : {}),
           },
           transport: config.transport,
         });

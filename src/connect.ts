@@ -14,6 +14,18 @@ export type BaichuanConnectInputs = {
   logger?: Console;
   debugOptions?: BaichuanClientOptions["debugOptions"];
   udpDiscoveryMethod?: BaichuanClientOptions["udpDiscoveryMethod"];
+  /**
+   * When set, the lib api auto-bridges the global email-push bus into
+   * its own `simpleEventListeners`, so SMTP motion lands on the same
+   * `onSimpleEvent` stream as native Baichuan push. Bridge survives
+   * TCP transient disconnects (it's a pure JS fan-out). For Reolink
+   * cameras this should be the camera's plugin-side nativeId — the
+   * `EmailPushServerDevice` resolves `cam-<nativeId>@<domain>` against
+   * the same string, so the round-trip is symmetric.
+   */
+  emailPushCameraId?: string;
+  /** Channel reported on the synthesised event. Default 0. */
+  emailPushChannel?: number;
 };
 
 export function normalizeUid(uid?: string): string | undefined {
@@ -37,6 +49,21 @@ export async function createBaichuanApi(props: {
     logger,
     debugOptions: inputs.debugOptions ?? {},
   };
+
+  // The lib's auto-bridge fields belong on the second positional arg
+  // of `new ReolinkBaichuanApi(opts)` alongside `nativeOnly` etc.; we
+  // build a small `extras` bag and spread it at construction time
+  // below for both tcp + udp paths.
+  const extras: {
+    emailPushCameraId?: string;
+    emailPushChannel?: number;
+  } = {};
+  if (inputs.emailPushCameraId) {
+    extras.emailPushCameraId = inputs.emailPushCameraId;
+    if (inputs.emailPushChannel !== undefined) {
+      extras.emailPushChannel = inputs.emailPushChannel;
+    }
+  }
 
   const attachErrorHandler = (api: ReolinkBaichuanApi) => {
     // Critical: BaichuanClient emits 'error'. If nobody listens, Node treats it as an
@@ -75,6 +102,7 @@ export async function createBaichuanApi(props: {
   if (transport === "tcp") {
     const api = new ReolinkBaichuanApi({
       ...base,
+      ...extras,
       transport: "tcp",
     });
     attachErrorHandler(api);
@@ -88,6 +116,7 @@ export async function createBaichuanApi(props: {
 
   const api = new ReolinkBaichuanApi({
     ...base,
+    ...extras,
     transport: "udp",
     uid,
     // NOTE: idleDisconnect is NOT set here - the library handles it internally

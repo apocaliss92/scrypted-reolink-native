@@ -40,6 +40,7 @@ What Auto-configure writes to the camera:
 - NVR-attached cameras don't get the E-mail Push settings group — the NVR handles mail centrally. Same for multifocal lens children.
 - Recipients `cam-<unknown>@<domain>` are rejected with SMTP 550 — useful if you regenerate credentials or move a camera between Scrypted hosts.
 - The intake is plain TCP; enable **STARTTLS** in the TLS group if you have `cert.pem`/`key.pem` in the configured TLS directory.
+- Since plugin 0.5.27 / `@apocaliss92/nodelink-js 0.4.32` the SMTP motion routes through the same `onSimpleEvent` stream as native Baichuan push — battery cameras flip `motionDetected` reliably even when the api was disconnected at email arrival time, and the snapshot cache is proactively refreshed on each motion so HA / MQTT image entities serve the trigger frame instead of the previous one.
 
 [For requests and bugs](https://github.com/apocaliss92/scrypted-reolink-native)
 
