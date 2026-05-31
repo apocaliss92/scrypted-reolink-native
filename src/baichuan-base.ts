@@ -486,19 +486,30 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       this.lastDisconnectTime = now;
 
       logger.log(
-        `Socket closed, resetting client state for reconnection${timeSinceLastDisconnect != null ? ` (last disconnect ${timeSinceLastDisconnect}ms ago)` : " (first disconnect)"}`,
+        `Socket closed${timeSinceLastDisconnect != null ? ` (last disconnect ${timeSinceLastDisconnect}ms ago)` : " (first disconnect)"} — api object kept alive, will reconnect on next use`,
       );
 
-      // Mark as disconnected immediately to prevent reuse
-      // This prevents race conditions where ensureBaichuanClient might check
-      // isSocketConnected() before cleanup completes
-      const currentApi = this.baichuanApi;
-      if (currentApi === api) {
-        // Only cleanup if this is still the current API instance
-        // This prevents cleanup of a new connection that was created
-        // while the old one was closing
-        await this.cleanupBaichuanApi();
-      }
+      // The api object itself stays alive across socket disconnects:
+      // - It's NOT explicitly closed (no `_closed = true`), so simple
+      //   event listeners, the email-push auto-bridge (when used),
+      //   recordings cache, sleep inference state, etc. are preserved
+      //   for the next reconnect cycle.
+      // - The next `ensureBaichuanClient` call sees `api.isReady=false`
+      //   AND `api.isClosed=false` and routes through
+      //   `api.ensureConnected()`, which reuses the same api with a
+      //   freshly reconnected socket pool — see the
+      //   `socket disconnected but API still valid` branch above.
+      // - If the lib reconnect fails repeatedly, the same caller
+      //   falls back to `cleanupBaichuanApi()` + full recreate (the
+      //   catch around `ensureConnected()` in ensureBaichuanClient).
+      //
+      // Calling `cleanupBaichuanApi()` here would defeat all of that:
+      // it sets `_closed=true` (next ensureBaichuanClient destroys +
+      // recreates from scratch), and worse it tears down any consumer
+      // registered against `api.simpleEventListeners` — like the lib
+      // email-push auto-bridge — for the entire gap until the next
+      // `ensureBaichuanClient` call (which on battery cams can be
+      // minutes). We deliberately don't.
 
       // Call custom close handler if provided
       if (callbacks.onClose) {
