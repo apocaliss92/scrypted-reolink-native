@@ -3944,20 +3944,26 @@ export class ReolinkCamera
           }
         }
       } else if (sleepStatus.state === "awake") {
-        // Camera is awake
+        // Camera is awake — but DON'T do any proactive networking
+        // here. Sleep inference can flicker (idle_disconnect FIN
+        // packets, brief housekeeping packets from the cam, etc.),
+        // and reacting to every flicker with `ensureClient + wakeUp
+        // + takePicture + battery + aux state` ends up waking the cam
+        // far more than the original flicker — the reconnect alone
+        // re-logs in, re-subscribes events, and triggers a fresh
+        // sleep/awake cycle. Real motion-triggered wake-ups arrive
+        // via SMTP / native push and have their own snapshot refresh
+        // path (`refreshSnapshotOnMotion`). Periodic battery polling
+        // is owned by `batteryUpdateTimer` (hourly), not by sleep
+        // inference. So here we only flip the local state flag.
         const wasSleeping = this.sleeping;
         if (wasSleeping) {
           this.getBaichuanLogger().log(`Camera is awake`);
           this.sleeping = false;
-          const client = await this.ensureClient();
-          await client.wakeUp();
-          await this.takePictureInternal(client);
-        }
-
-        if (wasSleeping) {
-          this.updateBatteryInfo().catch(() => {});
-          this.alignAuxDevicesState().catch(() => {});
           if (this.forceNewSnapshot) {
+            // Honor an explicit refresh requested by some other path
+            // (e.g. user-triggered or capability discovery) — they
+            // set `forceNewSnapshot=true` and we serve it here.
             this.takePicture().catch(() => {});
           }
         }
