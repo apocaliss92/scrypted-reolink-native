@@ -766,6 +766,20 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         return;
       }
 
+      // Battery cameras on UDP transport spend most of their lifetime
+      // asleep — event silence is the *normal* operating mode, not a
+      // failure. Running `unsubscribeFromEvents + subscribeToEvents`
+      // here wakes the device every 10 minutes for no real benefit
+      // (the cam emits its own sleep/awake push when it wakes for
+      // motion, and the lib's own watchdog has the same UDP-skip
+      // guard for the same reason).
+      if (this.isBatteryDevice()) {
+        logger.debug?.(
+          "Event check: skipping silence-based restart for battery camera (UDP sleep is normal)",
+        );
+        return;
+      }
+
       try {
         const now = Date.now();
         const timeSinceLastEvent = now - this.lastEventTime;
