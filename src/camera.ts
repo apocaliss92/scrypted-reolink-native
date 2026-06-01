@@ -2838,6 +2838,17 @@ export class ReolinkCamera
    * `takePicture()` on the back of the motion get the trigger frame
    * instead of the previous cached one. Fire-and-forget; per-camera
    * debounce so an event burst doesn't trigger overlapping fetches.
+   *
+   * Critical for Reolink battery cams: must call `client.wakeUp()`
+   * before fetching the snapshot. Reolink firmwares can put the cam
+   * back to sleep within a few seconds of the email/motion push, so
+   * by the time `getSnapshot` (cmd 109) hits the device it may
+   * already be unreachable — the snapshot push response never
+   * arrives, the lib times out, and the cmdId=109 hang knocks the
+   * UDP session into the reconnect path which itself wakes the cam.
+   * `wakeUp` explicitly tells the cam to stay awake long enough to
+   * service the snapshot — same pattern as the regular `takePicture`
+   * battery path (see line ~2945).
    */
   private lastMotionSnapshotAtMs = 0;
   private motionSnapshotInFlight = false;
@@ -2849,6 +2860,13 @@ export class ReolinkCamera
     const logger = this.getBaichuanLogger();
     try {
       const client = await this.ensureClient();
+      if (this.isBattery) {
+        // Keep the cam awake for the snapshot fetch — without this the
+        // cmdId=109 (snapshot push) frequently times out on battery
+        // cams and we end up triggering a full socket reconnect which
+        // ironically wakes the cam more than the original snapshot.
+        await client.wakeUp();
+      }
       const mo = await this.takePictureInternal(client);
       this.lastPicture = { mo, atMs: timestampMs };
       this.forceNewSnapshot = false;
@@ -2856,8 +2874,13 @@ export class ReolinkCamera
         `Motion snapshot refreshed — next takePicture will serve the trigger frame`,
       );
     } catch (e) {
-      logger.warn(
-        `Motion snapshot refresh failed: ${e?.message || String(e)}`,
+      // Demote to debug — for battery cams the cam goes back to sleep
+      // aggressively and a snapshot miss is normal: the motion event
+      // itself was already dispatched on the bus, MQTT/HA will reuse
+      // the previous cached frame, no functional impact. Warn would
+      // pollute the device log on every motion in noisy environments.
+      logger.debug?.(
+        `Motion snapshot refresh failed (cam may have slept already): ${e?.message || String(e)}`,
       );
     } finally {
       this.motionSnapshotInFlight = false;
