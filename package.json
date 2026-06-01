@@ -44,7 +44,7 @@
     ]
   },
   "dependencies": {
-    "@apocaliss92/nodelink-js": "^0.4.32",
+    "@apocaliss92/nodelink-js": "^0.4.33",
     "@scrypted/common": "file:../../scrypted/common",
     "@scrypted/rtsp": "file:../../scrypted/plugins/rtsp",
     "@scrypted/sdk": "^0.3.118"
