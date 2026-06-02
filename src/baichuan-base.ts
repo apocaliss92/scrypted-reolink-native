@@ -271,6 +271,175 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   }
 
   /**
+   * Create + login a Baichuan api. For UDP transport, the chain is:
+   *   1. `local-direct` (LAN unicast + broadcast — fastest, no internet)
+   *      with a tight timeout so it doesn't block the chain if blocked.
+   *   2. The configured/saved `udpDiscoveryMethod`.
+   *   3. Parallel race of all remaining BCUDP methods.
+   * The persisted `udpDiscoveryMethod` is left untouched — the autodetect
+   * choice is preserved across reconnects, the fallback only changes
+   * behavior for this single attempt.
+   *
+   * Why: after the initial autodetect picks (say) `remote` because the
+   * camera was reachable via Reolink's P2P servers, a later network
+   * change can break that path forever — e.g. the camera's VLAN gets
+   * blocked from internet, or inter-VLAN broadcast stops working.
+   * Without a fallback the camera stays unreachable until manual
+   * settings change. And privileging `local-direct` up front handles
+   * the LAN-restored case without paying the full saved-method timeout.
+   */
+  private async createApiWithUdpFallback(
+    config: BaichuanConnectionConfig,
+    logger: BaichuanLogger,
+  ): Promise<ReolinkBaichuanApi> {
+    const buildInputs = (
+      methodOverride?: BaichuanClientOptions["udpDiscoveryMethod"],
+    ) => ({
+      host: config.host,
+      username: config.username,
+      password: config.password,
+      uid: config.uid,
+      logger,
+      debugOptions: config.debugOptions,
+      udpDiscoveryMethod:
+        methodOverride !== undefined
+          ? methodOverride
+          : config.udpDiscoveryMethod,
+      ...(config.emailPushCameraId
+        ? { emailPushCameraId: config.emailPushCameraId }
+        : {}),
+    });
+
+    // The lib's internal default when `udpDiscoveryMethod` is unset is
+    // "local-direct" (see BcUdpStream).
+    const configured: NonNullable<
+      BaichuanClientOptions["udpDiscoveryMethod"]
+    > = config.udpDiscoveryMethod ?? "local-direct";
+
+    // Step 1 (UDP only, skip when configured is already local-direct):
+    // preliminary local-direct attempt with a tight 8s timeout. If LAN
+    // works, this short-circuits the whole chain in 1-2s. If not, we
+    // pay 8s and move on. The lib's internal discovery timeout is 30s,
+    // so wrapping with a shorter Promise.race avoids dragging out the
+    // common "LAN blocked, use saved method" path.
+    if (config.transport === "udp" && configured !== "local-direct") {
+      const PRELIM_TIMEOUT_MS = 8000;
+      let prelimApi: ReolinkBaichuanApi | undefined;
+      try {
+        prelimApi = await createBaichuanApi({
+          inputs: buildInputs("local-direct"),
+          transport: "udp",
+        });
+        const loginPromise = prelimApi.login();
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `local-direct prelim exceeded ${PRELIM_TIMEOUT_MS}ms`,
+                ),
+              ),
+            PRELIM_TIMEOUT_MS,
+          );
+        });
+        await Promise.race([loginPromise, timeoutPromise]);
+        logger.log(
+          `UDP local-direct (preliminary, before saved=${configured}) succeeded`,
+        );
+        return prelimApi;
+      } catch (prelimErr) {
+        const prelimMsg =
+          prelimErr instanceof Error ? prelimErr.message : String(prelimErr);
+        logger.debug(
+          `UDP local-direct preliminary failed (${prelimMsg}); falling through to saved=${configured}`,
+        );
+        if (prelimApi) {
+          prelimApi.close({ reason: "udp_prelim_failed" }).catch(() => {
+            // ignore
+          });
+        }
+      }
+    }
+
+    // Step 2: configured method (or non-UDP transport).
+    try {
+      const api = await createBaichuanApi({
+        inputs: buildInputs(),
+        transport: config.transport,
+      });
+      await api.login();
+      return api;
+    } catch (primaryErr) {
+      if (config.transport !== "udp") throw primaryErr;
+
+      const primaryMsg =
+        primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+      logger.warn(
+        `UDP connect with discoveryMethod=${configured} failed: ${primaryMsg}; racing remaining methods (saved setting preserved)`,
+      );
+
+      // Step 3: race the methods we haven't tried yet. local-direct is
+      // always excluded (it was either the configured method or the
+      // preliminary attempt above), so the race covers at most 4 methods.
+      const allMethods: NonNullable<
+        BaichuanClientOptions["udpDiscoveryMethod"]
+      >[] = ["local-direct", "local-broadcast", "remote", "map", "relay"];
+      const remaining = allMethods.filter(
+        (m) => m !== configured && m !== "local-direct",
+      );
+      const created: ReolinkBaichuanApi[] = [];
+
+      try {
+        const winner = await Promise.any(
+          remaining.map(async (m) => {
+            const api = await createBaichuanApi({
+              inputs: buildInputs(m),
+              transport: "udp",
+            });
+            created.push(api);
+            try {
+              await api.login();
+              return { method: m, api };
+            } catch (e) {
+              try {
+                await api.close({ reason: `udp_fallback_failed:${m}` });
+              } catch {
+                // ignore
+              }
+              throw e;
+            }
+          }),
+        );
+
+        logger.log(
+          `UDP fallback succeeded with discoveryMethod=${winner.method} (saved method=${configured} preserved)`,
+        );
+
+        // Close the race losers. Some may still be mid-login; api.close()
+        // is idempotent and safe to call concurrently with login().
+        for (const a of created) {
+          if (a !== winner.api) {
+            a.close({ reason: "udp_fallback_loser" }).catch(() => {
+              // ignore
+            });
+          }
+        }
+
+        return winner.api;
+      } catch {
+        // All fallback methods also failed. Surface the original error —
+        // it's almost always more informative than the AggregateError
+        // from Promise.any and matches the pre-fallback behavior callers
+        // expect.
+        logger.error(
+          `UDP fallback exhausted (${remaining.length} methods tried)`,
+        );
+        throw primaryErr;
+      }
+    }
+  }
+
+  /**
    * Ensure Baichuan client is connected and ready
    */
   async ensureBaichuanClient(): Promise<ReolinkBaichuanApi> {
@@ -343,27 +512,13 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         await this.cleanupBaichuanApi();
       }
 
-      // Create new Baichuan client
-      // BaichuanLogger implements Console, so it can be used directly
+      // Create new Baichuan client. For UDP transports a fallback chain
+      // (preliminary local-direct → saved method → race) is applied
+      // inside the helper so the cam recovers from post-autodetect
+      // network changes without losing the persisted setting.
       const logger = this.getBaichuanLogger();
       try {
-        const api = await createBaichuanApi({
-          inputs: {
-            host: config.host,
-            username: config.username,
-            password: config.password,
-            uid: config.uid,
-            logger,
-            debugOptions: config.debugOptions,
-            udpDiscoveryMethod: config.udpDiscoveryMethod,
-            ...(config.emailPushCameraId
-              ? { emailPushCameraId: config.emailPushCameraId }
-              : {}),
-          },
-          transport: config.transport,
-        });
-
-        await api.login();
+        const api = await this.createApiWithUdpFallback(config, logger);
 
         // Set NVR flag BEFORE any streaming to ensure correct socket pooling
         // NVR devices need separate sockets per channel
