@@ -1,6 +1,22 @@
 import type { ReolinkBaichuanApi } from "@apocaliss92/nodelink-js" with {
   "resolution-mode": "import",
 };
+
+// Lazy ESM bridge: scrypted-reolink-native is CJS-compiled but
+// @apocaliss92/nodelink-js is an ESM-only package, so any value
+// (non-type) imports have to go through dynamic import. Cached on the
+// first call so the PCM pump doesn't re-resolve the module per chunk.
+let encodeImaAdpcmFn:
+  | ((pcm: Int16Array, blockSizeBytes: number) => Buffer)
+  | undefined;
+async function loadEncodeImaAdpcm(): Promise<
+  (pcm: Int16Array, blockSizeBytes: number) => Buffer
+> {
+  if (encodeImaAdpcmFn) return encodeImaAdpcmFn;
+  const mod = await import("@apocaliss92/nodelink-js");
+  encodeImaAdpcmFn = mod.encodeImaAdpcm;
+  return encodeImaAdpcmFn;
+}
 import sdk, {
   FFmpegInput,
   MediaObject,
@@ -313,12 +329,6 @@ export class ReolinkBaichuanIntercom {
     return this.stopping;
   }
 
-  private clamp16(x: number): number {
-    if (x > 32767) return 32767;
-    if (x < -32768) return -32768;
-    return x | 0;
-  }
-
   private enqueuePcm(
     session: Awaited<ReturnType<ReolinkBaichuanApi["createTalkSession"]>>,
     pcmChunk: Buffer,
@@ -360,6 +370,7 @@ export class ReolinkBaichuanIntercom {
     this.pumping = true;
     this.pumpPromise = (async () => {
       try {
+        const encode = await loadEncodeImaAdpcm();
         while (true) {
           if (this.session !== session) return;
           if (this.pcmBuffer.length < bytesNeeded) return;
@@ -373,7 +384,7 @@ export class ReolinkBaichuanIntercom {
             chunk.length / 2,
           );
 
-          const adpcmChunk = this.encodeImaAdpcm(pcmSamples, blockSize);
+          const adpcmChunk = encode(pcmSamples, blockSize);
           await session.sendAudio(adpcmChunk);
         }
       } catch (e) {
@@ -499,97 +510,4 @@ export class ReolinkBaichuanIntercom {
     ];
   }
 
-  private encodeImaAdpcm(pcm: Int16Array, blockSizeBytes: number): Buffer {
-    const samplesPerBlock = blockSizeBytes * 2 + 1;
-    const totalBlocks = Math.ceil(pcm.length / samplesPerBlock);
-    const outBlocks: Buffer[] = [];
-
-    const imaIndexTable = Int8Array.from([
-      -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8,
-    ]);
-
-    const imaStepTable = Int16Array.from([
-      7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41,
-      45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190,
-      209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
-      876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499,
-      2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845,
-      8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385,
-      24623, 27086, 29794, 32767,
-    ]);
-
-    let sampleIndex = 0;
-
-    for (let b = 0; b < totalBlocks; b++) {
-      const block = Buffer.alloc(4 + blockSizeBytes);
-
-      // Block header
-      const first = pcm[sampleIndex] ?? 0;
-      let predictor = first;
-      let index = 0;
-
-      block.writeInt16LE(predictor, 0);
-      block.writeUInt8(index, 2);
-      block.writeUInt8(0, 3);
-
-      sampleIndex++;
-
-      // Encode samples into nibbles
-      const codes = new Uint8Array(blockSizeBytes * 2);
-      for (let i = 0; i < codes.length; i++) {
-        const sample = pcm[sampleIndex] ?? predictor;
-        sampleIndex++;
-
-        let diff = sample - predictor;
-        let sign = 0;
-        if (diff < 0) {
-          sign = 8;
-          diff = -diff;
-        }
-
-        let step = imaStepTable[index] ?? 7;
-        let delta = 0;
-        let vpdiff = step >> 3;
-
-        if (diff >= step) {
-          delta |= 4;
-          diff -= step;
-          vpdiff += step;
-        }
-        step >>= 1;
-        if (diff >= step) {
-          delta |= 2;
-          diff -= step;
-          vpdiff += step;
-        }
-        step >>= 1;
-        if (diff >= step) {
-          delta |= 1;
-          vpdiff += step;
-        }
-
-        if (sign) predictor -= vpdiff;
-        else predictor += vpdiff;
-
-        predictor = this.clamp16(predictor);
-
-        index += imaIndexTable[delta] ?? 0;
-        if (index < 0) index = 0;
-        if (index > 88) index = 88;
-
-        codes[i] = (delta | sign) & 0x0f;
-      }
-
-      // Pack nibble: low nibble first, then high nibble
-      for (let i = 0; i < blockSizeBytes; i++) {
-        const lo = codes[i * 2] ?? 0;
-        const hi = codes[i * 2 + 1] ?? 0;
-        block[4 + i] = (lo & 0x0f) | ((hi & 0x0f) << 4);
-      }
-
-      outBlocks.push(block);
-    }
-
-    return Buffer.concat(outBlocks);
-  }
 }
