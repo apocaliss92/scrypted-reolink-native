@@ -260,25 +260,22 @@ class ReolinkNativePlugin
 
     const deviceTypeSetting = settings.deviceType?.toString() || "Auto";
     const forceType =
-      deviceTypeSetting === "Auto"
-        ? undefined
-        : deviceTypeSetting.toLowerCase();
+      deviceTypeSetting === "Auto" ? undefined : deviceTypeSetting;
 
     this.console.log(
       `[AutoDetect] Starting device type detection for ${ipAddress}...${forceType ? ` (forcing type: ${forceType})` : ""}`,
     );
     const { autoDetectDeviceType } = await import("@apocaliss92/nodelink-js");
-    // 'Auto', 'NVR', 'Battery Camera', 'Regular Camera
+    // 'Auto', 'NVR', 'Battery Camera', 'Regular Camera'
+    const normalizedForceType = forceType?.trim().toLowerCase();
     const mode: AutoDetectMode =
-      forceType === "Auto"
-        ? "auto"
-        : forceType === "Battery Camera"
-          ? "udp"
-          : forceType === "Regular Camera"
+      normalizedForceType === "battery camera"
+        ? "udp"
+        : normalizedForceType === "regular camera"
+          ? "tcp"
+          : normalizedForceType === "nvr"
             ? "tcp"
-            : forceType === "NVR"
-              ? "tcp"
-              : "auto";
+            : "auto";
 
     const maxRetries = mode === "auto" ? 2 : 10;
 
