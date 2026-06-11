@@ -140,7 +140,7 @@ export class ReolinkNativeMultiFocalDevice
         await sdk.deviceManager.onDeviceDiscovered(device);
 
         logger.log(`Discovering lens ${lensType}`);
-        logger.debug(`${JSON.stringify({ interfaces, deviceCapabilities })}`);
+        logger.debug({ interfaces, deviceCapabilities });
 
         const camera = await this.getDevice(nativeId);
 

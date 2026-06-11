@@ -192,6 +192,10 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   private readonly reconnectBackoffMs: number = 2000; // 2 seconds minimum between reconnects
   private eventSubscriptionActive: boolean = false;
   private lastEventTime: number = 0;
+  // Timestamp of the last triggered (silence-based) event restart. Used to
+  // rate-limit full unsub/resub cycles so a persistently-quiet camera can't be
+  // restarted on every check window.
+  private lastEventRestartTime: number = 0;
   private currentWrappedEventHandler?: (ev: ReolinkSimpleEvent) => void;
   private subscribeToEventsPromise?: Promise<void>;
   private pingInterval?: NodeJS.Timeout;
@@ -940,20 +944,40 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
         const timeSinceLastEvent = now - this.lastEventTime;
         const tenMinutesMs = 10 * 60 * 1000;
 
+        // Rate-limit triggered restarts: never restart more than once per
+        // 10 minutes. A persistently-quiet camera otherwise gets a full
+        // unsub/resub cycle on every qualifying check window.
+        const canRestart =
+          now - this.lastEventRestartTime >= tenMinutesMs;
+
         if (this.lastEventTime > 0 && timeSinceLastEvent > tenMinutesMs) {
-          logger.log(
-            `No events received in the last ${Math.round(timeSinceLastEvent / 60_000)} minutes, performing full plugin-level event restart`,
-          );
-          await this.unsubscribeFromEvents(true);
-          await this.subscribeToEvents(true);
-        } else if (this.lastEventTime === 0) {
-          const timeSinceSubscription = now - (this.connectionTime || now);
-          if (timeSinceSubscription > tenMinutesMs) {
+          if (!canRestart) {
+            logger.debug(
+              "Event check: silence detected but skipping restart (backoff: last restart < 10min ago)",
+            );
+          } else {
             logger.log(
-              `No events received since subscription (${Math.round(timeSinceSubscription / 60_000)} minutes ago), performing full plugin-level event restart`,
+              `No events received in the last ${Math.round(timeSinceLastEvent / 60_000)} minutes, performing full plugin-level event restart`,
             );
             await this.unsubscribeFromEvents(true);
             await this.subscribeToEvents(true);
+            this.lastEventRestartTime = Date.now();
+          }
+        } else if (this.lastEventTime === 0) {
+          const timeSinceSubscription = now - (this.connectionTime || now);
+          if (timeSinceSubscription > tenMinutesMs) {
+            if (!canRestart) {
+              logger.debug(
+                "Event check: no events since subscription but skipping restart (backoff: last restart < 10min ago)",
+              );
+            } else {
+              logger.log(
+                `No events received since subscription (${Math.round(timeSinceSubscription / 60_000)} minutes ago), performing full plugin-level event restart`,
+              );
+              await this.unsubscribeFromEvents(true);
+              await this.subscribeToEvents(true);
+              this.lastEventRestartTime = Date.now();
+            }
           }
         }
       } catch (e) {

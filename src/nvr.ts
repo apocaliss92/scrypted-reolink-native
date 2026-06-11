@@ -289,7 +289,7 @@ export class ReolinkNativeNvrDevice
     const logger = this.getBaichuanLogger();
 
     try {
-      logger.debug(`Baichuan event on nvr: ${JSON.stringify(ev)}`);
+      logger.debug("Baichuan event on nvr:", ev);
 
       const channel = ev?.channel;
       if (channel === undefined) {

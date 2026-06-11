@@ -495,6 +495,18 @@ export class ReolinkCamera
       defaultValue: 60,
       hide: true,
     },
+    statusPollIntervalSeconds: {
+      title: "Accessory Status Poll Interval (seconds)",
+      subgroup: "Advanced",
+      description:
+        "How often to poll accessory device state (siren, floodlight, PIR, autotracking, chime) for wired cameras. 0 disables polling (push events still update state). Default: 60.",
+      type: "number",
+      defaultValue: 60,
+      hide: true,
+      onPut: async () => {
+        this.restartStatusPoll();
+      },
+    },
     diagnosticsOutputPath: {
       title: "Diagnostics Output Path",
       subgroup: "Diagnostics",
@@ -592,6 +604,16 @@ export class ReolinkCamera
       onPut: async () => {
         this.updateVideoClipsAutoLoad();
       },
+    },
+    videoclipsHighWaterMark: {
+      // Internal: epoch ms of the most recent clip fully processed by the
+      // auto-load run. Subsequent runs start from this mark (minus a small
+      // overlap) instead of re-scanning the whole preload window every time.
+      // 0 means "no successful run yet" (full backfill).
+      type: "number",
+      defaultValue: 0,
+      hide: true,
+      readonly: true,
     },
     clearVideoclipsCache: {
       title: "Clear All Video Clips Cache",
@@ -1528,6 +1550,10 @@ export class ReolinkCamera
       // Recreate the cache directory for future use
       await fs.promises.mkdir(cacheDir, { recursive: true });
 
+      // Reset the auto-load high-water mark so the next run does a full
+      // backfill over the configured preload window (the cache is now empty).
+      this.storageSettings.values.videoclipsHighWaterMark = 0;
+
       const sizeMB = (totalSize / (1024 * 1024)).toFixed(2);
       logger.log(
         `[VideoClips] Cache cleared: ${fileCount} files, ${sizeMB} MB freed. Cache directory recreated.`,
@@ -1568,8 +1594,9 @@ export class ReolinkCamera
       `Starting video clips auto-load: checking every ${videoclipsRegularChecks} minutes`,
     );
 
-    // Run immediately on start
-    this.loadTodayVideoClipsAndThumbnails();
+    // Stagger the initial run so many cameras don't hit their recordings
+    // listing at the same instant on plugin startup.
+    setTimeout(() => this.loadTodayVideoClipsAndThumbnails(), Math.random() * 60_000);
 
     // Then run at regular intervals
     this.videoClipsAutoLoadInterval = setInterval(() => {
@@ -1595,9 +1622,6 @@ export class ReolinkCamera
     try {
       const daysToPreload =
         this.storageSettings.values.videoclipsDaysToPreload ?? 1;
-      logger.log(
-        `Auto-loading video clips and thumbnails for the last ${daysToPreload} day(s)...`,
-      );
 
       // Get date range (start of N days ago to now)
       const now = new Date();
@@ -1606,21 +1630,42 @@ export class ReolinkCamera
       startDate.setUTCHours(0, 0, 0, 0);
       startDate.setUTCMinutes(0, 0, 0);
 
-      // Fetch video clips for the specified number of days
+      // Incremental load: on the first run (mark == 0) keep the full backfill
+      // over the preload window; on subsequent runs start from the high-water
+      // mark (minus a 5min overlap so we never miss a clip that straddled the
+      // previous run boundary), but never earlier than the preload window.
+      const highWaterMark =
+        this.storageSettings.values.videoclipsHighWaterMark ?? 0;
+      const OVERLAP_MS = 5 * 60 * 1000;
+      const windowStartMs = startDate.getTime();
+      const effectiveStartMs =
+        highWaterMark > 0
+          ? Math.max(windowStartMs, highWaterMark - OVERLAP_MS)
+          : windowStartMs;
+
+      logger.log(
+        `Auto-loading video clips and thumbnails (${daysToPreload} day window, ` +
+          `${highWaterMark > 0 ? "incremental from high-water mark" : "full backfill"})...`,
+      );
+
+      // Fetch video clips for the (possibly narrowed) range
       const clips = await this.getVideoClips({
-        startTime: startDate.getTime(),
+        startTime: effectiveStartMs,
         endTime: now.getTime(),
       });
 
-      logger.log(
-        `Found ${clips.length} video clips for the last ${daysToPreload} day(s)`,
-      );
+      logger.log(`Found ${clips.length} video clips to process`);
 
       const downloadVideoclipsLocally =
         this.storageSettings.values.downloadVideoclipsLocally ?? false;
 
       // Track processed clips to avoid duplicate calls to the camera
       const processedClips = new Set<string>();
+      // Most-recent clip start time fully processed this run; advances the mark.
+      let maxProcessedStart = highWaterMark;
+      // Only advance the high-water mark if the whole loop completes cleanly.
+      let runHadError = false;
+      const MIN_THUMB_CACHE_BYTES = 512;
 
       // Download videos first (if enabled), then thumbnails for each clip
       for (const clip of clips) {
@@ -1631,10 +1676,23 @@ export class ReolinkCamera
         }
         processedClips.add(clip.id);
 
+        // Cheap pre-check: if the thumbnail is already cached and non-trivial,
+        // skip the thumbnail generation entirely. The video file cache is
+        // request/HLS-driven (not written by getVideoClip here), so it is NOT
+        // used as a skip signal.
+        let thumbnailCached = false;
         try {
-          // If downloadVideoclipsLocally is enabled, download the video clip first
-          // This allows the thumbnail to use the local file instead of calling the camera
-          if (downloadVideoclipsLocally) {
+          const thumbPath = this.getThumbnailCachePath(clip.id);
+          const stats = await fs.promises.stat(thumbPath);
+          thumbnailCached = stats.size >= MIN_THUMB_CACHE_BYTES;
+        } catch {
+          // Not cached (or unreadable) — fall through to generate it.
+        }
+
+        try {
+          // If downloadVideoclipsLocally is enabled, build the video webhook URL.
+          // This is cheap (no camera round-trip); only skip the thumbnail below.
+          if (downloadVideoclipsLocally && !thumbnailCached) {
             try {
               // Call getVideoClip to trigger download and caching
               await this.getVideoClip(clip.id);
@@ -1647,23 +1705,40 @@ export class ReolinkCamera
             }
           }
 
-          // Then get the thumbnail - this will use the local video file if available
-          // or call the camera if the video wasn't downloaded
-          try {
-            await this.getVideoClipThumbnail(clip.id);
-            logger.debug(`Downloaded thumbnail for clip: ${clip.id}`);
-          } catch (e) {
-            logger.warn(
-              `Failed to load thumbnail for clip ${clip.id}:`,
-              e instanceof Error ? e.message : String(e),
-            );
+          if (thumbnailCached) {
+            logger.debug(`Skipping already cached thumbnail: ${clip.id}`);
+          } else {
+            // Then get the thumbnail - this will use the local video file if
+            // available or call the camera if the video wasn't downloaded
+            try {
+              await this.getVideoClipThumbnail(clip.id);
+              logger.debug(`Downloaded thumbnail for clip: ${clip.id}`);
+            } catch (e) {
+              runHadError = true;
+              logger.warn(
+                `Failed to load thumbnail for clip ${clip.id}:`,
+                e instanceof Error ? e.message : String(e),
+              );
+            }
+          }
+
+          // Track the most-recent successfully-handled clip for the mark.
+          if (typeof clip.startTime === "number") {
+            maxProcessedStart = Math.max(maxProcessedStart, clip.startTime);
           }
         } catch (e) {
+          runHadError = true;
           logger.warn(
             `Error processing clip ${clip.id}:`,
             e instanceof Error ? e.message : String(e),
           );
         }
+      }
+
+      // Advance the high-water mark only after a fully clean run, so a transient
+      // failure forces a re-scan of the same window on the next pass.
+      if (!runHadError && maxProcessedStart > highWaterMark) {
+        this.storageSettings.values.videoclipsHighWaterMark = maxProcessedStart;
       }
 
       logger.log(`Completed auto-loading video clips and thumbnails`);
@@ -2277,7 +2352,8 @@ export class ReolinkCamera
       const isDispatchEnabled = this.isEventDispatchEnabled();
 
       logger.debug(
-        `Baichuan event on camera (dispatch enabled: ${isDispatchEnabled}): ${JSON.stringify(ev)}`,
+        `Baichuan event on camera (dispatch enabled: ${isDispatchEnabled}):`,
+        ev,
       );
 
       if (!isDispatchEnabled) {
@@ -3235,27 +3311,34 @@ export class ReolinkCamera
   async getDevice(nativeId: string): Promise<any> {
     if (nativeId.endsWith(motionSirenSuffix)) {
       this.motionSiren ||= new ReolinkCameraMotionSiren(this, nativeId);
+      this.restartStatusPoll();
       return this.motionSiren;
     } else if (nativeId.endsWith(sirenSuffix)) {
       this.siren ||= new ReolinkCameraSiren(this, nativeId);
+      this.restartStatusPoll();
       return this.siren;
     } else if (nativeId.endsWith(motionFloodlightSuffix)) {
       this.motionFloodlight ||= new ReolinkCameraMotionFloodlight(
         this,
         nativeId,
       );
+      this.restartStatusPoll();
       return this.motionFloodlight;
     } else if (nativeId.endsWith(floodlightSuffix)) {
       this.floodlight ||= new ReolinkCameraFloodlight(this, nativeId);
+      this.restartStatusPoll();
       return this.floodlight;
     } else if (nativeId.endsWith(pirSuffix)) {
       this.pirSensor ||= new ReolinkCameraPirSensor(this, nativeId);
+      this.restartStatusPoll();
       return this.pirSensor;
     } else if (nativeId.endsWith(autotrackingSuffix)) {
       this.autotracking ||= new ReolinkCameraAutotracking(this, nativeId);
+      this.restartStatusPoll();
       return this.autotracking;
     } else if (nativeId.endsWith(chimeSuffix)) {
       this.chime ||= new ReolinkCameraChime(this, nativeId);
+      this.restartStatusPoll();
       return this.chime;
     }
   }
@@ -3896,7 +3979,7 @@ export class ReolinkCamera
             hasPlugin: !!this.plugin,
           }),
         );
-        logger.debug(`${JSON.stringify(device)}`);
+        logger.debug(device);
       } catch (e) {
         logger.error(
           "Failed to update device interfaces",
@@ -4427,7 +4510,7 @@ export class ReolinkCamera
               e?.message || String(e),
             );
           }
-        }, 5_000);
+        }, 30_000);
       }
 
       // Update battery and snapshot every N minutes
@@ -4445,21 +4528,74 @@ export class ReolinkCamera
       }, updateIntervalMs);
 
       logger.log(
-        `Periodic tasks started: sleep check every 5s, battery update every ${batteryUpdateIntervalMinutes} minutes`,
+        `Periodic tasks started: sleep check every 30s, battery update every ${batteryUpdateIntervalMinutes} minutes`,
       );
     } else {
-      this.statusPollTimer = setInterval(async () => {
-        try {
-          await this.alignAuxDevicesState();
-        } catch (e) {
-          logger.error(
-            "Error aligning auxiliary devices state:",
-            e?.message || String(e),
-          );
-        }
-      }, 10_000);
-
-      logger.log("Periodic tasks started: status poll every 10s");
+      this.restartStatusPoll();
     }
+  }
+
+  /**
+   * (Re)schedules the accessory status poll for wired cameras. The poll only
+   * runs when (a) statusPollIntervalSeconds > 0 and (b) at least one accessory
+   * device is actually instantiated — otherwise alignAuxDevicesState() would do
+   * an ensureClient() + getAbilities() round-trip for nothing on every tick.
+   * Called from startPeriodicTasks(), from the setting onPut, and after an
+   * accessory child device is created (so late-created accessories get polled).
+   */
+  restartStatusPoll(): void {
+    const logger = this.getBaichuanLogger();
+
+    this.statusPollTimer && clearInterval(this.statusPollTimer);
+    this.statusPollTimer = undefined;
+
+    // Only relevant for wired cameras; battery cameras align on wake.
+    if (this.isBattery) return;
+
+    const { statusPollIntervalSeconds = 60 } = this.storageSettings.values;
+    if (!statusPollIntervalSeconds || statusPollIntervalSeconds <= 0) {
+      logger.log("Accessory status poll disabled (interval = 0)");
+      return;
+    }
+
+    const hasAnyAccessory = (): boolean =>
+      !!(
+        this.motionSiren ||
+        this.siren ||
+        this.motionFloodlight ||
+        this.floodlight ||
+        this.pirSensor ||
+        this.autotracking ||
+        this.chime
+      );
+
+    if (!hasAnyAccessory()) {
+      // Nothing to poll yet; restartStatusPoll() is re-invoked when an
+      // accessory device is created in getDevice().
+      return;
+    }
+
+    const intervalMs = statusPollIntervalSeconds * 1000;
+
+    const run = async () => {
+      // Guard inside the callback: accessories may be released between ticks.
+      if (!hasAnyAccessory()) return;
+      try {
+        await this.alignAuxDevicesState();
+      } catch (e) {
+        logger.error(
+          "Error aligning auxiliary devices state:",
+          e?.message || String(e),
+        );
+      }
+    };
+
+    // Stagger the first tick so many cameras don't poll in lockstep.
+    setTimeout(run, Math.random() * intervalMs);
+    this.statusPollTimer = setInterval(run, intervalMs);
+
+    logger.log(
+      `Periodic tasks started: status poll every ${statusPollIntervalSeconds}s`,
+    );
   }
 }

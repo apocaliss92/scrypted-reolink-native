@@ -57,7 +57,13 @@ export class ReolinkBaichuanIntercom {
   private maxBacklogMs = DEFAULT_MAX_BACKLOG_MS;
   private maxBacklogBytes: number | undefined;
 
-  private pcmBuffer: Buffer = Buffer.alloc(0);
+  // PCM backlog held as a queue of chunks instead of a single growing Buffer,
+  // so the hot enqueue path no longer does a Buffer.concat per audio chunk.
+  // `pcmHeadOffset` is the number of bytes already consumed from pcmChunks[0];
+  // `pcmQueuedBytes` is the logical (unconsumed) byte length of the queue.
+  private pcmChunks: Buffer[] = [];
+  private pcmHeadOffset = 0;
+  private pcmQueuedBytes = 0;
 
   private pumping = false;
   private pumpPromise: Promise<void> | undefined;
@@ -134,7 +140,7 @@ export class ReolinkBaichuanIntercom {
       });
 
       this.session = session;
-      this.pcmBuffer = Buffer.alloc(0);
+      this.resetPcmQueue();
       this.pumping = false;
       this.pumpPromise = undefined;
 
@@ -280,7 +286,7 @@ export class ReolinkBaichuanIntercom {
       const session = this.session;
       this.session = undefined;
 
-      this.pcmBuffer = Buffer.alloc(0);
+      this.resetPcmQueue();
 
       const sleepMs = async (ms: number) =>
         new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -329,6 +335,62 @@ export class ReolinkBaichuanIntercom {
     return this.stopping;
   }
 
+  /** Reset the PCM backlog queue. */
+  private resetPcmQueue(): void {
+    this.pcmChunks = [];
+    this.pcmHeadOffset = 0;
+    this.pcmQueuedBytes = 0;
+  }
+
+  /**
+   * Drop the oldest `dropBytes` bytes from the front of the queue, advancing
+   * the head offset and discarding fully-consumed chunks. Used by the backlog
+   * clamp; preserves the same "drop oldest samples" semantics as the previous
+   * single-buffer `subarray(length - keep)`.
+   */
+  private dropOldestPcm(dropBytes: number): void {
+    let remaining = dropBytes;
+    while (remaining > 0 && this.pcmChunks.length) {
+      const head = this.pcmChunks[0];
+      const avail = head.length - this.pcmHeadOffset;
+      if (avail <= remaining) {
+        remaining -= avail;
+        this.pcmChunks.shift();
+        this.pcmHeadOffset = 0;
+      } else {
+        this.pcmHeadOffset += remaining;
+        remaining = 0;
+      }
+    }
+    this.pcmQueuedBytes -= dropBytes - remaining;
+  }
+
+  /**
+   * Materialize and remove the next `bytesNeeded` contiguous bytes from the
+   * front of the queue. Returns a freshly-allocated Buffer (its own backing
+   * store, so it is safe to wrap in an Int16Array). Caller must ensure
+   * `pcmQueuedBytes >= bytesNeeded`.
+   */
+  private takePcm(bytesNeeded: number): Buffer {
+    const out = Buffer.allocUnsafe(bytesNeeded);
+    let written = 0;
+    while (written < bytesNeeded && this.pcmChunks.length) {
+      const head = this.pcmChunks[0];
+      const avail = head.length - this.pcmHeadOffset;
+      const take = Math.min(avail, bytesNeeded - written);
+      head.copy(out, written, this.pcmHeadOffset, this.pcmHeadOffset + take);
+      written += take;
+      if (take === avail) {
+        this.pcmChunks.shift();
+        this.pcmHeadOffset = 0;
+      } else {
+        this.pcmHeadOffset += take;
+      }
+    }
+    this.pcmQueuedBytes -= bytesNeeded;
+    return out;
+  }
+
   private enqueuePcm(
     session: Awaited<ReturnType<ReolinkBaichuanApi["createTalkSession"]>>,
     pcmChunk: Buffer,
@@ -339,20 +401,22 @@ export class ReolinkBaichuanIntercom {
 
     if (this.session !== session) return;
 
-    this.pcmBuffer = this.pcmBuffer.length
-      ? Buffer.concat([this.pcmBuffer, pcmChunk])
-      : pcmChunk;
+    // Hot path: append the chunk reference, no per-chunk concat.
+    if (pcmChunk.length) {
+      this.pcmChunks.push(pcmChunk);
+      this.pcmQueuedBytes += pcmChunk.length;
+    }
 
     // Cap backlog to keep latency bounded (drop oldest samples).
-    // IMPORTANT: do this on the shared buffer (not in a promise chain),
+    // IMPORTANT: do this on the shared queue (not in a promise chain),
     // otherwise old PCM chunks can pile up in queued closures and bypass
     // this clamp, causing multi-second latency and degraded audio.
     const maxBytes = this.maxBacklogBytes ?? bytesNeeded;
-    if (this.pcmBuffer.length > maxBytes) {
+    if (this.pcmQueuedBytes > maxBytes) {
       // Align to 16-bit samples.
       const keep = maxBytes - (maxBytes % 2);
-      const dropped = this.pcmBuffer.length - keep;
-      this.pcmBuffer = this.pcmBuffer.subarray(this.pcmBuffer.length - keep);
+      const dropped = this.pcmQueuedBytes - keep;
+      this.dropOldestPcm(dropped);
 
       const now = Date.now();
       if (now - this.lastBacklogClampLogAtMs > 2000) {
@@ -373,10 +437,9 @@ export class ReolinkBaichuanIntercom {
         const encode = await loadEncodeImaAdpcm();
         while (true) {
           if (this.session !== session) return;
-          if (this.pcmBuffer.length < bytesNeeded) return;
+          if (this.pcmQueuedBytes < bytesNeeded) return;
 
-          const chunk = this.pcmBuffer.subarray(0, bytesNeeded);
-          this.pcmBuffer = this.pcmBuffer.subarray(bytesNeeded);
+          const chunk = this.takePcm(bytesNeeded);
 
           const pcmSamples = new Int16Array(
             chunk.buffer,

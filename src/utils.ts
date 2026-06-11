@@ -135,7 +135,7 @@ export const updateDeviceInfo = async (props: {
     throw e;
   } finally {
     logger.log(`Device info updated`);
-    logger.debug(`${JSON.stringify({ newInfo: device.info, deviceData })}`);
+    logger.debug({ newInfo: device.info, deviceData });
   }
 };
 
