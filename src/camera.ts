@@ -43,7 +43,43 @@ import sdk, {
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import crypto from "crypto";
 import fs from "fs";
+import os from "os";
 import path from "path";
+
+/**
+ * Per-platform list of ffmpeg H.264 encoders we offer in the composite
+ * settings dropdown. Mirrors `@scrypted/common/src/ffmpeg-hardware-
+ * acceleration.ts`'s `getH264EncoderArgs()` but replicated here so we
+ * don't take a build dependency on Scrypted's internal common package
+ * (the subpath import doesn't resolve cleanly through the file-symlink
+ * Scrypted plugins use). The shape mirrors the upstream helper exactly
+ * so we can swap to the real one as soon as the resolution issue is
+ * addressed upstream.
+ *
+ * Each value is the full `-c:v <encoder> [extra-args...]` arg list. The
+ * code below pulls element [1] for the `-c:v` identifier and propagates
+ * the rest through `extraOutputArgs`.
+ */
+function getCompositeH264EncoderArgs(): { [label: string]: string[] } {
+  const args: { [label: string]: string[] } = {};
+  const platform = os.platform();
+  if (platform === "darwin") {
+    args["VideoToolbox"] = ["-c:v", "h264_videotoolbox"];
+  } else if (platform === "win32") {
+    args["Intel QuickSync"] = ["-c:v", "h264_qsv"];
+    args["AMD"] = ["-c:v", "h264_amf"];
+    args["Nvidia"] = ["-c:v", "h264_nvenc"];
+  } else if (platform === "linux") {
+    args["V4L2 (Raspberry Pi)"] = [
+      "-pix_fmt", "yuv420p",
+      "-c:v", "h264_v4l2m2m",
+    ];
+    args["VAAPI"] = ["-c:v", "h264_vaapi"];
+    args["Nvidia"] = ["-c:v", "h264_nvenc"];
+  }
+  args["libx264 (Software)"] = ["-c:v", "libx264"];
+  return args;
+}
 import type { UrlMediaStreamOptions } from "../../scrypted/plugins/rtsp/src/rtsp";
 import {
   ReolinkCameraAutotracking,
@@ -692,22 +728,24 @@ export class ReolinkCamera
     // (Raspberry Pi). When you change the encoder the libx264-specific
     // preset/CRF knobs are silently dropped — use "Composite: extra
     // output args" to pass the encoder's own options.
+    // Encoder choices come straight from Scrypted's per-platform
+    // hardware-acceleration helper, so the dropdown only ever offers
+    // encoders that ffmpeg on this host actually supports — Mac sees
+    // VideoToolbox, Windows sees QuickSync/AMD/Nvidia, Linux sees
+    // V4L2/VAAPI/Nvidia, Raspberry Pi sees its dedicated V4L2 path.
+    // The displayed label is human-readable ("VideoToolbox",
+    // "Intel QuickSync", "libx264 (Software)") and the actual ffmpeg
+    // `-c:v` identifier is resolved at use time via
+    // `resolveCompositeVideoEncoder()` below.
     compositeVideoEncoder: {
       title: "Composite: ffmpeg encoder",
       description:
-        "Output video encoder. Default libx264 (software). Change to the right hardware encoder for a 5-10× CPU win.",
+        "Output video encoder. Choices are limited to what ffmpeg supports on this host. Hardware encoders typically reduce CPU 5-10× vs libx264.",
       type: "string",
-      defaultValue: "libx264",
+      defaultValue: "libx264 (Software)",
       group: "Composite stream",
       hide: true,
-      choices: [
-        "libx264",
-        "h264_videotoolbox",
-        "h264_qsv",
-        "h264_vaapi",
-        "h264_nvenc",
-        "h264_v4l2m2m",
-      ],
+      choices: Object.keys(getCompositeH264EncoderArgs()),
       onPut: async () => {
         this.scheduleStreamManagerRestart("compositeVideoEncoder changed");
       },
@@ -2051,6 +2089,41 @@ export class ReolinkCamera
       const extraGlobalArgs = splitArgs(compositeExtraGlobalArgs);
       const extraOutputArgs = splitArgs(compositeExtraOutputArgs);
 
+      // Resolve the human-readable encoder label the user picked back
+      // into the actual ffmpeg `-c:v` identifier. The helper returns
+      // arrays shaped like ['-c:v', 'h264_videotoolbox', ...extras] —
+      // we pull element [1] for the encoder name and propagate any
+      // additional pix-fmt / pix-encoder args via extraOutputArgs so
+      // they end up just before the output pipe.
+      let resolvedVideoEncoder: string | undefined;
+      let encoderImpliedOutputArgs: string[] = [];
+      if (compositeVideoEncoder) {
+        try {
+          const encoderArgs = getCompositeH264EncoderArgs()[compositeVideoEncoder];
+          // Some entries (V4L2/Raspberry Pi) carry pre-`-c:v` pixel-format
+          // args. Find where `-c:v` is in the array — everything before
+          // becomes encoderImpliedOutputArgs (pixfmt), the element after
+          // `-c:v` is the encoder identifier, and anything after that is
+          // also part of encoderImpliedOutputArgs.
+          const cvIdx = encoderArgs?.indexOf("-c:v") ?? -1;
+          if (encoderArgs && cvIdx >= 0 && encoderArgs[cvIdx + 1]) {
+            resolvedVideoEncoder = encoderArgs[cvIdx + 1]!;
+            // Everything except the `-c:v <encoder>` pair becomes extra
+            // output args, preserving any pixel-format hints the upstream
+            // helper baked in (e.g. yuv420p for V4L2).
+            encoderImpliedOutputArgs = [
+              ...encoderArgs.slice(0, cvIdx),
+              ...encoderArgs.slice(cvIdx + 2),
+            ];
+          }
+        } catch {
+          // ignore; fall back to library default below
+        }
+      }
+      const finalExtraOutputArgs = encoderImpliedOutputArgs.length || extraOutputArgs
+        ? [...encoderImpliedOutputArgs, ...(extraOutputArgs ?? [])]
+        : undefined;
+
       // On NVR/Hub, TrackMix lenses are selected via stream variant, not via a separate channel.
       // Use rtspChannel for BOTH wide and tele so the library can request tele via streamType/variant.
       const wider = this.isOnNvr ? rtspChannel : undefined;
@@ -2101,8 +2174,8 @@ export class ReolinkCamera
         disableTranscode: compositeDisableTranscode ?? false,
         // ffmpeg knobs — only include when set so the library defaults stay live.
         ...(ffmpegPath ? { ffmpegPath } : {}),
-        ...(compositeVideoEncoder
-          ? { videoEncoder: compositeVideoEncoder }
+        ...(resolvedVideoEncoder
+          ? { videoEncoder: resolvedVideoEncoder }
           : {}),
         ...(compositeEncoderPreset
           ? { encoderPreset: compositeEncoderPreset }
@@ -2112,7 +2185,7 @@ export class ReolinkCamera
           ? { gopSeconds: compositeGopSeconds }
           : {}),
         ...(extraGlobalArgs ? { extraGlobalArgs } : {}),
-        ...(extraOutputArgs ? { extraOutputArgs } : {}),
+        ...(finalExtraOutputArgs ? { extraOutputArgs: finalExtraOutputArgs } : {}),
       };
     }
 
