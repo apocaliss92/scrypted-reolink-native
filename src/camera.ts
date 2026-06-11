@@ -683,6 +683,107 @@ export class ReolinkCamera
         this.scheduleStreamManagerRestart("compositeDisableTranscode changed");
       },
     },
+    // ─── Composite ffmpeg tuning ─────────────────────────────────
+    // Encoder + quality knobs. Defaults preserve the previous behavior
+    // (libx264 / ultrafast / crf 23 / 1s GOP). Switching the encoder
+    // away from libx264 is the single biggest perf win — try the HW
+    // encoder for your host: h264_videotoolbox (macOS), h264_qsv or
+    // h264_vaapi (Intel/AMD), h264_nvenc (NVIDIA), h264_v4l2m2m
+    // (Raspberry Pi). When you change the encoder the libx264-specific
+    // preset/CRF knobs are silently dropped — use "Composite: extra
+    // output args" to pass the encoder's own options.
+    compositeVideoEncoder: {
+      title: "Composite: ffmpeg encoder",
+      description:
+        "Output video encoder. Default libx264 (software). Change to the right hardware encoder for a 5-10× CPU win.",
+      type: "string",
+      defaultValue: "libx264",
+      group: "Composite stream",
+      hide: true,
+      choices: [
+        "libx264",
+        "h264_videotoolbox",
+        "h264_qsv",
+        "h264_vaapi",
+        "h264_nvenc",
+        "h264_v4l2m2m",
+      ],
+      onPut: async () => {
+        this.scheduleStreamManagerRestart("compositeVideoEncoder changed");
+      },
+    },
+    compositeEncoderPreset: {
+      title: "Composite: libx264 preset",
+      description:
+        "Only used when encoder is libx264. ultrafast = least CPU / worst compression; placebo = the opposite. Default ultrafast.",
+      type: "string",
+      defaultValue: "ultrafast",
+      group: "Composite stream",
+      hide: true,
+      choices: [
+        "ultrafast",
+        "superfast",
+        "veryfast",
+        "faster",
+        "fast",
+        "medium",
+        "slow",
+        "slower",
+        "veryslow",
+        "placebo",
+      ],
+      onPut: async () => {
+        this.scheduleStreamManagerRestart("compositeEncoderPreset changed");
+      },
+    },
+    compositeCrf: {
+      title: "Composite: libx264 CRF (quality)",
+      description:
+        "Only used when encoder is libx264. 0 = lossless (huge), 23 = visually lossless, 51 = worst. Drop by 2 to roughly halve bitrate at the same quality.",
+      type: "number",
+      defaultValue: 23,
+      group: "Composite stream",
+      hide: true,
+      onPut: async () => {
+        this.scheduleStreamManagerRestart("compositeCrf changed");
+      },
+    },
+    compositeGopSeconds: {
+      title: "Composite: keyframe interval (seconds)",
+      description:
+        "Lower = faster mid-stream join + larger stream; higher = better compression + slower join. Default 1s.",
+      type: "number",
+      defaultValue: 1,
+      group: "Composite stream",
+      hide: true,
+      onPut: async () => {
+        this.scheduleStreamManagerRestart("compositeGopSeconds changed");
+      },
+    },
+    compositeExtraGlobalArgs: {
+      title: "Composite: extra global args",
+      description:
+        "Free-form ffmpeg args inserted BEFORE the inputs. Use for hardware decode hints, e.g. \"-hwaccel videotoolbox\" or \"-hwaccel qsv -qsv_device /dev/dri/renderD128\". Whitespace-separated. Invalid args WILL crash ffmpeg.",
+      type: "string",
+      defaultValue: "",
+      group: "Composite stream",
+      hide: true,
+      onPut: async () => {
+        this.scheduleStreamManagerRestart("compositeExtraGlobalArgs changed");
+      },
+    },
+    compositeExtraOutputArgs: {
+      title: "Composite: extra output args",
+      description:
+        "Free-form ffmpeg args inserted JUST BEFORE the output. Use for encoder-specific options when encoder ≠ libx264, e.g. \"-q:v 23\" (qsv) or \"-preset fast -rc cbr\" (nvenc). Whitespace-separated. Invalid args WILL crash ffmpeg.",
+      type: "string",
+      defaultValue: "",
+      group: "Composite stream",
+      hide: true,
+      onPut: async () => {
+        this.scheduleStreamManagerRestart("compositeExtraOutputArgs changed");
+      },
+    },
     // ─── E-mail Push ─────────────────────────────────────────────
     // Per-camera knobs that pair with the singleton
     // `Reolink E-mail Push Server` device. Hidden by default and
@@ -1889,10 +1990,10 @@ export class ReolinkCamera
   /**
    * Initialize or recreate the StreamManager, taking into account multifocal composite options.
    */
-  protected initStreamManager(
+  protected async initStreamManager(
     logger?: Console,
     forceRecreate: boolean = false,
-  ): void {
+  ): Promise<void> {
     const { username, password } = this.storageSettings.values;
     // Ensure logger is always valid - use provided logger or get from device, fallback to console
     const validLogger = logger || this.getBaichuanLogger() || console;
@@ -1917,7 +2018,38 @@ export class ReolinkCamera
         rtspChannel,
         compositeAssumeH264,
         compositeDisableTranscode,
+        compositeVideoEncoder,
+        compositeEncoderPreset,
+        compositeCrf,
+        compositeGopSeconds,
+        compositeExtraGlobalArgs,
+        compositeExtraOutputArgs,
       } = this.storageSettings.values;
+      // Get the path to the ffmpeg binary Scrypted ships with. The
+      // composite stream spawns ffmpeg directly; on Windows / Electron
+      // the host has a stripped PATH so a bare `ffmpeg` ENOENTs — we
+      // MUST pass the absolute path the SDK knows about.
+      let ffmpegPath: string | undefined;
+      try {
+        ffmpegPath = await sdk.mediaManager.getFFmpegPath();
+      } catch {
+        // Older Scrypted runtimes / weird environments may not expose
+        // this. Fall through to the library's default ("ffmpeg" via PATH);
+        // worst case the composite fails to spawn and the user sees a
+        // friendly error.
+        ffmpegPath = undefined;
+      }
+      // Whitespace-split the free-form extra args. Empty string -> [].
+      const splitArgs = (s: string | undefined): string[] | undefined => {
+        if (typeof s !== "string") return undefined;
+        const arr = s
+          .trim()
+          .split(/\s+/)
+          .filter((a) => a.length > 0);
+        return arr.length > 0 ? arr : undefined;
+      };
+      const extraGlobalArgs = splitArgs(compositeExtraGlobalArgs);
+      const extraOutputArgs = splitArgs(compositeExtraOutputArgs);
 
       // On NVR/Hub, TrackMix lenses are selected via stream variant, not via a separate channel.
       // Use rtspChannel for BOTH wide and tele so the library can request tele via streamType/variant.
@@ -1967,6 +2099,20 @@ export class ReolinkCamera
         forceH264: true,
         assumeH264Inputs: compositeAssumeH264 ?? true,
         disableTranscode: compositeDisableTranscode ?? false,
+        // ffmpeg knobs — only include when set so the library defaults stay live.
+        ...(ffmpegPath ? { ffmpegPath } : {}),
+        ...(compositeVideoEncoder
+          ? { videoEncoder: compositeVideoEncoder }
+          : {}),
+        ...(compositeEncoderPreset
+          ? { encoderPreset: compositeEncoderPreset }
+          : {}),
+        ...(typeof compositeCrf === "number" ? { crf: compositeCrf } : {}),
+        ...(typeof compositeGopSeconds === "number"
+          ? { gopSeconds: compositeGopSeconds }
+          : {}),
+        ...(extraGlobalArgs ? { extraGlobalArgs } : {}),
+        ...(extraOutputArgs ? { extraOutputArgs } : {}),
       };
     }
 
@@ -1995,7 +2141,7 @@ export class ReolinkCamera
         logger.log(
           "Restarting StreamManager due to PIP/composite settings change",
         );
-        this.initStreamManager(logger, true);
+        await this.initStreamManager(logger, true);
 
         // Invalidate snapshot cache for battery/multifocal-battery so that
         // the next snapshot reflects the new PIP/composite configuration.
@@ -3560,7 +3706,7 @@ export class ReolinkCamera
       const logger = this.getBaichuanLogger();
       logger.warn("StreamManager not initialized, initializing now...");
       try {
-        this.initStreamManager(logger);
+        await this.initStreamManager(logger);
       } catch (e) {
         logger.error(
           "Failed to initialize StreamManager in getVideoStream",
@@ -3788,6 +3934,18 @@ export class ReolinkCamera
     this.storageSettings.settings.pipPosition.hide = !this.isMultiFocal;
     this.storageSettings.settings.pipSize.hide = !this.isMultiFocal;
     this.storageSettings.settings.pipMargin.hide = !this.isMultiFocal;
+    this.storageSettings.settings.compositeAssumeH264.hide = !this.isMultiFocal;
+    this.storageSettings.settings.compositeDisableTranscode.hide =
+      !this.isMultiFocal;
+    this.storageSettings.settings.compositeVideoEncoder.hide = !this.isMultiFocal;
+    this.storageSettings.settings.compositeEncoderPreset.hide =
+      !this.isMultiFocal;
+    this.storageSettings.settings.compositeCrf.hide = !this.isMultiFocal;
+    this.storageSettings.settings.compositeGopSeconds.hide = !this.isMultiFocal;
+    this.storageSettings.settings.compositeExtraGlobalArgs.hide =
+      !this.isMultiFocal;
+    this.storageSettings.settings.compositeExtraOutputArgs.hide =
+      !this.isMultiFocal;
 
     const hideUid = !this.isBattery || this.isOnNvr || !!this.multiFocalDevice;
     this.storageSettings.settings.uid.hide = hideUid;
@@ -3844,7 +4002,7 @@ export class ReolinkCamera
     }
 
     try {
-      this.initStreamManager();
+      await this.initStreamManager();
     } catch (e) {
       logger.error(
         "Failed to initialize StreamManager in init",
