@@ -4169,7 +4169,7 @@ export class ReolinkCamera
 
     const { hasPtz } = await this.getAbilities();
 
-    if (hasPtz && !this.multiFocalDevice) {
+    if (hasPtz) {
       const choices = (this.presets || []).map(
         (preset: any) => preset.id + "=" + preset.name,
       );
