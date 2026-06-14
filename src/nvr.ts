@@ -453,22 +453,43 @@ export class ReolinkNativeNvrDevice
     ];
   }
 
-  async syncEntitiesFromRemote() {
+  async syncEntitiesFromRemote(attempt = 0) {
     const logger = this.getBaichuanLogger();
     // const { ipAddress } = this.storageSettings.values;
 
     const api = await this.ensureBaichuanClient();
-    // source:"cgi" uses HTTP GetChannelstatus which returns the channel list immediately,
-    // without depending on the async cmd_id 145 Baichuan push. This avoids the race
-    // condition where getNvrChannelsSummary returns empty right after login.
-    const { devices, channels } = await api.getNvrChannelsSummary({ source: "cgi" });
+    // Prefer CGI (HTTP GetChannelstatus): it returns the channel list
+    // immediately, without depending on the async cmd_id 145 Baichuan push.
+    // But some Home Hub models expose no HTTP API at all (issue #15): CGI
+    // then fails fast (connection refused), so we fall back to HTTP-free
+    // Baichuan discovery, which probes the Support-advertised channel slots.
+    let result: Awaited<ReturnType<typeof api.getNvrChannelsSummary>>;
+    try {
+      result = await api.getNvrChannelsSummary({ source: "cgi" });
+      if (!result.channels.length) {
+        throw new Error("CGI returned no channels");
+      }
+    } catch (e) {
+      logger.debug(
+        `CGI channel discovery unavailable (${(e as Error)?.message}); falling back to Baichuan`,
+      );
+      result = await api.getNvrChannelsSummary({ source: "baichuan" });
+    }
+    const { devices, channels } = result;
 
     if (!channels.length) {
+      const maxAttempts = 5;
+      if (attempt >= maxAttempts) {
+        logger.warn(
+          `No channels found after ${attempt + 1} attempts; giving up for now`,
+        );
+        return;
+      }
       logger.debug(
-        `No channels found, retrying in 1s. ${JSON.stringify({ channels, devices })}`,
+        `No channels found, retrying in 1s (attempt ${attempt + 1}/${maxAttempts}). ${JSON.stringify({ channels, devices })}`,
       );
       await new Promise((resolve) => setTimeout(resolve, 1000));
-      await this.syncEntitiesFromRemote();
+      await this.syncEntitiesFromRemote(attempt + 1);
       return;
     }
 
