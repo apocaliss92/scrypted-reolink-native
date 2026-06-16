@@ -594,6 +594,11 @@ export async function handleVideoClipRequest(props: {
       isNvr: device.isOnNvr,
       logger,
       deviceId: sessionId,
+      // Browsers (Chrome/Firefox) can't decode H.265/HEVC in MSE, so a raw
+      // passthrough of an HEVC recording loads but never plays. The library
+      // only transcodes when the source is actually H.265 (H.264 is copied
+      // untouched), so this is safe to always request. Mirrors the HLS path.
+      transcodeH265ToH264: true,
     });
 
     let totalSize = 0;

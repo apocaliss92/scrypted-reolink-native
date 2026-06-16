@@ -605,6 +605,18 @@ export class ReolinkCamera
         this.updateVideoClipsAutoLoad();
       },
     },
+    videoclipsCacheStaleMinutes: {
+      title: "Video Clips Cache TTL (minutes)",
+      group: "Videoclips",
+      description:
+        "For battery cameras: how long a fetched video-clip list stays fresh. " +
+        "While fresh, getVideoClips returns the cached list without waking a " +
+        "sleeping camera. Once older than this, a sleeping camera is woken to " +
+        "reload. An already-awake camera always reloads. Default: 15 minutes.",
+      type: "number",
+      defaultValue: 15,
+      hide: true,
+    },
     videoclipsHighWaterMark: {
       // Internal: epoch ms of the most recent clip fully processed by the
       // auto-load run. Subsequent runs start from this mark (minus a small
@@ -962,6 +974,12 @@ export class ReolinkCamera
   private streamManagerRestartTimeout: NodeJS.Timeout | undefined;
   private videoClipsAutoLoadInterval: NodeJS.Timeout | undefined;
   private videoClipsAutoLoadInProgress: boolean = false;
+  // In-memory cache of the most recently fetched video clips, merged by id.
+  // Used to serve getVideoClips for sleeping battery cameras without waking
+  // them, until the cache is considered stale (videoclipsCacheStaleMinutes).
+  private videoClipsCache:
+    | { clips: VideoClip[]; fetchedAt: number }
+    | undefined;
 
   private batteryUpdatePromise: Promise<void> | undefined;
   private sleepCheckTimer: NodeJS.Timeout | undefined;
@@ -1044,15 +1062,6 @@ export class ReolinkCamera
       return this.multiFocalDevice.getVideoClips(options);
     }
 
-    const isSleeping = !this.nvrDevice && this.isBattery && this.sleeping;
-
-    // Skip sleeping check during auto-load to allow auto-load to start for battery cameras
-    if (!this.videoClipsAutoLoadInProgress && isSleeping) {
-      const logger = this.getBaichuanLogger();
-      logger.debug("getVideoClips: disabled for battery devices");
-      return [];
-    }
-
     const logger = this.getBaichuanLogger();
 
     // Determine time window
@@ -1095,6 +1104,30 @@ export class ReolinkCamera
       end.setTime(end.getTime() - 1);
     } else if (endOfDay.getTime() <= nowMs) {
       end.setTime(endOfDay.getTime());
+    }
+
+    // Battery cameras: while sleeping, avoid waking the camera on every poll.
+    // If we have a recently-fetched clip list (within the cache TTL), serve it
+    // from cache filtered to the requested window. If the cache is stale (or
+    // empty), fall through to a live fetch — ensureClient() wakes the camera.
+    // An already-awake camera (isSleeping === false) always reloads. The
+    // auto-load path bypasses this so it can populate the cache while asleep.
+    const isSleeping = !this.nvrDevice && this.isBattery && this.sleeping;
+    if (!this.videoClipsAutoLoadInProgress && isSleeping) {
+      const cached = this.getFreshCachedVideoClips(
+        start.getTime(),
+        end.getTime(),
+        nowMs,
+      );
+      if (cached) {
+        logger.debug(
+          `getVideoClips: battery camera sleeping, returning ${cached.length} cached clips (cache fresh)`,
+        );
+        return count ? cached.slice(0, count) : cached;
+      }
+      logger.debug(
+        "getVideoClips: battery camera sleeping and cache stale/empty, waking to reload",
+      );
     }
 
     try {
@@ -1146,6 +1179,10 @@ export class ReolinkCamera
         `[getVideoClips] Converted ${clips.length} video clips (limit: ${count || "none"})`,
       );
 
+      // Refresh the in-memory cache (merged by clip id) so a later poll against
+      // a sleeping battery camera can be served without waking it.
+      this.updateVideoClipsCache(clips, nowMs);
+
       return clips;
     } catch (e: any) {
       const message = e instanceof Error ? e.message : String(e);
@@ -1162,8 +1199,98 @@ export class ReolinkCamera
           error: message,
         });
       }
+
+      // Resilience: if a live fetch fails, fall back to any cached clips for the
+      // requested window rather than reporting an empty list. This keeps already
+      // downloaded thumbnails/clips visible instead of "disappearing" on a
+      // transient failure (common on battery cameras mid sleep/wake).
+      const stale = this.getCachedVideoClipsInWindow(
+        start.getTime(),
+        end.getTime(),
+      );
+      if (stale.length) {
+        logger.warn(
+          `getVideoClips: live fetch failed, returning ${stale.length} stale cached clips`,
+        );
+        return count ? stale.slice(0, count) : stale;
+      }
+
       return [];
     }
+  }
+
+  /**
+   * Return cached clips for the [startMs, endMs] window (inclusive), sorted by
+   * most recent first. Does not consider freshness — see
+   * {@link getFreshCachedVideoClips} for the TTL-gated variant.
+   */
+  private getCachedVideoClipsInWindow(
+    startMs: number,
+    endMs: number,
+  ): VideoClip[] {
+    const cache = this.videoClipsCache;
+    if (!cache) {
+      return [];
+    }
+    return cache.clips
+      .filter(
+        (c) =>
+          typeof c.startTime === "number" &&
+          c.startTime >= startMs &&
+          c.startTime <= endMs,
+      )
+      .sort((a, b) => (b.startTime ?? 0) - (a.startTime ?? 0));
+  }
+
+  /**
+   * Return cached clips for the requested window only if the cache is still
+   * fresh (younger than the configured TTL). Returns undefined when there is no
+   * cache or it is stale, signalling the caller to perform a live fetch.
+   */
+  private getFreshCachedVideoClips(
+    startMs: number,
+    endMs: number,
+    nowMs: number,
+  ): VideoClip[] | undefined {
+    const cache = this.videoClipsCache;
+    if (!cache) {
+      return undefined;
+    }
+    const ttlMinutes =
+      this.storageSettings.values.videoclipsCacheStaleMinutes ?? 15;
+    const ttlMs = Math.max(0, ttlMinutes) * 60 * 1000;
+    if (nowMs - cache.fetchedAt > ttlMs) {
+      return undefined;
+    }
+    return this.getCachedVideoClipsInWindow(startMs, endMs);
+  }
+
+  /**
+   * Merge freshly fetched clips into the in-memory cache (keyed by clip id) and
+   * stamp it fresh. Old clips outside the preload window are pruned to bound
+   * memory. Merging (rather than replacing) preserves the broad coverage built
+   * by the auto-load pass when a narrower viewer request comes in.
+   */
+  private updateVideoClipsCache(clips: VideoClip[], fetchedAt: number): void {
+    const byId = new Map<string, VideoClip>();
+    for (const c of this.videoClipsCache?.clips ?? []) {
+      byId.set(c.id, c);
+    }
+    for (const c of clips) {
+      byId.set(c.id, c);
+    }
+
+    const daysToPreload =
+      this.storageSettings.values.videoclipsDaysToPreload ?? 1;
+    // Keep a small grace margin so clips straddling the window edge are retained.
+    const cutoffMs =
+      fetchedAt - (daysToPreload + 1) * 24 * 60 * 60 * 1000;
+
+    const merged = Array.from(byId.values()).filter((c) =>
+      typeof c.startTime === "number" ? c.startTime >= cutoffMs : true,
+    );
+
+    this.videoClipsCache = { clips: merged, fetchedAt };
   }
 
   /**
