@@ -1975,7 +1975,14 @@ export class ReolinkCamera
   }
 
   protected isDebugEnabled(): boolean {
-    return this.storageSettings.values.debugLogs;
+    // Called from the logger on every debug(), including from teardown paths
+    // that run after Scrypted has released the device and `storageSettings`
+    // is gone. See issue #8.
+    try {
+      return !!this.storageSettings?.values?.debugLogs;
+    } catch {
+      return false;
+    }
   }
 
   protected isBatteryDevice(): boolean {

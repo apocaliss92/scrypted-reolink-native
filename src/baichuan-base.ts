@@ -69,8 +69,23 @@ export class BaichuanLogger implements Console {
   }
 
   debug(...args: any[]): void {
-    if (this.isDebugEnabledCallback()) {
+    // The callback reads device storage, which is gone once Scrypted releases
+    // the device. A throw here used to propagate into whatever was logging —
+    // most damagingly `closeListener`, an async handler whose first statement
+    // is a debug() call: it rejected before releasing the session, so every
+    // subsequent close leaked one (issue #8, 227 aborted closes in the field).
+    // Logging must never be able to break the caller.
+    let enabled = false;
+    try {
+      enabled = this.isDebugEnabledCallback();
+    } catch {
+      enabled = false;
+    }
+    if (!enabled) return;
+    try {
       this.baseLogger.debug(this.formatMessage("DEBUG", ...args));
+    } catch {
+      // A logger that cannot log is not a reason to fail the operation.
     }
   }
 
@@ -176,6 +191,16 @@ export class BaichuanLogger implements Console {
  */
 export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
   protected baichuanApi: ReolinkBaichuanApi | undefined;
+  /**
+   * Upper bound on a single connect attempt.
+   *
+   * Generous on purpose: a sleeping battery camera legitimately takes many
+   * seconds to answer, and the point is not to be aggressive but to guarantee
+   * the cached promise always settles, so a hang costs one retry cycle rather
+   * than the life of the process.
+   */
+  protected static readonly ENSURE_CLIENT_TIMEOUT_MS = 45_000;
+
   protected ensureClientPromise: Promise<ReolinkBaichuanApi> | undefined;
   protected connectionTime: number | undefined;
   transport: BaichuanTransport;
@@ -495,8 +520,22 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
 
     logger.log(`ensureBaichuanClient: creating NEW client (caller: ${caller})`);
 
-    // IMPORTANT: Assign the promise BEFORE the backoff to prevent parallel reconnections
-    this.ensureClientPromise = (async () => {
+    // IMPORTANT: Assign the promise BEFORE the backoff to prevent parallel reconnections.
+    //
+    // This promise is also what every concurrent caller awaits via the fast
+    // path at the top of this method — and only the originating call has the
+    // `finally` that clears it. So if it never settles, the cache is pinned
+    // forever and every later caller queues behind a dead promise: the camera
+    // stays broken until Scrypted itself is restarted, which is exactly what
+    // was reported in issue #9 (36 hours dead, prebuffer retrying every 5s
+    // against a promise that could never resolve).
+    //
+    // The body awaits several things that talk to a camera which may have just
+    // rebooted — cleanup and close first, then connect and login. Rather than
+    // reason about which of them can hang, bound the whole thing: on timeout
+    // the promise rejects, the `finally` clears the cache, and the next caller
+    // gets a clean attempt.
+    const inner = (async () => {
       // Apply backoff to avoid aggressive reconnection after disconnection
       // This is now INSIDE the promise so concurrent callers will wait on the same promise
       if (this.lastDisconnectTime > 0) {
@@ -567,11 +606,35 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       }
     })();
 
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    this.ensureClientPromise = Promise.race([
+      inner,
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          logger.warn(
+            `ensureBaichuanClient: timed out after ${BaseBaichuanClass.ENSURE_CLIENT_TIMEOUT_MS}ms ` +
+              `(caller: ${caller}) — releasing the cached promise so the next attempt can retry`,
+          );
+          reject(
+            new Error(
+              `ensureBaichuanClient timed out after ${BaseBaichuanClass.ENSURE_CLIENT_TIMEOUT_MS}ms`,
+            ),
+          );
+        }, BaseBaichuanClass.ENSURE_CLIENT_TIMEOUT_MS);
+      }),
+    ]);
+
     try {
       return await this.ensureClientPromise;
     } finally {
       // Allow future reconnects and avoid pinning rejected promises
+      if (timeoutHandle) clearTimeout(timeoutHandle);
       this.ensureClientPromise = undefined;
+      // The losing side of the race keeps running; make sure a late failure
+      // cannot surface as an unhandled rejection.
+      inner.catch(() => {
+        // already reported through the race
+      });
     }
   }
 

@@ -247,7 +247,12 @@ export class ReolinkNativeNvrDevice
   }
 
   protected isDebugEnabled(): boolean {
-    return this.storageSettings.values.debugLogs || false;
+    // Same teardown hazard as the camera implementation — see issue #8.
+    try {
+      return !!this.storageSettings?.values?.debugLogs;
+    } catch {
+      return false;
+    }
   }
 
   protected getDeviceName(): string {
