@@ -11,10 +11,14 @@ import sdk, {
 } from "@scrypted/sdk";
 import type ReolinkNativePlugin from "./main";
 import { ReolinkNativeIntercomMixin } from "./intercom-mixin";
+import { isMixinFirst, withMixinFirst } from "./mixin-order";
 
 export const INTERCOM_PROVIDER_NATIVE_ID = "reolink-native-intercom";
 
-const AUTO_INCLUDE_TOKEN = "v1";
+// Bumped to v2 so devices auto-enabled by an earlier version are revisited once
+// and, if the intercom mixin is not first in the chain, moved there. See
+// maybeEnableMixin for why the position decides whether two-way audio works.
+const AUTO_INCLUDE_TOKEN = "v2";
 
 export class ReolinkNativeIntercom
   extends ScryptedDeviceBase
@@ -58,10 +62,19 @@ export class ReolinkNativeIntercom
   }
 
   private async maybeEnableMixin(device: ScryptedDevice) {
-    if (!device || device.mixins?.includes(this.id)) return;
+    if (!device) return;
 
-    // Already auto-enabled once with this token
+    const alreadyInstalled = !!device.mixins?.includes(this.id);
+
+    // Already handled once with this token.
     if (this.hasEnabledMixin[device.id] === AUTO_INCLUDE_TOKEN) return;
+
+    // Installed by a previous version, but possibly in the wrong position —
+    // fall through so the ordering below can correct it.
+    if (alreadyInstalled && isMixinFirst(device.mixins, this.id)) {
+      this.markHandled(device.id);
+      return;
+    }
 
     const match = await this.canMixin(device.type, device.interfaces);
     if (!match) return;
@@ -77,13 +90,30 @@ export class ReolinkNativeIntercom
     if (!caps) return;
     if (!caps.hasIntercom) return;
 
-    this.console.log(`Auto-enabling intercom mixin for ${device.name}`);
-    const mixins = (device.mixins || []).slice();
-    mixins.push(this.id);
+    // Order decides whether two-way audio works at all — see mixin-order.ts.
+    // Appending put us after the WebRTC mixin, which then never saw `Intercom`,
+    // negotiated `recvonly`, and left the client without a microphone track.
+    const mixins = withMixinFirst(device.mixins, this.id);
+
+    this.console.log(
+      alreadyInstalled
+        ? `Moving intercom mixin to the front for ${device.name} so two-way audio can negotiate a microphone`
+        : `Auto-enabling intercom mixin for ${device.name}`,
+    );
+
     const plugins = await this.pluginsComponent;
     await plugins.setMixins(device.id, mixins);
 
-    this.hasEnabledMixin[device.id] = AUTO_INCLUDE_TOKEN;
+    this.markHandled(device.id);
+  }
+
+  /**
+   * Record that this device has been dealt with for the current token, so the
+   * ordering above runs once and does not fight a user who later reorders their
+   * mixins deliberately.
+   */
+  private markHandled(deviceId: string): void {
+    this.hasEnabledMixin[deviceId] = AUTO_INCLUDE_TOKEN;
     this.storage.setItem(
       "hasEnabledMixin",
       JSON.stringify(this.hasEnabledMixin),
