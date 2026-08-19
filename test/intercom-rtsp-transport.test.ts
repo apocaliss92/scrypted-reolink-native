@@ -20,9 +20,18 @@ import { ReolinkBaichuanIntercom } from "../src/intercom";
 // `buildFfmpegPcmArgs` is private; the behaviour under test is what it puts on
 // the command line, so reach it through the prototype rather than reshaping the
 // class for the test.
-function buildArgs(ffmpegInput: unknown): string[] {
+function buildArgs(ffmpegInput: unknown, logger?: unknown): string[] {
   const build = (ReolinkBaichuanIntercom.prototype as any).buildFfmpegPcmArgs;
-  return build.call({}, ffmpegInput, { sampleRate: 16000, channels: 1 });
+  return build.call({}, ffmpegInput, {
+    sampleRate: 16000,
+    channels: 1,
+    ...(logger ? { logger } : {}),
+  });
+}
+
+function decoderOf(args: string[]): string | undefined {
+  const i = args.indexOf("-acodec");
+  return i === -1 ? undefined : args[i + 1];
 }
 
 function transportOf(args: string[]): string | undefined {
@@ -104,5 +113,100 @@ describe("intercom ffmpeg transport selection (issue #17)", () => {
 
     expect(args.filter((a) => a === "-i")).toHaveLength(1);
     expect(args[args.indexOf("-i") + 1]).toBe("rtsp://127.0.0.1:1");
+  });
+});
+
+/**
+ * Talkback worked from Scrypted's own UI but not from an iPhone.
+ *
+ * Scrypted's HomeKit plugin names the return-audio decoder explicitly —
+ * `["-acodec", isOpus ? "libopus" : "libfdk_aac", "-i", rtspUrl]` — and both
+ * names are ffmpeg build options. When the local build lacks one, ffmpeg prints
+ * `Unknown decoder` and exits before opening the input. The WebRTC path passes
+ * no decoder override, which is exactly why it was unaffected.
+ */
+describe("intercom input decoder rewriting (HomeKit talkback)", () => {
+  it("rewrites libopus to the built-in opus decoder", () => {
+    const args = buildArgs({
+      url: "rtsp://127.0.0.1:42077",
+      inputArguments: ["-acodec", "libopus", "-i", "rtsp://127.0.0.1:42077"],
+    });
+
+    expect(decoderOf(args)).toBe("opus");
+    expect(args).not.toContain("libopus");
+  });
+
+  it("rewrites libfdk_aac to the built-in aac decoder", () => {
+    // The non-free one: absent from essentially every distributed ffmpeg.
+    const args = buildArgs({
+      url: "rtsp://127.0.0.1:42077",
+      inputArguments: ["-acodec", "libfdk_aac", "-i", "rtsp://127.0.0.1:42077"],
+    });
+
+    expect(decoderOf(args)).toBe("aac");
+    expect(args).not.toContain("libfdk_aac");
+  });
+
+  it("keeps the decoder before -i, where it selects the input decoder", () => {
+    const args = buildArgs({
+      url: "rtsp://127.0.0.1:42077",
+      inputArguments: ["-acodec", "libopus", "-i", "rtsp://127.0.0.1:42077"],
+    });
+
+    expect(args.indexOf("-acodec")).toBeLessThan(args.indexOf("-i"));
+  });
+
+  it("handles the -c:a spelling too", () => {
+    const args = buildArgs({
+      url: "rtsp://127.0.0.1:42077",
+      inputArguments: ["-c:a", "libopus", "-i", "rtsp://127.0.0.1:42077"],
+    });
+
+    expect(args[args.indexOf("-c:a") + 1]).toBe("opus");
+  });
+
+  it("leaves a decoder that is always available alone", () => {
+    const args = buildArgs({
+      url: "rtsp://127.0.0.1:42077",
+      inputArguments: ["-acodec", "pcm_mulaw", "-i", "rtsp://127.0.0.1:42077"],
+    });
+
+    expect(decoderOf(args)).toBe("pcm_mulaw");
+  });
+
+  it("does not disturb the output encoder, which is also -acodec", () => {
+    const args = buildArgs({
+      url: "rtsp://127.0.0.1:42077",
+      inputArguments: ["-acodec", "libopus", "-i", "rtsp://127.0.0.1:42077"],
+    });
+
+    // The last -acodec is the output one and must stay pcm_s16le.
+    const last = args.lastIndexOf("-acodec");
+    expect(args[last + 1]).toBe("pcm_s16le");
+    expect(last).toBeGreaterThan(args.indexOf("-i"));
+  });
+
+  it("says what it rewrote, so the next log explains itself", () => {
+    const lines: string[] = [];
+    buildArgs(
+      {
+        url: "rtsp://127.0.0.1:42077",
+        inputArguments: ["-acodec", "libfdk_aac", "-i", "rtsp://127.0.0.1:42077"],
+      },
+      { log: (m: string) => lines.push(m) },
+    );
+
+    expect(lines.join("\n")).toMatch(/libfdk_aac.*aac/);
+  });
+
+  it("still applies the TCP transport fix alongside the rewrite", () => {
+    // The real HomeKit shape: a decoder override and no transport.
+    const args = buildArgs({
+      url: "rtsp://127.0.0.1:42077",
+      inputArguments: ["-acodec", "libopus", "-i", "rtsp://127.0.0.1:42077"],
+    });
+
+    expect(decoderOf(args)).toBe("opus");
+    expect(transportOf(args)).toBe("tcp");
   });
 });

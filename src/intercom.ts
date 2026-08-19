@@ -46,6 +46,39 @@ export interface IntercomHost {
 // This clamps the internal buffer to (approximately) one block.
 const DEFAULT_MAX_BACKLOG_MS = 120;
 
+/**
+ * Input decoders that ffmpeg only has when it was compiled with the matching
+ * external library, mapped to the built-in decoder for the same codec.
+ *
+ * Scrypted's HomeKit plugin names the return-audio decoder explicitly:
+ *
+ *     inputArguments: ["-acodec", isOpus ? "libopus" : "libfdk_aac", "-i", rtspUrl]
+ *
+ * Both names are build options. `libfdk_aac` is non-free and is left out of
+ * essentially every distributed ffmpeg; `libopus` is common but not guaranteed.
+ * When the name is missing ffmpeg does not fall back — it prints
+ * `Unknown decoder '...'` and exits before opening the input, so talkback dies
+ * instantly with no audio.
+ *
+ * The built-in `opus` and `aac` decoders are always compiled in, and the
+ * built-in AAC decoder handles the AAC-ELD profile HomeKit uses. Rewriting
+ * keeps the caller's intent (decode this codec) while dropping the dependency
+ * on how the local ffmpeg happened to be built.
+ *
+ * This only bites the HomeKit path: Scrypted's own WebRTC path passes no
+ * decoder override at all, which is why talkback worked everywhere except from
+ * an iPhone.
+ */
+const NATIVE_DECODER_EQUIVALENTS: Record<string, string> = {
+  libopus: "opus",
+  libfdk_aac: "aac",
+};
+
+/** `-acodec` and the `-c:a` family both select the audio decoder before `-i`. */
+function isAudioDecoderFlag(arg: string | undefined): boolean {
+  return arg === "-acodec" || arg === "-c:a" || /^-c:a:\d+$/.test(arg ?? "");
+}
+
 export class ReolinkBaichuanIntercom {
   private session:
     | Awaited<ReturnType<ReolinkBaichuanApi["createDedicatedTalkSession"]>>
@@ -534,6 +567,24 @@ export class ReolinkBaichuanIntercom {
 
       if (arg === "-rtsp_transport") {
         hasRtspTransport = true;
+      }
+
+      // Input decoder override: rewrite optional external decoders to the
+      // built-in equivalent. See NATIVE_DECODER_EQUIVALENTS.
+      if (isAudioDecoderFlag(arg)) {
+        const requested = inputArgs[i + 1];
+        const native = requested
+          ? NATIVE_DECODER_EQUIVALENTS[requested]
+          : undefined;
+        if (native) {
+          options.logger?.log?.(
+            `Intercom: input decoder '${requested}' rewritten to '${native}' ` +
+              `(the built-in decoder is always present; '${requested}' is a build option)`,
+          );
+          sanitizedArgs.push(arg, native);
+          i++;
+          continue;
+        }
       }
 
       sanitizedArgs.push(arg);
