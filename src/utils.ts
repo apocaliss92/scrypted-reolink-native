@@ -79,38 +79,11 @@ export const getDeviceInterfaces = (props: {
       hasFloodlight,
       hasPir,
       hasBattery,
-      hasIntercom,
       isDoorbell,
     } = capabilities;
 
     if (hasPtz) {
       interfaces.push(ScryptedInterface.PanTiltZoom);
-    }
-    if (hasIntercom) {
-      // Declared on the device itself, not left to the intercom mixin, and the
-      // distinction decides whether two-way audio can work at all.
-      //
-      // Scrypted composes mixins in array order and passes each one only the
-      // interfaces accumulated before it (`previousInterfaces` in
-      // server/src/plugin/plugin-device.ts). The WebRTC mixin reads that list:
-      //
-      //     const hasIntercom = this.mixinDeviceInterfaces.includes(ScryptedInterface.Intercom);
-      //     ...
-      //     hasIntercom ? 'sendrecv' : 'recvonly',
-      //
-      // and `recvonly` makes it call `addTransceiver(atrack, { direction })`
-      // with a direction that refuses a client microphone track. The client is
-      // then never asked for one — iOS never shows the orange recording
-      // indicator — and `setPlaybackInternal` parks forever on
-      // `audioTransceiver.onTrack.asPromise()`, so `startIntercom` is never
-      // reached and the plugin logs nothing at all.
-      //
-      // A mixin-supplied interface only reaches mixins ordered after it, which
-      // made this depend on chain order. Interfaces provided by the device are
-      // the base every mixin starts from, so this is order-independent. It is
-      // also what the official @scrypted/reolink plugin does: its ReolinkCamera
-      // implements Intercom directly and lists it in the device manifest.
-      interfaces.push(ScryptedInterface.Intercom);
     }
     interfaces.push(ScryptedInterface.ObjectDetector);
     if (hasSiren || hasFloodlight || hasPir)
