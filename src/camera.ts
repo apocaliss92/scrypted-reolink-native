@@ -16,6 +16,7 @@ import sdk, {
   ChargeState,
   Device,
   DeviceProvider,
+  Intercom,
   MediaObject,
   MediaStreamUrl,
   ObjectDetectionTypes,
@@ -105,6 +106,7 @@ import { EMAIL_PUSH_SERVER_NATIVE_ID } from "./email-push-server-device";
 import ReolinkNativePlugin from "./main";
 import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
+import { ReolinkBaichuanIntercom, type IntercomHost } from "./intercom";
 import { ReolinkPtzPresets } from "./presets";
 import {
   createRfc4571MediaObjectFromStreamManager,
@@ -153,7 +155,8 @@ export class ReolinkCamera
     VideoTextOverlays,
     BinarySensor,
     Reboot,
-    VideoClips
+    VideoClips,
+    Intercom
 {
   private readonly onSimpleEventBound = (ev: ReolinkSimpleEvent) =>
     this.onSimpleEvent(ev);
@@ -235,6 +238,30 @@ export class ReolinkCamera
         "Order preference for video streams. Default order varies by camera type.",
       defaultValue: "Default",
       choices: ["Default", "Native", "RTSP", "RTMP"],
+    },
+    intercomBlocksPerPayload: {
+      group: "Intercom",
+      title: "Blocks Per Payload",
+      description:
+        "Lower reduces latency (more packets). Typical: 1-4. Requires restarting talk session to take effect.",
+      type: "number",
+      defaultValue: 1,
+    },
+    intercomMaxBacklogMs: {
+      group: "Intercom",
+      title: "Max Backlog (ms)",
+      description:
+        "Maximum PCM backlog before dropping old audio to cap latency. Higher improves stability on slow systems but increases latency. Typical: 80-250. Requires restarting talk session to take effect.",
+      type: "number",
+      defaultValue: 120,
+    },
+    intercomGain: {
+      group: "Intercom",
+      title: "Gain",
+      description:
+        "Output gain multiplier applied before encoding. 1.0 = normal, 2.0 ≈ +6dB, 0.5 ≈ -6dB. Requires restarting talk session to take effect.",
+      type: "number",
+      defaultValue: 1.0,
     },
     keyframeTimeoutMs: {
       title: "Keyframe Timeout (ms)",
@@ -4096,6 +4123,74 @@ export class ReolinkCamera
       }
       throw e;
     }
+  }
+
+  /**
+   * Native two-way audio.
+   *
+   * The intercom mixin still exists and still wins when it is enabled — it
+   * wraps this device, so Scrypted routes `Intercom` to it. This is the
+   * fallback for when it is not, and, more importantly, it is what lets the
+   * device advertise `ScryptedInterface.Intercom` itself: see the note in
+   * getDeviceInterfaces for why a mixin-supplied interface was not enough for
+   * WebRTC to negotiate a microphone.
+   */
+  private nativeIntercom: ReolinkBaichuanIntercom | undefined;
+
+  private buildIntercomHost(): IntercomHost {
+    const self = this;
+    const clamp = (v: unknown, lo: number, hi: number, fallback: number) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : fallback;
+    };
+
+    return {
+      get blocksPerPayload() {
+        return clamp(
+          self.storageSettings.values.intercomBlocksPerPayload,
+          1,
+          8,
+          1,
+        );
+      },
+      get outputGain() {
+        return clamp(self.storageSettings.values.intercomGain, 0.1, 10, 1.0);
+      },
+      get maxBacklogMs() {
+        return clamp(
+          self.storageSettings.values.intercomMaxBacklogMs,
+          20,
+          5000,
+          120,
+        );
+      },
+      get channel() {
+        return self.storageSettings.values.rtspChannel;
+      },
+      get isBatteryCamera() {
+        return self.isBattery;
+      },
+      get deviceId() {
+        return self.nativeId;
+      },
+      get logger() {
+        return self.getBaichuanLogger();
+      },
+      ensureApi: () => self.ensureBaichuanClient(),
+      withRetry: (fn) => self.withBaichuanRetry(fn),
+    };
+  }
+
+  async startIntercom(media: MediaObject): Promise<void> {
+    await this.stopIntercom();
+    this.nativeIntercom = new ReolinkBaichuanIntercom(this.buildIntercomHost());
+    await this.nativeIntercom.start(media);
+  }
+
+  async stopIntercom(): Promise<void> {
+    const intercom = this.nativeIntercom;
+    this.nativeIntercom = undefined;
+    if (intercom) await intercom.stop();
   }
 
   async ensureClient(): Promise<ReolinkBaichuanApi> {

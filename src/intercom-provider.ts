@@ -79,6 +79,16 @@ export class ReolinkNativeIntercom
     const match = await this.canMixin(device.type, device.interfaces);
     if (!match) return;
 
+    // Cameras from this plugin now implement Intercom themselves, so the mixin
+    // would only duplicate the implementation and its settings group. It stays
+    // available for cameras from the official @scrypted/reolink plugin, which
+    // is the case it exists for, and stays in place on devices where a previous
+    // version already enabled it.
+    if (device.interfaces?.includes(ScryptedInterface.Intercom)) {
+      this.markHandled(device.id);
+      return;
+    }
+
     // Only auto-enable for cameras provided by our own plugin
     const camera = this.plugin?.camerasMap?.get(device.id);
     if (!camera) return;
