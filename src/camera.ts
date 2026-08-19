@@ -236,6 +236,36 @@ export class ReolinkCamera
       defaultValue: "Default",
       choices: ["Default", "Native", "RTSP", "RTMP"],
     },
+    keyframeTimeoutMs: {
+      title: "Keyframe Timeout (ms)",
+      description:
+        "How long to wait for the first keyframe before treating a stream as " +
+        "dead. Leave empty for the automatic value: 20000 for battery/solar " +
+        "and composite streams, otherwise the library default of 5000. Raise " +
+        "it if a camera that is slow to wake reports as not responding.",
+      type: "number",
+      placeholder: "auto",
+      onPut: async () => {
+        await this.initStreamManager(undefined, true);
+      },
+    },
+    refreshStreamOptions: {
+      title: "Refresh Stream List",
+      description:
+        "Re-read the available streams from the camera. Use this if a stream " +
+        "source you expect (for example the H.264 sub stream) is missing from " +
+        "the Streams dropdown: the list is cached, so a camera that answered " +
+        "incompletely once stays incomplete until it is re-read.",
+      type: "button",
+      immediate: true,
+      onPut: async () => {
+        this.cachedVideoStreamOptions = undefined;
+        const streams = await this.getVideoStreamOptions();
+        this.getBaichuanLogger()?.log(
+          `Stream list refreshed: ${streams.map((s) => s.name).join(", ") || "none"}`,
+        );
+      },
+    },
     multifocalInfo: {
       json: true,
       hide: true,
@@ -2253,9 +2283,20 @@ export class ReolinkCamera
         password,
       },
       sharedConnection: this.isBattery || !!this.nvrDevice,
+      batteryCamera: this.isBattery,
       // Pass nativeId for dedicated socket sessions (avoids stream interference)
       deviceId: this.id,
     };
+
+    const configuredKeyframeTimeout = Number(
+      this.storageSettings.values.keyframeTimeoutMs,
+    );
+    if (
+      Number.isFinite(configuredKeyframeTimeout) &&
+      configuredKeyframeTimeout > 0
+    ) {
+      baseOptions.keyframeTimeoutMs = configuredKeyframeTimeout;
+    }
 
     if (this.isMultiFocal) {
       const {
@@ -3784,6 +3825,7 @@ export class ReolinkCamera
     > => {
       try {
         let streams: UrlMediaStreamOptions[] = [];
+        let enumerationFailed = false;
 
         const client = await this.ensureClient();
 
@@ -3934,6 +3976,7 @@ export class ReolinkCamera
             } as any);
           }
         } catch (e) {
+          enumerationFailed = true;
           if (!this.isRecoverableBaichuanError?.(e)) {
             logger.error(
               "Failed to build RTSP/RTMP stream options, falling back to Native",
@@ -3947,10 +3990,26 @@ export class ReolinkCamera
           streams.map((s) => s.name).join(", "),
         );
         logger.debug(JSON.stringify({ streams }));
-        this.cachedVideoStreamOptions = streams;
-        return streams;
 
-        return [];
+        // Only cache a complete enumeration.
+        //
+        // The cache is read as `cachedVideoStreamOptions?.length`, so any
+        // non-empty list wins for the lifetime of the device. Caching a list
+        // built by a run that threw part-way through therefore pins whatever
+        // subset happened to be pushed before the failure — that is issue #21:
+        // a dual-lens camera whose enumeration degraded once was left with only
+        // the main-stream sources, with no way back short of a plugin restart.
+        // An empty list was already safe (length 0 is falsy, so it retries);
+        // a partial one was not.
+        if (enumerationFailed) {
+          logger.warn(
+            `Stream enumeration did not complete (${streams.length} source(s) found). ` +
+              `Not caching — the next request will retry.`,
+          );
+        } else {
+          this.cachedVideoStreamOptions = streams;
+        }
+        return streams;
       } finally {
         // Always clear the promise when done (success or failure)
         this.fetchingStreamsPromise = undefined;

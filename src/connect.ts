@@ -33,14 +33,56 @@ export function normalizeUid(uid?: string): string | undefined {
   return v ? v : undefined;
 }
 
+/**
+ * Fail loudly, and legibly, when the library barrel hands back something that
+ * cannot be constructed.
+ *
+ * Issue #22 reported `pu is not a constructor` from inside autodetect. `pu` is
+ * the minified name the plugin bundle gives `ReolinkBaichuanApi`, so the symbol
+ * had resolved to a non-constructor at the call site — but a minified identifier
+ * tells the user nothing and tells us almost as little.
+ *
+ * This does not fix that (it has not been reproduced against any published
+ * build, and the construction site in autodetect lives in the library). It does
+ * mean the plugin's own construction path reports what it actually got instead
+ * of an opaque two-letter name.
+ */
+export function assertConstructible<T>(
+  value: T,
+  exportName: string,
+  moduleName: string,
+): T {
+  if (typeof value === "function") return value;
+
+  const describe = () => {
+    if (value === undefined) return "undefined";
+    if (value === null) return "null";
+    if (typeof value === "object") {
+      const keys = Object.keys(value as object).slice(0, 10);
+      return `${typeof value} with keys [${keys.join(", ")}]`;
+    }
+    return `${typeof value} (${String(value)})`;
+  };
+
+  throw new Error(
+    `${moduleName} did not export a constructible '${exportName}': got ${describe()}. ` +
+      `This usually means the module resolved to an unexpected shape — please report ` +
+      `this along with your Scrypted and Node versions.`,
+  );
+}
+
 export async function createBaichuanApi(props: {
   inputs: BaichuanConnectInputs;
   transport: BaichuanTransport;
 }): Promise<ReolinkBaichuanApi> {
   const { inputs, transport } = props;
   const { logger } = inputs;
-  const { ReolinkBaichuanApi } =
-    await import("@apocaliss92/nodelink-js");
+  const mod = await import("@apocaliss92/nodelink-js");
+  const ReolinkBaichuanApi = assertConstructible(
+    mod.ReolinkBaichuanApi,
+    "ReolinkBaichuanApi",
+    "@apocaliss92/nodelink-js",
+  );
 
   const base: BaichuanClientOptions = {
     host: inputs.host,

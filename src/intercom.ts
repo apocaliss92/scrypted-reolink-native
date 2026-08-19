@@ -69,6 +69,10 @@ export class ReolinkBaichuanIntercom {
   private pumpPromise: Promise<void> | undefined;
 
   private lastBacklogClampLogAtMs = 0;
+  private droppedBytesSinceLog = 0;
+  private clampCountSinceLog = 0;
+  /** s16 mono byte rate of the talk session, used to report drops in ms. */
+  private pcmBytesPerSecond = 0;
 
   constructor(private host: IntercomHost) {}
 
@@ -141,6 +145,9 @@ export class ReolinkBaichuanIntercom {
 
       this.session = session;
       this.resetPcmQueue();
+      this.lastBacklogClampLogAtMs = 0;
+      this.droppedBytesSinceLog = 0;
+      this.clampCountSinceLog = 0;
       this.pumping = false;
       this.pumpPromise = undefined;
 
@@ -160,10 +167,11 @@ export class ReolinkBaichuanIntercom {
       // Mirror native-api.ts: receive PCM s16le from the forwarder and encode IMA ADPCM in JS.
       const samplesPerBlock = blockSize * 2 + 1;
       const bytesNeeded = samplesPerBlock * 2; // Int16 PCM
+      // bytes/sec = sampleRate * channels * 2 (s16)
+      this.pcmBytesPerSecond = sampleRate * 1 * 2;
       this.maxBacklogBytes = Math.max(
         bytesNeeded,
-        // bytes/sec = sampleRate * channels * 2 (s16)
-        Math.floor((this.maxBacklogMs / 1000) * sampleRate * 1 * 2),
+        Math.floor((this.maxBacklogMs / 1000) * this.pcmBytesPerSecond),
       );
 
       if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
@@ -418,14 +426,33 @@ export class ReolinkBaichuanIntercom {
       const dropped = this.pcmQueuedBytes - keep;
       this.dropOldestPcm(dropped);
 
+      // Accumulate across the rate-limit window. Logging only the most recent
+      // clamp made a continuously-starved pipeline look like it was dropping a
+      // couple hundred bytes every two seconds, when the real figure is the sum
+      // of every clamp in between (issue #17).
+      this.droppedBytesSinceLog += dropped;
+      this.clampCountSinceLog++;
+
       const now = Date.now();
       if (now - this.lastBacklogClampLogAtMs > 2000) {
-        this.lastBacklogClampLogAtMs = now;
+        const windowMs = this.lastBacklogClampLogAtMs
+          ? now - this.lastBacklogClampLogAtMs
+          : 0;
+        // bytes -> ms of audio: s16 mono at the talk session's sample rate.
+        const bytesPerMs = (this.pcmBytesPerSecond || 0) / 1000;
         logger.warn("Intercom backlog clamped (dropping PCM)", {
-          droppedBytes: dropped,
+          droppedBytes: this.droppedBytesSinceLog,
+          clamps: this.clampCountSinceLog,
+          windowMs,
+          droppedAudioMs: bytesPerMs
+            ? Math.round(this.droppedBytesSinceLog / bytesPerMs)
+            : undefined,
           keptBytes: keep,
           maxBytes,
         });
+        this.lastBacklogClampLogAtMs = now;
+        this.droppedBytesSinceLog = 0;
+        this.clampCountSinceLog = 0;
       }
     }
 
@@ -475,18 +502,21 @@ export class ReolinkBaichuanIntercom {
     // FFmpegInput may already contain one or more "-i" entries.
     // For intercom decode, we only need a single input and only the first audio stream.
     //
-    // IMPORTANT: We must also strip `-rtsp_transport tcp` (and similar transport
-    // overrides) inherited from the upstream FFmpegInput.  The RTSP URL points at a
-    // local relay server (e.g. from the WebRTC plugin) that typically only supports
-    // RTP/UDP.  Forcing TCP causes ffmpeg to hang on SETUP negotiation (the relay
-    // replies 461 Unsupported Transport) and eventually get SIGKILLed with no audio
-    // ever reaching the intercom pipeline.
+    // Transport note (issue #17): this used to strip `-rtsp_transport` on the
+    // theory that the local relay only spoke RTP/UDP. That is backwards.  The
+    // URL points at a Scrypted `RtspServer`, whose SETUP handler accepts TCP
+    // unconditionally but answers UDP with `461 Unsupported Transport` unless
+    // it was constructed with the opt-in `udp` flag — which the intercom
+    // relays are not.  Dropping the flag left ffmpeg on its default, which
+    // tries UDP first: every session paid a failed SETUP round trip, and with
+    // `-analyzeduration 0 -probesize 512` there was often not enough margin
+    // left for the TCP retry to deliver audio before the startup timeout.
+    //
+    // So: keep whatever transport the upstream FFmpegInput asked for, and when
+    // it does not ask, pin RTSP inputs to TCP ourselves.
     const sanitizedArgs: string[] = [];
     let chosenInput: string | undefined;
-
-    // Set of pre-input flags that take a value argument and should be stripped
-    // because they conflict with the local RTSP relay's transport capabilities.
-    const stripWithValue = new Set(["-rtsp_transport"]);
+    let hasRtspTransport = false;
 
     for (let i = 0; i < inputArgs.length; i++) {
       const arg = inputArgs[i];
@@ -502,10 +532,8 @@ export class ReolinkBaichuanIntercom {
         }
       }
 
-      // Strip transport-related flags that break the local RTSP relay.
-      if (stripWithValue.has(arg)) {
-        i++; // skip the value argument as well
-        continue;
+      if (arg === "-rtsp_transport") {
+        hasRtspTransport = true;
       }
 
       sanitizedArgs.push(arg);
@@ -514,6 +542,11 @@ export class ReolinkBaichuanIntercom {
     const url = chosenInput ?? ffmpegInput.url;
     if (!url) {
       throw new Error("FFmpegInput missing url/input");
+    }
+
+    // Only meaningful for RTSP inputs; harmless to omit for anything else.
+    if (!hasRtspTransport && url.startsWith("rtsp://")) {
+      sanitizedArgs.push("-rtsp_transport", "tcp");
     }
 
     const gain = options.gain ?? 1.0;

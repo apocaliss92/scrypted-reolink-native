@@ -32,6 +32,17 @@ export interface StreamManagerOptions {
   };
   /** If true, the stream client is shared with the main connection. Default: false. */
   sharedConnection?: boolean;
+  /**
+   * True for battery/solar cameras, which sleep and can take several seconds to
+   * wake before the first keyframe arrives. Distinct from `sharedConnection`,
+   * which is also true for NVR/Hub channels.
+   */
+  batteryCamera?: boolean;
+  /**
+   * Explicit keyframe wait, in ms. When unset the timeout is derived from the
+   * stream kind — see `resolveStreamTimeouts`.
+   */
+  keyframeTimeoutMs?: number;
   /** Composite stream options for multifocal cameras */
   compositeOptions?: CompositeStreamPipOptions;
   /**
@@ -267,6 +278,39 @@ export class StreamManager {
   }
 
   /**
+   * How long to wait for the first keyframe, and how long an idle stream may
+   * linger before teardown.
+   *
+   * The library default (5s) assumes a camera that is already streaming.
+   * Two cases legitimately need longer:
+   *
+   * - composite/panorama, which pays ffmpeg warmup before the first IDR;
+   * - battery/solar cameras, which may be asleep when the stream is requested
+   *   and take several seconds to wake. These used to get the 5s default, so a
+   *   slow wake-up read as a dead stream and surfaced in HomeKit as "Camera Not
+   *   Responding" (issue #20).
+   *
+   * An explicit `keyframeTimeoutMs` overrides both, for hardware that needs
+   * something other than these defaults.
+   */
+  private resolveStreamTimeouts(isComposite: boolean): {
+    keyframeTimeoutMs?: number;
+    idleTeardownMs?: number;
+  } {
+    const configured = this.opts.keyframeTimeoutMs;
+    if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) {
+      return { keyframeTimeoutMs: configured, idleTeardownMs: configured };
+    }
+
+    if (isComposite || this.opts.batteryCamera) {
+      return { keyframeTimeoutMs: 20_000, idleTeardownMs: 20_000 };
+    }
+
+    // Leave the library defaults in place.
+    return {};
+  }
+
+  /**
    * Unified RFC4571 server accessor.
    *
    * `stream-utils` does not parse `streamKey`. It forwards the `streamKey` as `requestedId`
@@ -438,10 +482,7 @@ export class StreamManager {
           requestedId: streamKey,
           // Pass deviceId for dedicated socket sessions (avoids stream interference)
           ...(this.opts.deviceId ? { deviceId: this.opts.deviceId } : {}),
-          // Composite can take a bit longer (ffmpeg warmup + first IDR).
-          ...(isComposite
-            ? { keyframeTimeoutMs: 20_000, idleTeardownMs: 20_000 }
-            : {}),
+          ...this.resolveStreamTimeouts(isComposite),
           ...(compositeOptions ? { compositeOptions } : {}),
           ...(compositeApis ? { compositeApis } : {}),
         });

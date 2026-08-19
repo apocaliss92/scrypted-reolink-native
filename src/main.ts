@@ -34,6 +34,7 @@ import { randomBytes } from "crypto";
 import { BaseBaichuanClass } from "./baichuan-base";
 import { ReolinkCamera } from "./camera";
 import {
+  assertConstructible,
   createBaichuanApi,
   normalizeUid,
   type BaichuanTransport,
@@ -265,7 +266,19 @@ class ReolinkNativePlugin
     this.console.log(
       `[AutoDetect] Starting device type detection for ${ipAddress}...${forceType ? ` (forcing type: ${forceType})` : ""}`,
     );
-    const { autoDetectDeviceType } = await import("@apocaliss92/nodelink-js");
+    const nodelink = await import("@apocaliss92/nodelink-js");
+    // See assertConstructible: turns issue #22's minified "pu is not a
+    // constructor" into something that names the symbol that went missing.
+    assertConstructible(
+      nodelink.ReolinkBaichuanApi,
+      "ReolinkBaichuanApi",
+      "@apocaliss92/nodelink-js",
+    );
+    const autoDetectDeviceType = assertConstructible(
+      nodelink.autoDetectDeviceType,
+      "autoDetectDeviceType",
+      "@apocaliss92/nodelink-js",
+    );
     // 'Auto', 'NVR', 'Battery Camera', 'Regular Camera'
     const normalizedForceType = forceType?.trim().toLowerCase();
     const mode: AutoDetectMode =
