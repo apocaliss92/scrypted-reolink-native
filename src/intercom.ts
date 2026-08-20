@@ -79,6 +79,53 @@ function isAudioDecoderFlag(arg: string | undefined): boolean {
   return arg === "-acodec" || arg === "-c:a" || /^-c:a:\d+$/.test(arg ?? "");
 }
 
+/**
+ * Explain a talkback session that produced no audio.
+ *
+ * The old message — "no PCM data received" — was true of two failures with
+ * opposite causes, and field logs contain both:
+ *
+ *  - ffmpeg opened the RTSP input and then nothing arrived on it. The relay
+ *    works; the client is not sending microphone audio.
+ *  - ffmpeg never opened the input. `Input #0` is emitted by dump_format()
+ *    once avformat_open_input has finished OPTIONS/DESCRIBE/SETUP/PLAY and
+ *    needs no RTP to appear, so its absence means the handshake with
+ *    Scrypted's local relay never completed. The client's microphone was
+ *    never even reached.
+ *
+ * stderr is never fully buffered in C, so "ffmpeg printed nothing" is a real
+ * observation rather than output lost to a pipe buffer on SIGKILL.
+ */
+export function describeStartupFailure(props: {
+  inputOpenedAtMs?: number | undefined;
+  stderrBytes: number;
+}): string {
+  const { inputOpenedAtMs, stderrBytes } = props;
+
+  if (inputOpenedAtMs !== undefined) {
+    return (
+      `ffmpeg opened the RTSP input after ${inputOpenedAtMs}ms but no audio ever arrived on it. ` +
+      `The relay is working, so the client is not sending microphone audio — check that the ` +
+      `app/browser actually captured the mic (on iOS the orange recording indicator should be ` +
+      `lit) and that it is on a secure origin, since navigator.mediaDevices is unavailable over ` +
+      `plain http.`
+    );
+  }
+
+  if (stderrBytes > 0) {
+    return (
+      `ffmpeg never opened the RTSP input (${stderrBytes} bytes of stderr, no "Input #" banner). ` +
+      `It did not get past the RTSP handshake with Scrypted's local relay.`
+    );
+  }
+
+  return (
+    `ffmpeg produced no output whatsoever. It is stuck before the RTSP input opened, i.e. the ` +
+    `handshake with Scrypted's local relay never completed — the client audio itself was never ` +
+    `reached, so this is not a microphone problem.`
+  );
+}
+
 export class ReolinkBaichuanIntercom {
   private session:
     | Awaited<ReturnType<ReolinkBaichuanApi["createDedicatedTalkSession"]>>
@@ -104,6 +151,9 @@ export class ReolinkBaichuanIntercom {
   private lastBacklogClampLogAtMs = 0;
   private droppedBytesSinceLog = 0;
   private clampCountSinceLog = 0;
+  /** Session totals, reported once when ffmpeg exits. */
+  private payloadsSent = 0;
+  private totalDroppedBytes = 0;
   /** s16 mono byte rate of the talk session, used to report drops in ms. */
   private pcmBytesPerSecond = 0;
 
@@ -181,6 +231,8 @@ export class ReolinkBaichuanIntercom {
       this.lastBacklogClampLogAtMs = 0;
       this.droppedBytesSinceLog = 0;
       this.clampCountSinceLog = 0;
+      this.payloadsSent = 0;
+      this.totalDroppedBytes = 0;
       this.pumping = false;
       this.pumpPromise = undefined;
 
@@ -251,6 +303,31 @@ export class ReolinkBaichuanIntercom {
 
       logger.log("Intercom ffmpeg decode args", ffmpegArgs);
 
+      // Diagnostics for the "talkback silently does nothing" reports.
+      //
+      // The field logs show two shapes that the old single message
+      // ("no PCM data received") could not tell apart, and which have opposite
+      // causes:
+      //
+      //  - ffmpeg prints nothing at all for the whole window. `Input #0` is
+      //    emitted by dump_format() once avformat_open_input has completed
+      //    OPTIONS/DESCRIBE/SETUP/PLAY, and needs no RTP to appear, so silence
+      //    means the RTSP handshake with Scrypted's relay never completed.
+      //    (stderr is never fully buffered in C, so this is real output, not a
+      //    flush artefact.)
+      //  - ffmpeg opens the input and then sits there. The relay is fine and
+      //    the client simply is not sending microphone audio.
+      //
+      // These are logged unconditionally rather than behind the debug flag: a
+      // talk session is short and user-initiated, so the volume is bounded, and
+      // the whole point is to have the answer already in the log the reporter
+      // sends rather than asking them to reproduce with debug enabled.
+      const spawnedAtMs = Date.now();
+      const sinceSpawn = () => Date.now() - spawnedAtMs;
+      let inputOpenedAtMs: number | undefined;
+      let stderrBytes = 0;
+      let pcmBytes = 0;
+
       const ffmpeg = spawn("ffmpeg", ffmpegArgs, {
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -271,8 +348,13 @@ export class ReolinkBaichuanIntercom {
       let receivedFirstPcm = false;
       const startupTimer = setTimeout(() => {
         if (!receivedFirstPcm && this.ffmpeg === ffmpeg) {
+          const diagnosis = describeStartupFailure({
+            inputOpenedAtMs,
+            stderrBytes,
+          });
+
           logger.warn(
-            `Intercom ffmpeg startup timeout (${STARTUP_TIMEOUT_MS}ms): no PCM data received, killing process`,
+            `Intercom ffmpeg startup timeout (${STARTUP_TIMEOUT_MS}ms), killing process. ${diagnosis}`,
           );
           try {
             ffmpeg.kill("SIGKILL");
@@ -285,25 +367,58 @@ export class ReolinkBaichuanIntercom {
       ffmpeg.stdout.on("data", (chunk: Buffer) => {
         if (this.session !== session) return;
         if (!chunk?.length) return;
+        pcmBytes += chunk.length;
         if (!receivedFirstPcm) {
           receivedFirstPcm = true;
           clearTimeout(startupTimer);
-          logger.log("Intercom ffmpeg: first PCM data received");
+          logger.log(
+            `Intercom ffmpeg: first PCM data received after ${sinceSpawn()}ms` +
+              (inputOpenedAtMs !== undefined
+                ? ` (RTSP input opened at ${inputOpenedAtMs}ms)`
+                : ""),
+          );
         }
         this.enqueuePcm(session, chunk, bytesNeeded, blockSize);
       });
 
       let stderrLines = 0;
       ffmpeg.stderr.on("data", (d: Buffer) => {
-        // Avoid spamming logs.
-        if (stderrLines++ < 12) {
-          logger.warn("Intercom ffmpeg", d.toString().trim());
+        stderrBytes += d.length;
+        const text = d.toString();
+
+        // dump_format() runs once the input is open. Recording when that
+        // happened is what separates "the relay never answered" from "the
+        // relay is fine, the client is silent".
+        if (inputOpenedAtMs === undefined && text.includes("Input #")) {
+          inputOpenedAtMs = sinceSpawn();
+          logger.log(
+            `Intercom ffmpeg: RTSP input opened after ${inputOpenedAtMs}ms`,
+          );
+        }
+
+        // Raised from 12: the interesting failures are the quiet ones, and a
+        // truncated tail is exactly what makes them unreadable. Still bounded.
+        if (stderrLines++ < 40) {
+          logger.warn(`Intercom ffmpeg [+${sinceSpawn()}ms]`, text.trim());
         }
       });
 
       ffmpeg.on("exit", (code, signal) => {
         clearTimeout(startupTimer);
-        logger.warn(`Intercom ffmpeg exited code=${code} signal=${signal}`);
+        // One line that says what the session actually did. Today a failed
+        // session and a working one look nearly identical in the log, and
+        // neither reports how much audio moved in either direction.
+        logger.warn(`Intercom ffmpeg exited code=${code} signal=${signal}`, {
+          durationMs: sinceSpawn(),
+          rtspInputOpenedAtMs: inputOpenedAtMs ?? null,
+          pcmBytesFromClient: pcmBytes,
+          pcmMsFromClient: this.pcmBytesPerSecond
+            ? Math.round((pcmBytes / this.pcmBytesPerSecond) * 1000)
+            : null,
+          adpcmPayloadsSentToCamera: this.payloadsSent,
+          droppedPcmBytes: this.totalDroppedBytes,
+          ffmpegStderrBytes: stderrBytes,
+        });
         this.stop().catch(() => {});
       });
 
@@ -464,6 +579,7 @@ export class ReolinkBaichuanIntercom {
       // couple hundred bytes every two seconds, when the real figure is the sum
       // of every clamp in between (issue #17).
       this.droppedBytesSinceLog += dropped;
+      this.totalDroppedBytes += dropped;
       this.clampCountSinceLog++;
 
       const now = Date.now();
@@ -509,6 +625,7 @@ export class ReolinkBaichuanIntercom {
 
           const adpcmChunk = encode(pcmSamples, blockSize);
           await session.sendAudio(adpcmChunk);
+          this.payloadsSent++;
         }
       } catch (e) {
         logger.warn(
