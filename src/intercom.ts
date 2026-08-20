@@ -328,7 +328,33 @@ export class ReolinkBaichuanIntercom {
       let stderrBytes = 0;
       let pcmBytes = 0;
 
-      const ffmpeg = spawn("ffmpeg", ffmpegArgs, {
+      // Resolve ffmpeg through Scrypted rather than trusting PATH.
+      //
+      // This used to be a bare `spawn("ffmpeg", ...)`, and when the binary is
+      // not on the plugin process's PATH the failure is completely silent with
+      // the handlers below: no stdout, no stderr, and no `exit` event — just an
+      // unhandled ENOENT. All the log showed was the startup timer firing ten
+      // seconds later against a process that never existed, which is exactly
+      // the signature two reporters produced on otherwise unrelated systems.
+      //
+      // Scrypted ships its own ffmpeg and its own plugins all resolve it this
+      // way (webrtc/src/rtp-forwarders.ts, homekit camera-recording.ts) — which
+      // is why in the same log, at the same moment, the WebRTC plugin's ffmpeg
+      // transcodes happily while ours produced nothing at all. macOS is the
+      // easiest way to hit it: a GUI-launched app inherits a minimal PATH
+      // without /opt/homebrew/bin or /usr/local/bin.
+      let ffmpegPath = "ffmpeg";
+      try {
+        ffmpegPath = (await sdk.mediaManager.getFFmpegPath()) || "ffmpeg";
+      } catch (e) {
+        logger.warn(
+          "Intercom: could not resolve ffmpeg path from Scrypted, falling back to PATH",
+          e?.message || String(e),
+        );
+      }
+      logger.log(`Intercom ffmpeg path: ${ffmpegPath}`);
+
+      const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
         stdio: ["ignore", "pipe", "pipe"],
       });
 
@@ -363,6 +389,20 @@ export class ReolinkBaichuanIntercom {
           }
         }
       }, STARTUP_TIMEOUT_MS);
+
+      // Without this, a failed spawn emits no exit event and becomes an
+      // unhandled 'error' — the silent failure described above.
+      ffmpeg.on("error", (e: any) => {
+        clearTimeout(startupTimer);
+        logger.error(
+          `Intercom ffmpeg failed to start (${e?.code || "unknown"}): ${e?.message || String(e)}. ` +
+            `Tried to run '${ffmpegPath}'.` +
+            (e?.code === "ENOENT"
+              ? ` The binary was not found — Scrypted's ffmpeg path did not resolve and it is not on this process's PATH.`
+              : ""),
+        );
+        this.stop().catch(() => {});
+      });
 
       ffmpeg.stdout.on("data", (chunk: Buffer) => {
         if (this.session !== session) return;
