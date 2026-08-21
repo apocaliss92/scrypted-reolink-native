@@ -82,25 +82,29 @@ function isAudioDecoderFlag(arg: string | undefined): boolean {
 /**
  * Explain a talkback session that produced no audio.
  *
- * The old message — "no PCM data received" — was true of two failures with
- * opposite causes, and field logs contain both:
+ * Three failures are distinguishable, and they point at three different
+ * owners. The signals come from ffmpeg's verbose output: "Successfully
+ * connected" for the socket, and the `Input #` banner, which dump_format()
+ * emits once avformat_open_input has finished OPTIONS/DESCRIBE/SETUP/PLAY and
+ * which needs no RTP to appear.
  *
- *  - ffmpeg opened the RTSP input and then nothing arrived on it. The relay
- *    works; the client is not sending microphone audio.
- *  - ffmpeg never opened the input. `Input #0` is emitted by dump_format()
- *    once avformat_open_input has finished OPTIONS/DESCRIBE/SETUP/PLAY and
- *    needs no RTP to appear, so its absence means the handshake with
- *    Scrypted's local relay never completed. The client's microphone was
- *    never even reached.
- *
- * stderr is never fully buffered in C, so "ffmpeg printed nothing" is a real
- * observation rather than output lost to a pipe buffer on SIGKILL.
+ *  - input opened, no audio  -> the client is not sending microphone audio;
+ *  - connected, never opened -> Scrypted's relay accepted the socket and never
+ *                               answered the handshake. Verified against a
+ *                               server that accepts and stays silent: ffmpeg
+ *                               waits indefinitely and, at the default log
+ *                               level, prints nothing at all for the whole
+ *                               window — which is exactly what the field logs
+ *                               showed before `-loglevel verbose` was added;
+ *  - never connected         -> the relay address is not reachable from this
+ *                               plugin's process.
  */
 export function describeStartupFailure(props: {
   inputOpenedAtMs?: number | undefined;
+  tcpConnectedAtMs?: number | undefined;
   stderrBytes: number;
 }): string {
-  const { inputOpenedAtMs, stderrBytes } = props;
+  const { inputOpenedAtMs, tcpConnectedAtMs, stderrBytes } = props;
 
   if (inputOpenedAtMs !== undefined) {
     return (
@@ -112,17 +116,26 @@ export function describeStartupFailure(props: {
     );
   }
 
+  if (tcpConnectedAtMs !== undefined) {
+    return (
+      `ffmpeg connected to Scrypted's local relay after ${tcpConnectedAtMs}ms but the relay never ` +
+      `answered the RTSP handshake, so the input never opened. The socket is accepted and then ` +
+      `left unanswered — this is the relay side (Scrypted's WebRTC talkback server), not the ` +
+      `camera, not the microphone, and not this plugin's audio pipeline.`
+    );
+  }
+
   if (stderrBytes > 0) {
     return (
-      `ffmpeg never opened the RTSP input (${stderrBytes} bytes of stderr, no "Input #" banner). ` +
-      `It did not get past the RTSP handshake with Scrypted's local relay.`
+      `ffmpeg never reached Scrypted's local relay (${stderrBytes} bytes of stderr, no TCP ` +
+      `connection and no "Input #" banner). The relay address it was given is not reachable from ` +
+      `this plugin's process.`
     );
   }
 
   return (
-    `ffmpeg produced no output whatsoever. It is stuck before the RTSP input opened, i.e. the ` +
-    `handshake with Scrypted's local relay never completed — the client audio itself was never ` +
-    `reached, so this is not a microphone problem.`
+    `ffmpeg produced no output whatsoever, not even a connection attempt. Expected at least the ` +
+    `verbose TCP lines — if this appears, ffmpeg is not running the arguments logged above.`
   );
 }
 
@@ -325,6 +338,7 @@ export class ReolinkBaichuanIntercom {
       const spawnedAtMs = Date.now();
       const sinceSpawn = () => Date.now() - spawnedAtMs;
       let inputOpenedAtMs: number | undefined;
+      let tcpConnectedAtMs: number | undefined;
       let stderrBytes = 0;
       let pcmBytes = 0;
 
@@ -376,6 +390,7 @@ export class ReolinkBaichuanIntercom {
         if (!receivedFirstPcm && this.ffmpeg === ffmpeg) {
           const diagnosis = describeStartupFailure({
             inputOpenedAtMs,
+            tcpConnectedAtMs,
             stderrBytes,
           });
 
@@ -429,6 +444,16 @@ export class ReolinkBaichuanIntercom {
         // dump_format() runs once the input is open. Recording when that
         // happened is what separates "the relay never answered" from "the
         // relay is fine, the client is silent".
+        // Verbose prints this as soon as the socket is up. It is the fact
+        // that separates an unreachable relay from one that accepts and then
+        // says nothing.
+        if (tcpConnectedAtMs === undefined && text.includes("Successfully connected")) {
+          tcpConnectedAtMs = sinceSpawn();
+          logger.log(
+            `Intercom ffmpeg: TCP connected to the relay after ${tcpConnectedAtMs}ms`,
+          );
+        }
+
         if (inputOpenedAtMs === undefined && text.includes("Input #")) {
           inputOpenedAtMs = sinceSpawn();
           logger.log(
@@ -450,6 +475,7 @@ export class ReolinkBaichuanIntercom {
         // neither reports how much audio moved in either direction.
         logger.warn(`Intercom ffmpeg exited code=${code} signal=${signal}`, {
           durationMs: sinceSpawn(),
+          tcpConnectedAtMs: tcpConnectedAtMs ?? null,
           rtspInputOpenedAtMs: inputOpenedAtMs ?? null,
           pcmBytesFromClient: pcmBytes,
           pcmMsFromClient: this.pcmBytesPerSecond
@@ -774,6 +800,21 @@ export class ReolinkBaichuanIntercom {
 
     return [
       "-hide_banner",
+
+      // Verbose is what makes a failed talkback readable. At the default level
+      // ffmpeg says absolutely nothing while it is stuck opening the RTSP
+      // input — verified against a socket that accepts and never replies:
+      // 10 seconds, zero bytes of stderr. Verbose prints "Starting connection
+      // attempt" and "Successfully connected" up front, which is the one fact
+      // that separates "cannot reach the relay at all" from "connected, but the
+      // relay never answered". Costs a handful of lines on a working session,
+      // and the stderr handler caps the total anyway.
+      //
+      // Deliberately not paired with `-timeout`: it does bound the silent hang
+      // and produce a real error, but it is a socket I/O timeout, so a working
+      // session would abort whenever the client stops sending for that long.
+      "-loglevel",
+      "verbose",
 
       // Pre-input low-latency flags: these MUST be before -i to affect
       // the input demuxer. Placing them after -i only affects output.
