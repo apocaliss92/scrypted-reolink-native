@@ -95,6 +95,7 @@ import {
   type BaichuanConnectionCallbacks,
   type BaichuanConnectionConfig,
 } from "./baichuan-base";
+import { isAdapterPowered } from "./battery-power";
 import { normalizeUid, type BaichuanTransport } from "./connect";
 import {
   convertDebugLogsToApiOptions,
@@ -4543,10 +4544,8 @@ export class ReolinkCamera
     if (batteryInfo.batteryPercent !== undefined) {
       const oldLevel = this.batteryLevel;
       const oldChargeState = this.chargeState;
-      // adapterStatus: "adapter" | "solarPanel" = charging, "none" = not charging
-      const isCharging =
-        batteryInfo.adapterStatus === "adapter" ||
-        batteryInfo.adapterStatus === "solarPanel";
+      // adapterStatus: "adapter" | "ACAdapter" | "solarPanel" = charging, "none" = not charging
+      const isCharging = isAdapterPowered(batteryInfo.adapterStatus);
       const newChargeState = isCharging
         ? ChargeState.Charging
         : ChargeState.NotCharging;
