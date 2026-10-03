@@ -10,10 +10,22 @@ import type {
   SleepStatus,
   StreamSamplingSelection,
 } from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
-import {
+// Value imports must use require: tsconfig module=Node16 rejects
+// `import … with { resolution-mode }` for non-type imports (TS2823).
+const {
   isBatteryAdapterCharging,
   shouldAcceptSleepPushSource,
-} from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
+}: {
+  isBatteryAdapterCharging: (info: {
+    adapterStatus?: string;
+    chargeStatus?: string;
+  }) => boolean;
+  shouldAcceptSleepPushSource: (
+    source: string | undefined,
+    preference: string | undefined,
+    webhookSupported: boolean,
+  ) => boolean;
+} = require("@apocaliss92/nodelink-js");
 import sdk, {
   BinarySensor,
   Camera,
@@ -2277,6 +2289,7 @@ export class ReolinkCamera
         isDoorbell: false,
         hasWirelessChime: false,
         hasPowerSourceSwitch: false,
+        hasBaichuanWebhook: false,
       };
     }
   }
