@@ -10,6 +10,10 @@ import type {
   SleepStatus,
   StreamSamplingSelection,
 } from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
+import {
+  isBatteryAdapterCharging,
+  shouldAcceptSleepPushSource,
+} from "@apocaliss92/nodelink-js" with { "resolution-mode": "import" };
 import sdk, {
   BinarySensor,
   Camera,
@@ -949,6 +953,41 @@ export class ReolinkCamera
       hide: true,
       onPut: async () => {
         await this.refreshEmailPushStatus();
+      },
+    },
+    batterySleepPushMethod: {
+      group: "Battery sleep push",
+      title: "Notification method",
+      description:
+        "Which sleep-time alert transport Scrypted considers. auto = prefer Baichuan HaCfg webhook events when the firmware supports cmd 806, otherwise E-mail Push. webhook / email force a single source. Native Baichuan socket events always pass. Neither SMTP nor HaCfg is written until you click the matching Auto-configure button — so other systems (e.g. Home Assistant) are not overwritten.",
+      type: "string",
+      choices: ["auto", "webhook", "email"],
+      defaultValue: "auto",
+      immediate: true,
+      hide: true,
+      onPut: async () => {
+        await this.refreshBatterySleepPushStatus();
+      },
+    },
+    baichuanWebhookStatus: {
+      group: "Battery sleep push",
+      title: "Status",
+      description:
+        "HaCfg probe result and last Auto-configure push outcome (does not change the camera until you click the button).",
+      type: "string",
+      readonly: true,
+      defaultValue: "Not probed yet",
+      hide: true,
+    },
+    baichuanWebhookAutoConfigure: {
+      group: "Battery sleep push",
+      title: "Auto-configure Baichuan Webhook",
+      description:
+        "Writes HaCfg (cmd 807) so this camera POSTs wake/sleep events to this plugin's Scrypted webhook URL. Manual only — never runs on init, so it will not overwrite another consumer's HaCfg (e.g. Home Assistant).",
+      type: "button",
+      hide: true,
+      onPut: async () => {
+        await this.autoConfigureBaichuanWebhook();
       },
     },
   });
@@ -2531,6 +2570,19 @@ export class ReolinkCamera
         return;
       }
 
+      // Filter Email Push vs HaCfg webhook by user preference. Native
+      // baichuan socket events always pass (source omitted/baichuan).
+      if (
+        !this.shouldAcceptSleepPushEventSource(
+          (ev as { source?: string }).source,
+        )
+      ) {
+        logger.debug(
+          `Ignoring sleep-push event from source=${(ev as any).source} (method=${this.getBatterySleepPushMethodPreference()})`,
+        );
+        return;
+      }
+
       const objects: string[] = [];
       let motion = false;
 
@@ -3237,6 +3289,155 @@ export class ReolinkCamera
    * camera-level subscription stays alive across every reconnect so
    * SMTP motion always finds a listener and lands on `onSimpleEvent`.
    */
+
+  /** User preference for sleep-time push (`auto` / `webhook` / `email`). */
+  getBatterySleepPushMethodPreference(): "auto" | "webhook" | "email" {
+    const v = this.storageSettings.values.batterySleepPushMethod;
+    if (v === "webhook" || v === "email" || v === "auto") return v;
+    return "auto";
+  }
+
+  /** Last HaCfg probe result (cmd 806). Used only for event filtering. */
+  private baichuanWebhookSupportedCached: boolean | undefined;
+
+  /**
+   * Probe HaCfg support and refresh the status row. Does NOT write cmd 807
+   * — configuration is explicit via {@link autoConfigureBaichuanWebhook}.
+   */
+  async refreshBatterySleepPushStatus(): Promise<void> {
+    const logger = this.getBaichuanLogger();
+    if (this.isOnNvr || this.multiFocalDevice || !this.isBattery) return;
+    try {
+      const api = await this.ensureClient();
+      let supported = false;
+      try {
+        supported = await api.probeBaichuanWebhookSupport();
+      } catch (e) {
+        logger.warn(
+          `Battery sleep push: HaCfg probe failed: ${e?.message || String(e)}`,
+        );
+      }
+      this.baichuanWebhookSupportedCached = supported;
+      const pref = this.getBatterySleepPushMethodPreference();
+      const { resolveBatterySleepPushMethod } = await import("./utils");
+      const effective = resolveBatterySleepPushMethod(pref, supported);
+      const prev = String(this.storageSettings.values.baichuanWebhookStatus ?? "");
+      const configuredMatch = prev.match(/Configured →\s*(\S+)/);
+      const configuredPart = configuredMatch
+        ? `Configured → ${configuredMatch[1]}`
+        : supported
+          ? "HaCfg supported — click Auto-configure Baichuan Webhook to arm (overwrites camera HaCfg URL)"
+          : "HaCfg unsupported — use E-mail Push Auto-configure for sleep alerts";
+      this.storageSettings.values.baichuanWebhookStatus =
+        `Listening: ${effective}` +
+        (pref !== effective ? ` (pref=${pref})` : "") +
+        ` · ${configuredPart}`;
+    } catch (e) {
+      const msg = e?.message || String(e);
+      this.storageSettings.values.baichuanWebhookStatus = `Probe error: ${msg}`;
+      logger.warn(`Battery sleep push: status refresh failed: ${msg}`);
+    }
+  }
+
+  /**
+   * Explicitly arm HaCfg (cmd 807) to this plugin's Scrypted webhook URL.
+   * Never called from init — mirrors E-mail Push Auto-configure.
+   */
+  async autoConfigureBaichuanWebhook(): Promise<void> {
+    const logger = this.getBaichuanLogger();
+    if (this.isOnNvr || this.multiFocalDevice || !this.isBattery) {
+      throw new Error(
+        "Baichuan Webhook Auto-configure is only available on standalone battery cameras",
+      );
+    }
+    if (!this.id) throw new Error("Camera has no Scrypted id yet");
+
+    const api = await this.ensureClient();
+    const supported = await api.probeBaichuanWebhookSupport();
+    this.baichuanWebhookSupportedCached = supported;
+    if (!supported) {
+      this.storageSettings.values.baichuanWebhookStatus =
+        "Unsupported (cmd 806 empty) — cannot configure HaCfg";
+      throw new Error(
+        "Camera firmware does not support Baichuan HaCfg webhook (cmd 806)",
+      );
+    }
+
+    const { getBaichuanWebhookUrl } = await import("./utils");
+    const url = await getBaichuanWebhookUrl({
+      deviceId: this.id,
+      plugin: this,
+      logger,
+    });
+    await api.setupBaichuanWebhookToManager({ url });
+    try {
+      await api.subscribeEvents();
+    } catch {
+      /* best-effort */
+    }
+    this.storageSettings.values.baichuanWebhookStatus = `Configured → ${url}`;
+    logger.log(`Baichuan Webhook: Auto-configure armed HaCfg url=${url}`);
+    await this.refreshBatterySleepPushStatus();
+  }
+
+  /** @deprecated Use {@link autoConfigureBaichuanWebhook}. */
+  async armBaichuanWebhook(_options?: { force?: boolean }): Promise<void> {
+    await this.autoConfigureBaichuanWebhook();
+  }
+
+  shouldAcceptSleepPushEventSource(source: string | undefined): boolean {
+    return shouldAcceptSleepPushSource(
+      source as any,
+      this.getBatterySleepPushMethodPreference(),
+      this.baichuanWebhookSupportedCached === true,
+    );
+  }
+
+  /**
+   * Handle an inbound HaCfg POST delivered via the plugin HttpRequestHandler.
+   */
+  handleBaichuanWebhookBody(body: string | undefined): void {
+    const logger = this.getBaichuanLogger();
+    void (async () => {
+      try {
+        const {
+          parseBaichuanWebhookBody,
+          mapBaichuanWebhookToSimpleEvents,
+        } = await import("@apocaliss92/nodelink-js");
+        const parsed = parseBaichuanWebhookBody(body ?? "");
+        if (!parsed || parsed.kind !== "event") {
+          logger.debug?.(
+            `Baichuan Webhook: ignoring non-event body (${(body ?? "").slice(0, 120)})`,
+          );
+          return;
+        }
+        const types = mapBaichuanWebhookToSimpleEvents({
+          event: parsed.event,
+          reason: parsed.reason,
+        });
+        const channel = this.storageSettings.values.rtspChannel ?? 0;
+        const timestamp = Date.now();
+        logger.log(
+          `Baichuan Webhook event=${parsed.event}` +
+            (parsed.reason ? ` reason=${parsed.reason}` : "") +
+            ` → ${types.join(",") || "(none)"}`,
+        );
+        for (const type of types) {
+          this.onSimpleEvent({
+            type,
+            channel,
+            timestamp,
+            source: "baichuanWebhook",
+          } as any);
+        }
+      } catch (e) {
+        logger.warn(
+          `Baichuan Webhook: handle body failed: ${e?.message || String(e)}`,
+        );
+      }
+    })();
+  }
+
   private async subscribeToEmailPushBus(): Promise<void> {
     if (this.emailPushBusOff) return;
     if (this.isOnNvr || this.multiFocalDevice) return;
@@ -3259,7 +3460,8 @@ export class ReolinkCamera
             type: mapped,
             channel,
             timestamp: event.receivedAtMs,
-          });
+            source: "email",
+          } as any);
           // Fan out a generic motion for AI sub-types so motion-only
           // consumers still flip — mirrors lib's per-api behaviour.
           if (mapped !== "motion" && mapped !== "doorbell") {
@@ -3267,7 +3469,8 @@ export class ReolinkCamera
               type: "motion",
               channel,
               timestamp: event.receivedAtMs,
-            });
+              source: "email",
+            } as any);
           }
         } catch (e) {
           logger.warn(
@@ -3966,6 +4169,11 @@ export class ReolinkCamera
                 profile,
                 variant: nativeVariant,
               },
+              // When the cam is on mains / actively charging, tell the
+              // prebuffer mixin HSV pre-roll is allowed despite Battery.
+              ...(this.chargeState === ChargeState.Charging
+                ? { allowBatteryPrebuffer: true }
+                : {}),
             } as any);
           }
         } catch (e) {
@@ -4203,13 +4411,22 @@ export class ReolinkCamera
 
     this.startPeriodicTasks();
 
-    // Subscribe to the lib's email-push bus BEFORE ensureClient so
-    // SMTP motion is never lost during the api's connection window.
-    // Lifetime is tied to the camera (released in `release()`) so it
-    // survives every `cleanupBaichuanApi` cycle on battery cams.
+    // Subscribe to the lib's email-push bus BEFORE/around ensureClient so
+    // SMTP motion is never lost. HaCfg is NEVER auto-armed — use the
+    // Auto-configure Baichuan Webhook button so we don't overwrite HA/etc.
     await this.subscribeToEmailPushBus();
 
     await this.ensureClient();
+
+    if (this.isBattery && !this.isOnNvr && !this.multiFocalDevice) {
+      try {
+        await this.refreshBatterySleepPushStatus();
+      } catch (e) {
+        logger.warn(
+          `Battery sleep push: status probe failed: ${e?.message || String(e)}`,
+        );
+      }
+    }
 
     try {
       await this.updateDeviceInfo();
@@ -4305,6 +4522,13 @@ export class ReolinkCamera
     this.storageSettings.settings.emailPushAutoConfigure.hide = hideEmailPush;
     this.storageSettings.settings.emailPushTest.hide = hideEmailPush;
     this.storageSettings.settings.emailPushRefreshStatus.hide = hideEmailPush;
+    const hideBatterySleepPush = hideEmailPush || !this.isBattery;
+    this.storageSettings.settings.batterySleepPushMethod.hide =
+      hideBatterySleepPush;
+    this.storageSettings.settings.baichuanWebhookStatus.hide =
+      hideBatterySleepPush;
+    this.storageSettings.settings.baichuanWebhookAutoConfigure.hide =
+      hideBatterySleepPush;
     // Show UID and discovery method for UDP cameras (battery or UDP-only like Elite Floodlight WiFi)
     // Hide for NVR children or multifocal lenses (they use parent's connection)
     // const requiresUidSettings =
@@ -4543,10 +4767,10 @@ export class ReolinkCamera
     if (batteryInfo.batteryPercent !== undefined) {
       const oldLevel = this.batteryLevel;
       const oldChargeState = this.chargeState;
-      // adapterStatus: "adapter" | "solarPanel" = charging, "none" = not charging
-      const isCharging =
-        batteryInfo.adapterStatus === "adapter" ||
-        batteryInfo.adapterStatus === "solarPanel";
+      // adapterStatus tokens vary by firmware ("adapter", "ACAdapter",
+      // "solarPanel", …). Use the lib helper so mains + solar + active
+      // charge cycles all count as Charging for Scrypted prebuffer/HSV.
+      const isCharging = isBatteryAdapterCharging(batteryInfo);
       const newChargeState = isCharging
         ? ChargeState.Charging
         : ChargeState.NotCharging;

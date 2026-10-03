@@ -536,6 +536,13 @@ export class EmailPushServerDevice
       `Auto-configuring ${cam.name ?? nativeId} against ${managerHost}:${cfg.port}`,
     );
     try {
+      // Prefer the camera helper so preference flips to `email` and HaCfg
+      // is disarmed — avoids duplicate motion with Baichuan webhook.
+      if (typeof cam.autoConfigureEmailPushFromServer === "function") {
+        await cam.autoConfigureEmailPushFromServer();
+        this.console.log(`  ✓ ${cam.name ?? nativeId}`);
+        return;
+      }
       const api = await cam.ensureClient();
       await api.setupEmailPushToManager(
         {

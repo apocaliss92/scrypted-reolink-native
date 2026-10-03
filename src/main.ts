@@ -701,23 +701,40 @@ class ReolinkNativePlugin
     const url = new URL(`http://localhost${request.url}`);
 
     try {
-      // Parse webhook path: /.../webhook/{type}/{deviceId}/{fileId}
-      // The path may include prefix like /endpoint/@apocaliss92/scrypted-reolink-native/public/webhook/...
+      // Parse webhook path:
+      //   /.../webhook/baichuan/{deviceId}          (HaCfg push — no fileId)
+      //   /.../webhook/{video|thumbnail}/{deviceId}/{fileId}
       const pathParts = url.pathname.split("/").filter((p) => p);
 
-      // Find the index of 'webhook' in the path
       const webhookIndex = pathParts.indexOf("webhook");
-      if (webhookIndex === -1 || pathParts.length < webhookIndex + 4) {
-        response.send("Invalid webhook path", { code: 404 });
+      if (webhookIndex === -1 || pathParts.length < webhookIndex + 3) {
+        response?.send?.("Invalid webhook path", { code: 404 });
         return;
       }
 
-      // Extract type, deviceId, and fileId after 'webhook'
       const type = pathParts[webhookIndex + 1];
       const encodedDeviceId = pathParts[webhookIndex + 2];
+      const deviceId = decodeURIComponent(encodedDeviceId);
+
+      // HaCfg wake/sleep push — short path, no fileId.
+      if (type === "baichuan") {
+        const device = this.camerasMap.get(deviceId);
+        if (!device) {
+          response?.send?.("Device not found", { code: 404 });
+          return;
+        }
+        device.handleBaichuanWebhookBody(request.body);
+        response?.send?.("OK", { code: 200 });
+        return;
+      }
+
+      if (pathParts.length < webhookIndex + 4) {
+        response?.send?.("Invalid webhook path", { code: 404 });
+        return;
+      }
+
       // fileId may contain slashes, so join all remaining parts
       const encodedFileId = pathParts.slice(webhookIndex + 3).join("/");
-      const deviceId = decodeURIComponent(encodedDeviceId);
       let fileId = decodeURIComponent(encodedFileId);
 
       // Restore leading slash if the original fileId had it (we removed it during encoding)

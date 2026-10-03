@@ -645,3 +645,59 @@ export async function handleVideoClipRequest(props: {
 
 export const removeAuthUrls = (streams: ReolinkSupportedStream[]) =>
   streams.map(({ urlWithAuth, ...rest }) => ({ rest }));
+
+
+/** User preference for sleep-time motion/doorbell delivery. */
+export type BatterySleepPushMethod = "auto" | "webhook" | "email";
+
+/** Effective single path after resolving preference + HaCfg probe. */
+export type BatterySleepPushEffective = "webhook" | "email";
+
+/**
+ * Resolve which sleep-push path to arm. Only one path should be active so
+ * HaCfg HTTP and SMTP do not both fire into `onSimpleEvent`.
+ *
+ * - `email` → always e-mail
+ * - `webhook` → always HaCfg (caller must handle unsupported firmware)
+ * - `auto` (default) → HaCfg when probe says supported, else e-mail
+ */
+export function resolveBatterySleepPushMethod(
+  preference: BatterySleepPushMethod | string | undefined,
+  webhookSupported: boolean,
+): BatterySleepPushEffective {
+  if (preference === "email") return "email";
+  if (preference === "webhook") return "webhook";
+  return webhookSupported ? "webhook" : "email";
+}
+
+/**
+ * Local Scrypted webhook URL the camera should POST HaCfg wake/sleep events to.
+ * Prefer the LAN endpoint — the camera cannot reach Scrypted cloud ingress.
+ */
+export async function getBaichuanWebhookUrl(props: {
+  deviceId: string;
+  plugin: ScryptedDeviceBase;
+  logger?: Console;
+}): Promise<string> {
+  const { deviceId, plugin, logger } = props;
+  const log = logger || plugin.console;
+  try {
+    const endpoint = await sdk.endpointManager.getLocalEndpoint(undefined, {
+      public: true,
+    });
+    const endpointUrl = new URL(endpoint);
+    const queryParams = endpointUrl.search;
+    endpointUrl.search = "";
+    const normalizedEndpoint = endpointUrl.toString().endsWith("/")
+      ? endpointUrl.toString()
+      : `${endpointUrl.toString()}/`;
+    const encodedDeviceId = encodeURIComponent(deviceId);
+    return `${normalizedEndpoint}webhook/baichuan/${encodedDeviceId}${queryParams}`;
+  } catch (e) {
+    log.error?.(
+      `[getBaichuanWebhookUrl] Failed for deviceId=${deviceId}`,
+      e?.message || String(e),
+    );
+    throw e;
+  }
+}

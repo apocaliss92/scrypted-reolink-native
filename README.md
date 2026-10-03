@@ -42,6 +42,31 @@ What Auto-configure writes to the camera:
 - The intake is plain TCP; enable **STARTTLS** in the TLS group if you have `cert.pem`/`key.pem` in the configured TLS directory.
 - Since plugin 0.5.27 / `@apocaliss92/nodelink-js 0.4.32` the SMTP motion routes through the same `onSimpleEvent` stream as native Baichuan push — battery cameras flip `motionDetected` reliably even when the api was disconnected at email arrival time, and the snapshot cache is proactively refreshed on each motion so HA / MQTT image entities serve the trigger frame instead of the previous one.
 
+## Battery sleep push (HaCfg webhook / E-mail)
+
+Battery cameras can deliver sleep-time alerts via **Baichuan HaCfg webhook** (HTTP POST to `webhook/baichuan/{deviceId}`) and/or **E-mail Push** (SMTP). Both may stay configured on the camera; Scrypted filters by `event.source` so motion is not duplicated.
+
+### Notification method (plugin ≥ 0.5.67)
+
+Per-camera Settings → **Battery sleep push → Notification method**:
+
+| Value | Events considered |
+|-------|-------------------|
+| `auto` (default) | HaCfg webhook (`source=baichuanWebhook`) when cmd 806 probe succeeds; otherwise E-mail Push (`source=email`) |
+| `webhook` | Only HaCfg webhook events |
+| `email` | Only E-mail Push events |
+
+Native Baichuan socket events (`source=baichuan`) always pass.
+
+### Configuration is manual (never on init)
+
+- **Auto-configure from Email Push Server** — writes SMTP + EmailTask (unchanged)
+- **Auto-configure Baichuan Webhook** — writes HaCfg (cmd 807) to this plugin’s Scrypted URL
+
+Neither runs automatically on camera init, so Scrypted will not overwrite another consumer’s HaCfg (e.g. Home Assistant).
+
+Wired-power Gen2 devices that report `adapterStatus: "ACAdapter"` are treated as charging (`isBatteryAdapterCharging`), which sets `allowBatteryPrebuffer` so HSV/prebuffer-mixin can stay on.
+
 [For requests and bugs](https://github.com/apocaliss92/scrypted-reolink-native)
 
 ☕️ If this extension works well for you, consider buying me a coffee. Thanks!
