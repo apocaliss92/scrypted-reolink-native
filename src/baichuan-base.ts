@@ -502,12 +502,29 @@ export abstract class BaseBaichuanClass extends ScryptedDeviceBase {
       } else {
         // Socket disconnected but API still valid → let the library reconnect
         // the general socket internally (preserves NVR/multifocal flags,
-        // streaming sockets, and all library-side state)
+        // streaming sockets, and all library-side state). Bound like the
+        // new-client path — a wedged TCP connect here used to hang forever.
         try {
           logger.log(
             `General socket lost, reconnecting via ensureConnected (caller: ${caller})`,
           );
-          await this.baichuanApi.ensureConnected();
+          let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              this.baichuanApi.ensureConnected(),
+              new Promise<never>((_, reject) => {
+                timeoutHandle = setTimeout(() => {
+                  reject(
+                    new Error(
+                      `ensureConnected timed out after ${BaseBaichuanClass.ENSURE_CLIENT_TIMEOUT_MS}ms`,
+                    ),
+                  );
+                }, BaseBaichuanClass.ENSURE_CLIENT_TIMEOUT_MS);
+              }),
+            ]);
+          } finally {
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+          }
           return this.baichuanApi;
         } catch (e) {
           logger.log(

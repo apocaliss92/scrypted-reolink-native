@@ -1031,6 +1031,14 @@ export class ReolinkCamera
   protected fetchingStreamsPromise:
     | Promise<UrlMediaStreamOptions[]>
     | undefined;
+  /** When `fetchingStreamsPromise` was created — for hang diagnostics / join warnings. */
+  protected fetchingStreamsStartedAtMs: number | undefined;
+  /**
+   * Bound for a single stream-list enumeration. Same rationale as
+   * `ENSURE_CLIENT_TIMEOUT_MS`: without it a wedged `fetchingStreamsPromise`
+   * pins every later `getVideoStream` (Video Analysis / NVR / WebRTC) forever.
+   */
+  protected static readonly FETCHING_STREAMS_TIMEOUT_MS = 45_000;
   protected lastNetPortCacheAttempt: number = 0;
   protected netPortCacheBackoffMs: number = 5000; // 5 seconds backoff on failure
 
@@ -4061,18 +4069,30 @@ export class ReolinkCamera
 
     // If there's already a fetch in progress, return the existing promise
     if (this.fetchingStreamsPromise) {
+      const ageMs =
+        this.fetchingStreamsStartedAtMs != null
+          ? Date.now() - this.fetchingStreamsStartedAtMs
+          : undefined;
+      if (ageMs != null && ageMs > 30_000) {
+        logger.warn(
+          `getVideoStreamOptions: joining in-flight enumeration that has been pending for ${ageMs}ms`,
+        );
+      } else {
+        logger.debug(
+          `getVideoStreamOptions: joining in-flight enumeration` +
+            (ageMs != null ? ` (pending ${ageMs}ms)` : ""),
+        );
+      }
       return this.fetchingStreamsPromise;
     }
 
     // Create and save the promise
-    this.fetchingStreamsPromise = (async (): Promise<
-      UrlMediaStreamOptions[]
-    > => {
-      try {
-        let streams: UrlMediaStreamOptions[] = [];
-        let enumerationFailed = false;
+    this.fetchingStreamsStartedAtMs = Date.now();
+    const inner = (async (): Promise<UrlMediaStreamOptions[]> => {
+      let streams: UrlMediaStreamOptions[] = [];
+      let enumerationFailed = false;
 
-        const client = await this.ensureClient();
+      const client = await this.ensureClient();
 
         const { rtspChannel, variantType } = this.storageSettings.values;
 
@@ -4256,24 +4276,59 @@ export class ReolinkCamera
             `Stream enumeration did not complete (${streams.length} source(s) found). ` +
               `Not caching — the next request will retry.`,
           );
-        } else {
-          this.cachedVideoStreamOptions = streams;
-        }
-        return streams;
-      } finally {
-        // Always clear the promise when done (success or failure)
-        this.fetchingStreamsPromise = undefined;
+      } else {
+        this.cachedVideoStreamOptions = streams;
       }
+      return streams;
     })();
 
-    return this.fetchingStreamsPromise;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    this.fetchingStreamsPromise = Promise.race([
+      inner,
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          logger.warn(
+            `getVideoStreamOptions: timed out after ${ReolinkCamera.FETCHING_STREAMS_TIMEOUT_MS}ms — releasing so the next attempt can retry`,
+          );
+          reject(
+            new Error(
+              `getVideoStreamOptions timed out after ${ReolinkCamera.FETCHING_STREAMS_TIMEOUT_MS}ms`,
+            ),
+          );
+        }, ReolinkCamera.FETCHING_STREAMS_TIMEOUT_MS);
+      }),
+    ]);
+
+    try {
+      return await this.fetchingStreamsPromise;
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      this.fetchingStreamsPromise = undefined;
+      this.fetchingStreamsStartedAtMs = undefined;
+      inner.catch(() => {
+        // losing side of the race — already reported
+      });
+    }
   }
 
   async getVideoStream(vso: RequestMediaStreamOptions): Promise<MediaObject> {
     if (!vso) throw new Error("video streams not set up or no longer exists.");
 
-    const vsos = await this.getVideoStreamOptions();
     const logger = this.getBaichuanLogger();
+    const cachedCount = this.cachedVideoStreamOptions?.length ?? 0;
+    const pendingAgeMs =
+      this.fetchingStreamsStartedAtMs != null
+        ? Date.now() - this.fetchingStreamsStartedAtMs
+        : undefined;
+    logger.log(
+      `getVideoStream: enter` +
+        ` cached=${cachedCount}` +
+        ` pendingFetch=${this.fetchingStreamsPromise ? "yes" : "no"}` +
+        (pendingAgeMs != null ? ` pendingAgeMs=${pendingAgeMs}` : "") +
+        ` requestedId='${vso?.id ?? ""}'`,
+    );
+
+    const vsos = await this.getVideoStreamOptions();
 
     logger.debug(
       `Available streams: ${vsos?.map((s) => s.id).join(", ") || "none"}`,
