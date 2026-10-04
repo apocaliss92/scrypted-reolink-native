@@ -46,17 +46,19 @@ What Auto-configure writes to the camera:
 
 Battery cameras can deliver sleep-time alerts via **Baichuan HaCfg webhook** (HTTP POST to `webhook/baichuan/{deviceId}`) and/or **E-mail Push** (SMTP). Both may stay configured on the camera; Scrypted filters by `event.source` so motion is not duplicated.
 
-### Notification method (plugin ≥ 0.5.67)
+### Notification method (plugin ≥ 0.5.69)
 
 Per-camera Settings → **Battery sleep push → Notification method**:
 
 | Value | Events considered |
 |-------|-------------------|
-| `auto` (default) | HaCfg webhook (`source=baichuanWebhook`) when cmd 806 probe succeeds; otherwise E-mail Push (`source=email`) |
+| `auto` (default) | Accept both Email and HaCfg until the first real HaCfg delivery (wake/cmd 33); then prefer webhook. If cmd 806 probe fails, Email only |
 | `webhook` | Only HaCfg webhook events |
 | `email` | Only E-mail Push events |
 
 Native Baichuan socket events (`source=baichuan`) always pass.
+
+Wired Power doorbells often forward **cmd 33** AlarmEvent XML instead of wake/sleep — the plugin maps `AItype=other` (+ `status=none`) to motion.
 
 ### Configuration is manual (never on init)
 

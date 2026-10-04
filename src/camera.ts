@@ -23,7 +23,9 @@ const {
   shouldAcceptSleepPushSource: (
     source: string | undefined,
     preference: string | undefined,
-    webhookSupported: boolean,
+    options:
+      | boolean
+      | { webhookSupported: boolean; webhookDeliverySeen?: boolean },
   ) => boolean;
 } = require("@apocaliss92/nodelink-js");
 import sdk, {
@@ -3398,16 +3400,23 @@ export class ReolinkCamera
     await this.autoConfigureBaichuanWebhook();
   }
 
+  /** Set after the first non-empty HaCfg delivery (wake or cmd 33). */
+  private baichuanWebhookDeliverySeen = false;
+
   shouldAcceptSleepPushEventSource(source: string | undefined): boolean {
     return shouldAcceptSleepPushSource(
       source as any,
       this.getBatterySleepPushMethodPreference(),
-      this.baichuanWebhookSupportedCached === true,
+      {
+        webhookSupported: this.baichuanWebhookSupportedCached === true,
+        webhookDeliverySeen: this.baichuanWebhookDeliverySeen,
+      },
     );
   }
 
   /**
    * Handle an inbound HaCfg POST delivered via the plugin HttpRequestHandler.
+   * Accepts wake/sleep envelopes and Wired Power cmd 33 AlarmEvent forwards.
    */
   handleBaichuanWebhookBody(body: string | undefined): void {
     const logger = this.getBaichuanLogger();
@@ -3415,29 +3424,56 @@ export class ReolinkCamera
       try {
         const {
           parseBaichuanWebhookBody,
-          mapBaichuanWebhookToSimpleEvents,
+          mapBaichuanWebhookParsedToSimpleEvents,
         } = await import("@apocaliss92/nodelink-js");
         const parsed = parseBaichuanWebhookBody(body ?? "");
-        if (!parsed || parsed.kind !== "event") {
+        if (!parsed) {
           logger.debug?.(
-            `Baichuan Webhook: ignoring non-event body (${(body ?? "").slice(0, 120)})`,
+            `Baichuan Webhook: ignoring unparseable body (${(body ?? "").slice(0, 120)})`,
           );
           return;
         }
-        const types = mapBaichuanWebhookToSimpleEvents({
-          event: parsed.event,
-          reason: parsed.reason,
-        });
+        const types = mapBaichuanWebhookParsedToSimpleEvents(parsed);
+        if (!types.length) {
+          logger.debug?.(
+            `Baichuan Webhook: no mapped types for kind=${parsed.kind}` +
+              (parsed.kind === "cmd" ? ` cmd=${parsed.cmdId}` : ` event=${(parsed as any).event}`),
+          );
+          return;
+        }
+        this.baichuanWebhookDeliverySeen = true;
         const channel = this.storageSettings.values.rtspChannel ?? 0;
         const timestamp = Date.now();
+        const label =
+          parsed.kind === "event"
+            ? `event=${parsed.event}` +
+              (parsed.reason ? ` reason=${parsed.reason}` : "")
+            : `cmd=${parsed.cmdId}`;
         logger.log(
-          `Baichuan Webhook event=${parsed.event}` +
-            (parsed.reason ? ` reason=${parsed.reason}` : "") +
-            ` → ${types.join(",") || "(none)"}`,
+          `Baichuan Webhook ${label} → ${types.join(",")}`,
         );
         for (const type of types) {
           this.onSimpleEvent({
             type,
+            channel,
+            timestamp,
+            source: "baichuanWebhook",
+          } as any);
+        }
+        // Fan out motion for AI object types (people/vehicle/…).
+        if (
+          types.some(
+            (t) =>
+              t !== "motion" &&
+              t !== "doorbell" &&
+              t !== "awake" &&
+              t !== "sleeping" &&
+              t !== "other",
+          ) &&
+          !types.includes("motion")
+        ) {
+          this.onSimpleEvent({
+            type: "motion",
             channel,
             timestamp,
             source: "baichuanWebhook",

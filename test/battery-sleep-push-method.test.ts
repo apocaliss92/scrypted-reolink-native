@@ -21,13 +21,25 @@ describe("resolveBatterySleepPushMethod", () => {
 
 describe("shouldAcceptSleepPushSource (lib)", () => {
   it("never filters native baichuan", () => {
-    expect(shouldAcceptSleepPushSource("baichuan", "email", true)).toBe(true);
+    expect(
+      shouldAcceptSleepPushSource("baichuan", "email", {
+        webhookSupported: true,
+      }),
+    ).toBe(true);
   });
 
-  it("auto with HaCfg support accepts webhook and drops email", () => {
-    expect(shouldAcceptSleepPushSource("baichuanWebhook", "auto", true)).toBe(
-      true,
-    );
-    expect(shouldAcceptSleepPushSource("email", "auto", true)).toBe(false);
+  it("auto keeps email until a HaCfg delivery has been seen", () => {
+    expect(
+      shouldAcceptSleepPushSource("email", "auto", {
+        webhookSupported: true,
+        webhookDeliverySeen: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldAcceptSleepPushSource("email", "auto", {
+        webhookSupported: true,
+        webhookDeliverySeen: true,
+      }),
+    ).toBe(false);
   });
 });
