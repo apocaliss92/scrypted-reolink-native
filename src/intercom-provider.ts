@@ -1,6 +1,5 @@
-import sdk, {
+import {
   MixinProvider,
-  ScryptedDevice,
   ScryptedDeviceBase,
   ScryptedDeviceType,
   ScryptedInterface,
@@ -14,81 +13,17 @@ import { ReolinkNativeIntercomMixin } from "./intercom-mixin";
 
 export const INTERCOM_PROVIDER_NATIVE_ID = "reolink-native-intercom";
 
-const AUTO_INCLUDE_TOKEN = "v1";
-
 export class ReolinkNativeIntercom
   extends ScryptedDeviceBase
   implements MixinProvider, Settings
 {
   currentMixinsMap: Record<string, ReolinkNativeIntercomMixin> = {};
   plugin: ReolinkNativePlugin;
-  private hasEnabledMixin: Record<string, string> = {};
-  private pluginsComponent: Promise<any>;
 
-  constructor(nativeId: string) {
-    super(nativeId);
-
-    try {
-      this.hasEnabledMixin = JSON.parse(
-        this.storage.getItem("hasEnabledMixin") || "{}",
-      );
-    } catch {
-      this.hasEnabledMixin = {};
-    }
-
-    this.pluginsComponent = sdk.systemManager.getComponent("plugins");
-
-    // Watch for new device descriptors to auto-enable on newly added devices
-    sdk.systemManager.listen((eventSource, eventDetails) => {
-      if (
-        eventDetails.eventInterface !== ScryptedInterface.ScryptedDevice ||
-        eventDetails.property
-      )
-        return;
-      this.maybeEnableMixin(eventSource);
-    });
-
-    // Check all existing devices on startup
-    process.nextTick(() => {
-      for (const id of Object.keys(sdk.systemManager.getSystemState())) {
-        const device = sdk.systemManager.getDeviceById(id);
-        this.maybeEnableMixin(device);
-      }
-    });
-  }
-
-  private async maybeEnableMixin(device: ScryptedDevice) {
-    if (!device || device.mixins?.includes(this.id)) return;
-
-    // Already auto-enabled once with this token
-    if (this.hasEnabledMixin[device.id] === AUTO_INCLUDE_TOKEN) return;
-
-    const match = await this.canMixin(device.type, device.interfaces);
-    if (!match) return;
-
-    // Only auto-enable for cameras provided by our own plugin
-    const camera = this.plugin?.camerasMap?.get(device.id);
-    if (!camera) return;
-
-    // Only auto-enable if the camera actually supports intercom.
-    // If capabilities aren't loaded yet, skip — we'll be called again
-    // when the device descriptor updates after capability detection.
-    const caps = camera.cachedCapabilities;
-    if (!caps) return;
-    if (!caps.hasIntercom) return;
-
-    this.console.log(`Auto-enabling intercom mixin for ${device.name}`);
-    const mixins = (device.mixins || []).slice();
-    mixins.push(this.id);
-    const plugins = await this.pluginsComponent;
-    await plugins.setMixins(device.id, mixins);
-
-    this.hasEnabledMixin[device.id] = AUTO_INCLUDE_TOKEN;
-    this.storage.setItem(
-      "hasEnabledMixin",
-      JSON.stringify(this.hasEnabledMixin),
-    );
-  }
+  // No auto-enable: cameras from this plugin implement Intercom on the device
+  // itself (see getDeviceInterfaces), which is order-independent with respect
+  // to the WebRTC mixin. The mixin stays available — and keeps working where a
+  // previous version enabled it — mainly for cameras from @scrypted/reolink.
 
   async canMixin(
     type: ScryptedDeviceType,

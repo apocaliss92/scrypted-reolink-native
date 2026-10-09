@@ -79,11 +79,29 @@ export const getDeviceInterfaces = (props: {
       hasFloodlight,
       hasPir,
       hasBattery,
+      hasIntercom,
       isDoorbell,
     } = capabilities;
 
     if (hasPtz) {
       interfaces.push(ScryptedInterface.PanTiltZoom);
+    }
+    if (hasIntercom) {
+      // Declared on the device itself rather than left to the intercom mixin.
+      // Scrypted hands each mixin only the interfaces contributed *before* it
+      // in the chain, and the WebRTC mixin picks the audio direction from that
+      // list (plugins/webrtc/src/main.ts):
+      //
+      //     const hasIntercom = this.mixinDeviceInterfaces.includes(ScryptedInterface.Intercom);
+      //     ...
+      //     hasIntercom ? 'sendrecv' : 'recvonly',
+      //
+      // With the intercom mixin ordered after WebRTC (the default, since it is
+      // auto-enabled by appending), the browser is told `recvonly`, never
+      // attaches the microphone, and startIntercom is never called — nothing is
+      // logged anywhere. Provided by the device, Intercom is in the base every
+      // mixin starts from, so chain order stops mattering.
+      interfaces.push(ScryptedInterface.Intercom);
     }
     interfaces.push(ScryptedInterface.ObjectDetector);
     if (hasSiren || hasFloodlight || hasPir)

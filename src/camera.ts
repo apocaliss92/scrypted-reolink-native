@@ -34,6 +34,7 @@ import sdk, {
   ChargeState,
   Device,
   DeviceProvider,
+  Intercom,
   MediaObject,
   MediaStreamUrl,
   ObjectDetectionTypes,
@@ -120,8 +121,14 @@ import {
   getDebugLogChoices,
 } from "./debug-options";
 import { EMAIL_PUSH_SERVER_NATIVE_ID } from "./email-push-server-device";
+import {
+  parseTalkModeSetting,
+  ReolinkBaichuanIntercom,
+  talkModeSetting,
+  type IntercomHost,
+} from "./intercom";
 import ReolinkNativePlugin from "./main";
-import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
+import { ReolinkNativeMultiFocalDevice } from "./multifocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
 import { ReolinkPtzPresets } from "./presets";
 import {
@@ -171,7 +178,8 @@ export class ReolinkCamera
     VideoTextOverlays,
     BinarySensor,
     Reboot,
-    VideoClips
+    VideoClips,
+    Intercom
 {
   private readonly onSimpleEventBound = (ev: ReolinkSimpleEvent) =>
     this.onSimpleEvent(ev);
@@ -253,6 +261,39 @@ export class ReolinkCamera
         "Order preference for video streams. Default order varies by camera type.",
       defaultValue: "Default",
       choices: ["Default", "Native", "RTSP", "RTMP"],
+    },
+    // Same tuning knobs as the intercom mixin. Hidden until the camera reports
+    // two-way audio (see refreshDeviceState), so other models are unaffected.
+    intercomBlocksPerPayload: {
+      group: "Intercom",
+      title: "Blocks Per Payload",
+      description:
+        "Lower reduces latency (more packets). Typical: 1-4. Requires restarting talk session to take effect.",
+      type: "number",
+      defaultValue: 1,
+      hide: true,
+    },
+    intercomMaxBacklogMs: {
+      group: "Intercom",
+      title: "Max Backlog (ms)",
+      description:
+        "Maximum PCM backlog before dropping old audio to cap latency. Higher improves stability on slow systems but increases latency. Typical: 80-250. Requires restarting talk session to take effect.",
+      type: "number",
+      defaultValue: 120,
+      hide: true,
+    },
+    intercomGain: {
+      group: "Intercom",
+      title: "Gain",
+      description:
+        "Output gain multiplier applied before encoding. 1.0 = normal, 2.0 ≈ +6dB, 0.5 ≈ -6dB. Requires restarting talk session to take effect.",
+      type: "number",
+      defaultValue: 1.0,
+      hide: true,
+    },
+    intercomAudioStreamMode: {
+      ...talkModeSetting,
+      hide: true,
     },
     keyframeTimeoutMs: {
       title: "Keyframe Timeout (ms)",
@@ -3772,6 +3813,7 @@ export class ReolinkCamera
   }
 
   async release() {
+    this.stopIntercom().catch(() => {});
     this.statusPollTimer && clearInterval(this.statusPollTimer);
     this.sleepCheckTimer && clearInterval(this.sleepCheckTimer);
     this.batteryUpdateTimer && clearInterval(this.batteryUpdateTimer);
@@ -4403,6 +4445,82 @@ export class ReolinkCamera
     }
   }
 
+  /**
+   * Native two-way audio, advertised when the camera reports `hasIntercom`
+   * (see getDeviceInterfaces for why it has to be on the device and not only
+   * on the intercom mixin). Where that mixin is still enabled it wraps this
+   * device and takes these calls; this is the path when it is not.
+   */
+  private intercom: ReolinkBaichuanIntercom | undefined;
+
+  private buildIntercomHost(): IntercomHost {
+    const self = this;
+    const clamp = (v: unknown, lo: number, hi: number, fallback: number) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : fallback;
+    };
+
+    return {
+      get blocksPerPayload() {
+        return Math.floor(
+          clamp(self.storageSettings.values.intercomBlocksPerPayload, 1, 8, 1),
+        );
+      },
+      get outputGain() {
+        return clamp(self.storageSettings.values.intercomGain, 0.1, 10, 1.0);
+      },
+      get maxBacklogMs() {
+        return clamp(
+          self.storageSettings.values.intercomMaxBacklogMs,
+          20,
+          5000,
+          120,
+        );
+      },
+      get audioStreamMode() {
+        return parseTalkModeSetting(
+          self.storageSettings.values.intercomAudioStreamMode,
+        );
+      },
+      get channel() {
+        return self.storageSettings.values.rtspChannel;
+      },
+      get isBatteryCamera() {
+        return self.isBattery;
+      },
+      get deviceId() {
+        return self.nativeId;
+      },
+      get logger() {
+        return self.getBaichuanLogger();
+      },
+      // ensureClient routes NVR channels and lenses to their parent's API,
+      // which is the connection `channel` is meaningful on.
+      ensureApi: () => self.ensureClient(),
+      withRetry: (fn) => self.withBaichuanRetry(fn),
+    };
+  }
+
+  async startIntercom(media: MediaObject): Promise<void> {
+    const logger = this.getBaichuanLogger();
+    logger.log(
+      `Intercom start requested (channel=${this.storageSettings.values.rtspChannel}, battery=${!!this.isBattery})`,
+    );
+    // One engine per camera: start() stops any session already running, so a
+    // second startIntercom replaces the first instead of stacking on it.
+    this.intercom ||= new ReolinkBaichuanIntercom(this.buildIntercomHost());
+    try {
+      await this.intercom.start(media);
+    } catch (e) {
+      logger.error("Intercom start failed", e?.message || String(e));
+      throw e;
+    }
+  }
+
+  async stopIntercom(): Promise<void> {
+    await this.intercom?.stop();
+  }
+
   async ensureClient(): Promise<ReolinkBaichuanApi> {
     if (this.nvrDevice) {
       return await this.nvrDevice.ensureClient();
@@ -4445,6 +4563,12 @@ export class ReolinkCamera
       this.classes = objects;
       this.presets = presets;
       this.ptzPresets.setCachedPtzPresets(presets);
+
+      const hideIntercom = !capabilities?.hasIntercom;
+      this.storageSettings.settings.intercomBlocksPerPayload.hide = hideIntercom;
+      this.storageSettings.settings.intercomMaxBacklogMs.hide = hideIntercom;
+      this.storageSettings.settings.intercomGain.hide = hideIntercom;
+      this.storageSettings.settings.intercomAudioStreamMode.hide = hideIntercom;
 
       try {
         const { interfaces, type } = getDeviceInterfaces({

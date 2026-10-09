@@ -29,7 +29,7 @@ import {
   getDebugLogChoices,
 } from "./debug-options";
 import ReolinkNativePlugin from "./main";
-import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
+import { ReolinkNativeMultiFocalDevice } from "./multifocal";
 import {
   batteryCameraSuffix,
   batteryMultifocalSuffix,

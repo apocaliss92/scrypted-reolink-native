@@ -47,7 +47,7 @@ import {
   INTERCOM_PROVIDER_NATIVE_ID,
   ReolinkNativeIntercom,
 } from "./intercom-provider";
-import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
+import { ReolinkNativeMultiFocalDevice } from "./multifocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
 import {
   batteryCameraSuffix,

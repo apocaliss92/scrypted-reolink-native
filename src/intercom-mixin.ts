@@ -15,7 +15,12 @@ import {
 import { StorageSettings } from "@scrypted/sdk/storage-settings";
 import type { BaichuanTransport } from "./connect";
 import type { ReolinkNativeIntercom } from "./intercom-provider";
-import { ReolinkBaichuanIntercom, type IntercomHost } from "./intercom";
+import {
+  parseTalkModeSetting,
+  ReolinkBaichuanIntercom,
+  talkModeSetting,
+  type IntercomHost,
+} from "./intercom";
 import type { ReolinkCamera } from "./camera";
 
 export class ReolinkNativeIntercomMixin
@@ -49,6 +54,7 @@ export class ReolinkNativeIntercomMixin
       type: "number",
       defaultValue: 1.0,
     },
+    intercomAudioStreamMode: talkModeSetting,
   });
 
   constructor(
@@ -109,6 +115,11 @@ export class ReolinkNativeIntercomMixin
           const v = Number(self.storageSettings.values.intercomMaxBacklogMs);
           return Number.isFinite(v) ? Math.max(20, Math.min(5000, v)) : 120;
         },
+        get audioStreamMode() {
+          return parseTalkModeSetting(
+            self.storageSettings.values.intercomAudioStreamMode,
+          );
+        },
         get channel() {
           return internalCamera.storageSettings.values.rtspChannel;
         },
@@ -144,6 +155,11 @@ export class ReolinkNativeIntercomMixin
       get maxBacklogMs() {
         const v = Number(self.storageSettings.values.intercomMaxBacklogMs);
         return Number.isFinite(v) ? Math.max(20, Math.min(5000, v)) : 120;
+      },
+      get audioStreamMode() {
+        return parseTalkModeSetting(
+          self.storageSettings.values.intercomAudioStreamMode,
+        );
       },
       get channel() {
         return 0;
