@@ -22,6 +22,7 @@ import {
   type BaichuanConnectionCallbacks,
   type BaichuanConnectionConfig,
 } from "./baichuan-base";
+import { normalizeDoorbellCapabilities } from "./capabilities";
 import { ReolinkCamera } from "./camera";
 import {
   convertDebugLogsToApiOptions,
@@ -29,7 +30,7 @@ import {
   getDebugLogChoices,
 } from "./debug-options";
 import ReolinkNativePlugin from "./main";
-import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
+import { ReolinkNativeMultiFocalDevice } from "./multifocal";
 import {
   batteryCameraSuffix,
   batteryMultifocalSuffix,
@@ -668,7 +669,9 @@ export class ReolinkNativeNvrDevice
     try {
       await baichuanApi.login();
       ({ capabilities, objects, presets } =
-        await baichuanApi.getDeviceCapabilities(entry.rtspChannel));
+        normalizeDoorbellCapabilities(
+          await baichuanApi.getDeviceCapabilities(entry.rtspChannel),
+        ));
     } finally {
       // Ensure the temporary socket used for adoption is not leaked.
       try {

@@ -113,6 +113,7 @@ import {
   type BaichuanConnectionCallbacks,
   type BaichuanConnectionConfig,
 } from "./baichuan-base";
+import { normalizeDoorbellCapabilities } from "./capabilities";
 import { normalizeUid, type BaichuanTransport } from "./connect";
 import {
   convertDebugLogsToApiOptions,
@@ -121,7 +122,7 @@ import {
 } from "./debug-options";
 import { EMAIL_PUSH_SERVER_NATIVE_ID } from "./email-push-server-device";
 import ReolinkNativePlugin from "./main";
-import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
+import { ReolinkNativeMultiFocalDevice } from "./multifocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
 import { ReolinkPtzPresets } from "./presets";
 import {
@@ -2273,8 +2274,10 @@ export class ReolinkCamera
         if (this.cachedCapabilities) return this.cachedCapabilities;
 
         const client = await this.ensureClient();
-        const { capabilities, debug } = await client.getDeviceCapabilities(
-          this.storageSettings.values.rtspChannel ?? 0,
+        const { capabilities, debug } = normalizeDoorbellCapabilities(
+          await client.getDeviceCapabilities(
+            this.storageSettings.values.rtspChannel ?? 0,
+          ),
         );
         this.cachedCapabilities = capabilities;
         logger.debug("Device capabilities retrieved", debug);
@@ -4440,8 +4443,11 @@ export class ReolinkCamera
       const { capabilities, abilities, support, presets, objects } =
         await this.withBaichuanRetry(async () => {
           const api = await this.ensureClient();
-          return await api.getDeviceCapabilities(channel);
+          return normalizeDoorbellCapabilities(
+            await api.getDeviceCapabilities(channel),
+          );
         });
+      this.cachedCapabilities = capabilities;
       this.classes = objects;
       this.presets = presets;
       this.ptzPresets.setCachedPtzPresets(presets);

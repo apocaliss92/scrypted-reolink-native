@@ -13,6 +13,7 @@ import sdk, {
   ScryptedDeviceType,
   Settings,
 } from "@scrypted/sdk";
+import { normalizeDoorbellCapabilities } from "./capabilities";
 import { CameraType, ReolinkCamera } from "./camera";
 import ReolinkNativePlugin from "./main";
 import { ReolinkNativeNvrDevice } from "./nvr";
@@ -102,8 +103,9 @@ export class ReolinkNativeMultiFocalDevice
       const { username, password, ipAddress, uid, rtspChannel } =
         this.storageSettings.values;
 
-      const { capabilities, objects, presets } =
-        await api.getDeviceCapabilities(rtspChannel);
+      const { capabilities, objects, presets } = normalizeDoorbellCapabilities(
+        await api.getDeviceCapabilities(rtspChannel),
+      );
       const multifocalInfo = await api.getDualLensChannelInfo(rtspChannel, {
         onNvr: !!this.nvrDevice,
       });

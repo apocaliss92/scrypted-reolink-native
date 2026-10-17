@@ -32,6 +32,7 @@ import sdk, {
 } from "@scrypted/sdk";
 import { randomBytes } from "crypto";
 import { BaseBaichuanClass } from "./baichuan-base";
+import { normalizeDoorbellCapabilities } from "./capabilities";
 import { ReolinkCamera } from "./camera";
 import {
   assertConstructible,
@@ -47,7 +48,7 @@ import {
   INTERCOM_PROVIDER_NATIVE_ID,
   ReolinkNativeIntercom,
 } from "./intercom-provider";
-import { ReolinkNativeMultiFocalDevice } from "./multiFocal";
+import { ReolinkNativeMultiFocalDevice } from "./multifocal";
 import { ReolinkNativeNvrDevice } from "./nvr";
 import {
   batteryCameraSuffix,
@@ -321,8 +322,9 @@ class ReolinkNativePlugin
       const isUdp = detection.transport === "udp";
 
       // Get capabilities to check if device has battery
-      const { capabilities, objects, presets } =
-        await detectedApi.getDeviceCapabilities();
+      const { capabilities, objects, presets } = normalizeDoorbellCapabilities(
+        await detectedApi.getDeviceCapabilities(),
+      );
 
       const hasBattery = capabilities?.hasBattery === true;
 
@@ -412,8 +414,9 @@ class ReolinkNativePlugin
     // Use the API that was successfully used for detection
     try {
       const rtspChannel = 0;
-      const { capabilities, objects, presets } =
-        await detectedApi.getDeviceCapabilities(rtspChannel);
+      const { capabilities, objects, presets } = normalizeDoorbellCapabilities(
+        await detectedApi.getDeviceCapabilities(rtspChannel),
+      );
 
       const { interfaces, type } = getDeviceInterfaces({
         capabilities,
